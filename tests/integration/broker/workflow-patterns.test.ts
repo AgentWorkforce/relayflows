@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import { workflow, type RelayYamlConfig } from '@agent-relay/sdk/workflows';
+import { workflow, type RelayYamlConfig } from '@relayflows/core';
 import { checkPrerequisites } from './utils/broker-harness.js';
 import { WorkflowRunnerHarness, type WorkflowRunResult } from './utils/workflow-harness.js';
 import {

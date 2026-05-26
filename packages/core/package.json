@@ -1,0 +1,54 @@
+{
+  "name": "@relayflows/core",
+  "version": "0.1.0",
+  "description": "Workflow engine and types for Agent Relay workflows",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js",
+      "default": "./dist/schema.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgentWorkforce/relayflows.git",
+    "directory": "packages/core"
+  },
+  "dependencies": {
+    "@agent-relay/cloud": "^7.1.1",
+    "@agent-relay/config": "^7.1.1",
+    "@agent-relay/sdk": "^7.1.1",
+    "@relaycast/sdk": "^1.1.0",
+    "@sinclair/typebox": "^0.34.48",
+    "agent-trajectories": "^0.6.0",
+    "chalk": "^4.1.2",
+    "ignore": "^7.0.5",
+    "listr2": "^10.2.1",
+    "yaml": "^2.7.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
+  }
+}

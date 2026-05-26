@@ -28,8 +28,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import type { RelayYamlConfig } from '@agent-relay/sdk/workflows';
-import { WorkflowRunner } from '@agent-relay/sdk/workflows';
+import type { RelayYamlConfig } from '@relayflows/core';
+import { WorkflowRunner } from '@relayflows/core';
 import { checkPrerequisites, ensureApiKey, resolveBinaryPath, uniqueSuffix } from './utils/broker-harness.js';
 import { WorkflowRunnerHarness } from './utils/workflow-harness.js';
 import {

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import type { RelayYamlConfig, VerificationCheck } from '@agent-relay/sdk/workflows';
+import type { RelayYamlConfig, VerificationCheck } from '@relayflows/core';
 import { checkPrerequisites } from './utils/broker-harness.js';
 import { WorkflowRunnerHarness } from './utils/workflow-harness.js';
 import {

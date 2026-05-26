@@ -29,7 +29,7 @@
  *   agent-relay run workflows/relay-clean-room-e2e-validation.ts
  */
 
-import { workflow } from '@agent-relay/sdk/workflows';
+import { workflow } from '@relayflows/core';
 import { ClaudeModels } from '@agent-relay/config';
 
 const REPO_ROOT = process.cwd();

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 import type { BrokerEvent } from '@agent-relay/sdk';
-import type { DryRunReport, WorkflowEvent } from '@agent-relay/sdk/workflows';
+import type { DryRunReport, WorkflowEvent } from '@relayflows/core';
 import type { TrajectoryFile, WorkflowRunResult, WorkflowRunnerHarness } from './workflow-harness.js';
 
 function getStepEvent(result: WorkflowRunResult, type: string, stepName: string): WorkflowEvent | undefined {

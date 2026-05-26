@@ -4,8 +4,8 @@ import path from 'node:path';
 
 import type { BrokerEvent } from '@agent-relay/sdk';
 import { ensureApiKey, resolveBinaryPath } from './broker-harness.js';
-import { type RelayYamlConfig, type VariableContext, type WorkflowRunRow } from '@agent-relay/sdk/workflows';
-import { WorkflowRunner, type WorkflowEvent } from '@agent-relay/sdk/workflows';
+import { type RelayYamlConfig, type VariableContext, type WorkflowRunRow } from '@relayflows/core';
+import { WorkflowRunner, type WorkflowEvent } from '@relayflows/core';
 
 export interface WorkflowRunResult {
   run: WorkflowRunRow;

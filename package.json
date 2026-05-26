@@ -1,0 +1,21 @@
+{
+  "name": "relayflows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Relay workflow engine and CLI",
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/cli"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/cli",
+    "typecheck": "npm run typecheck --workspace=packages/core && npm run typecheck --workspace=packages/cli",
+    "test": "npm run test --workspace=packages/core"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
+  }
+}
