@@ -13,8 +13,12 @@ program
   .command('run <workflow>')
   .description('Run a workflow YAML file')
   .option('--dry-run', 'parse and validate without executing')
-  .action(async (workflow, opts) => {
-    await runWorkflow({ file: workflow, dryRun: opts.dryRun });
+  .action(async (workflow: string, opts: { dryRun?: boolean }) => {
+    if (opts.dryRun) {
+      await runWorkflow(workflow, { dryRun: true });
+    } else {
+      await runWorkflow(workflow);
+    }
   });
 
 program.parseAsync(process.argv);
