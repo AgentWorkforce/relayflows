@@ -5,8 +5,8 @@
  * completed/, have chapters recorded, and capture agent names correctly.
  *
  * Run:
- *   npx tsc -p tests/integration/broker/tsconfig.json
- *   node --test tests/integration/broker/dist/trajectory.test.js
+ *   npx tsc -p tests/integration/tsconfig.json
+ *   node --test tests/integration/dist/trajectory.test.js
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

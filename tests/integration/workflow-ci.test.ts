@@ -5,8 +5,8 @@
  * CLI) so they can run in CI without API keys or real AI CLI binaries.
  *
  * Run:
- *   npx tsc -p tests/integration/broker/tsconfig.json
- *   node --test tests/integration/broker/dist/workflow-ci.test.js
+ *   npx tsc -p tests/integration/tsconfig.json
+ *   node --test tests/integration/dist/workflow-ci.test.js
  *
  * No special environment variables required (auto-provisions ephemeral workspace).
  */

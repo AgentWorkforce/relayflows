@@ -13,7 +13,7 @@
  *      meaning steps without an explicit timeoutMs ran with no deadline.
  *
  * Run from a terminal (not inside Claude Code):
- *   node --test tests/integration/broker/dist/workflow-noninteractive.test.js
+ *   node --test tests/integration/dist/workflow-noninteractive.test.js
  */
 
 import assert from 'node:assert/strict';

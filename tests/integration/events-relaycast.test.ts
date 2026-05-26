@@ -5,8 +5,8 @@
  * that Relaycast channels receive workflow lifecycle messages when configured.
  *
  * Run:
- *   npx tsc -p tests/integration/broker/tsconfig.json
- *   node --test tests/integration/broker/dist/events-relaycast.test.js
+ *   npx tsc -p tests/integration/tsconfig.json
+ *   node --test tests/integration/dist/events-relaycast.test.js
  */
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';

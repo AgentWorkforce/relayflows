@@ -13,13 +13,13 @@
  *     and passes the token via --config / RELAY_AGENT_TOKEN env var.
  *
  * Run (from repo root):
- *   npx tsc -p tests/integration/broker/tsconfig.json
+ *   npx tsc -p tests/integration/tsconfig.json
  *   RELAY_INTEGRATION_REAL_CLI=1 \
- *     node --test tests/integration/broker/dist/workflow-relay-tools.test.js
+ *     node --test tests/integration/dist/workflow-relay-tools.test.js
  *
  * Individual CLI flavours can be forced:
  *   RELAY_INTEGRATION_REAL_CLI=1 RELAY_TEST_CLI=codex \
- *     node --test tests/integration/broker/dist/workflow-relay-tools.test.js
+ *     node --test tests/integration/dist/workflow-relay-tools.test.js
  */
 
 import assert from 'node:assert/strict';

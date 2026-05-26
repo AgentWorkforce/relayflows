@@ -11,8 +11,8 @@
  *   3. Non-interactive timeout failure — diagnosed as tool-discovery anti-pattern
  *
  * Run:
- *   npx tsc -p tests/integration/broker/tsconfig.json
- *   node --test tests/integration/broker/dist/trajectory-quality.test.js
+ *   npx tsc -p tests/integration/tsconfig.json
+ *   node --test tests/integration/dist/trajectory-quality.test.js
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

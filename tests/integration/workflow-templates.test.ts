@@ -9,8 +9,8 @@
  * running resource-heavy tests in regular CI.
  *
  * Run:
- *   npx tsc -p tests/integration/broker/tsconfig.json
- *   RELAY_INTEGRATION_REAL_CLI=1 node --test tests/integration/broker/dist/workflow-templates.test.js
+ *   npx tsc -p tests/integration/tsconfig.json
+ *   RELAY_INTEGRATION_REAL_CLI=1 node --test tests/integration/dist/workflow-templates.test.js
  *
  * Requires:
  *   RELAY_API_KEY — Relaycast workspace key (auto-provisioned if missing)
