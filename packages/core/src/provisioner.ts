@@ -23,11 +23,13 @@ import {
 } from '@agent-relay/cloud';
 import {
   createWorkspaceIfNeeded,
-  ensureRelayfileMount,
-  type MountHandle,
   seedWorkflowAcls,
   seedWorkspace,
-} from '@relayfile/sdk';
+} from '@relayfile/sdk/workspace-seeder';
+import {
+  ensureRelayfileMount,
+  type MountHandle,
+} from '@relayfile/sdk/workspace-mount';
 
 // ── Workflow-specific provisioning types ────────────────────────────────────
 
