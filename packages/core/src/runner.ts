@@ -54,7 +54,7 @@ import {
   resolveAgentPermissions,
   type LocalJwksSigningKey,
   type MountHandle,
-} from '@agent-relay/sdk';
+} from '@agent-relay/cloud-sdk';
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
 import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';

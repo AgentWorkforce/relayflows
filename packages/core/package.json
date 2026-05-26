@@ -54,6 +54,7 @@
   "dependencies": {
     "@agent-relay/browser-primitive": "^7.1.1",
     "@agent-relay/cloud": "^7.1.1",
+    "@agent-relay/cloud-sdk": "^7.1.1",
     "@agent-relay/config": "^7.1.1",
     "@agent-relay/github-primitive": "^7.1.1",
     "@agent-relay/sdk": "^7.1.1",
