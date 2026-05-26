@@ -16,6 +16,21 @@
       "import": "./dist/schema.js",
       "default": "./dist/schema.js"
     },
+    "./integrations/github": {
+      "types": "./dist/integrations/github.d.ts",
+      "import": "./dist/integrations/github.js",
+      "default": "./dist/integrations/github.js"
+    },
+    "./integrations/slack": {
+      "types": "./dist/integrations/slack.d.ts",
+      "import": "./dist/integrations/slack.js",
+      "default": "./dist/integrations/slack.js"
+    },
+    "./integrations/browser": {
+      "types": "./dist/integrations/browser.d.ts",
+      "import": "./dist/integrations/browser.js",
+      "default": "./dist/integrations/browser.js"
+    },
     "./builtin-templates/*": "./dist/builtin-templates/*",
     "./package.json": "./package.json"
   },
@@ -37,9 +52,12 @@
     "directory": "packages/core"
   },
   "dependencies": {
+    "@agent-relay/browser-primitive": "^7.1.1",
     "@agent-relay/cloud": "^7.1.1",
     "@agent-relay/config": "^7.1.1",
+    "@agent-relay/github-primitive": "^7.1.1",
     "@agent-relay/sdk": "^7.1.1",
+    "@agent-relay/slack-primitive": "^7.1.1",
     "@relaycast/sdk": "^1.1.0",
     "@sinclair/typebox": "^0.34.48",
     "agent-trajectories": "^0.6.0",
