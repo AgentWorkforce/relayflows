@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, readFileSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { WorkflowTrajectory, type StepOutcome } from '../workflows/trajectory.js';
+import { WorkflowTrajectory, type StepOutcome } from '../trajectory.js';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 

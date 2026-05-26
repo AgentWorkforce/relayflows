@@ -17,8 +17,8 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { WorkflowDb } from '../workflows/runner.js';
-import type { RelayYamlConfig, WorkflowRunRow, WorkflowStepRow } from '../workflows/types.js';
+import type { WorkflowDb } from '../runner.js';
+import type { RelayYamlConfig, WorkflowRunRow, WorkflowStepRow } from '../types.js';
 
 // ── Mock fetch to prevent real HTTP calls (Relaycast provisioning) ───────────
 

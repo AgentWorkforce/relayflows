@@ -45,15 +45,16 @@ import {
   CustomStepsParseError,
   CustomStepResolutionError,
 } from './custom-steps.js';
-import { provisionWorkflowAgents, resolveAgentPermissions } from '@agent-relay/sdk/provisioner';
+import { provisionWorkflowAgents } from './provisioner.js';
 import {
   createLocalJwksKeyPair,
   importPrivateKeyPem,
   RELAYAUTH_JWT_KID_ENV,
   RELAYAUTH_JWT_PRIVATE_KEY_PEM_ENV,
+  resolveAgentPermissions,
   type LocalJwksSigningKey,
-} from '@agent-relay/sdk/provisioner/local-jwks';
-import type { MountHandle } from '@agent-relay/sdk/provisioner/mount';
+  type MountHandle,
+} from '@agent-relay/sdk';
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
 import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';
