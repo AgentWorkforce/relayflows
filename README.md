@@ -1,22 +1,6 @@
-# relayflows
+# Relayflows
 
 Workflow engine and CLI for Agent Relay. Orchestrate multi-agent workflows using YAML, TypeScript, or Python. Define agents, wire up dependencies, and let the runner handle execution, retries, and verification.
-
-## Packages
-
-- `packages/core` — workflow types, runner, builder, executors. Published as `@relayflows/core`.
-- `packages/cli` — `relayflows` command-line interface. Published as `@relayflows/cli`.
-
-## Layout
-
-- `workflows/` — production workflow definitions
-- `examples/` — example workflow YAMLs and TypeScript builders
-- `tests/` — workflow YAMLs and integration tests
-- `docs/` — published docs (CLI usage, workflow reference)
-
-## Relationship to relay
-
-relayflows consumes the broker exclusively through `@agent-relay/sdk`. It does not invoke the broker binary directly. If a needed capability isn't exposed by the SDK, that gap is closed by adding to the SDK in the `relay` repo, not by reaching into broker internals here.
 
 ## Quick Start
 
