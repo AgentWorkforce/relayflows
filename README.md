@@ -1,4 +1,7 @@
-# Relayflows
+<img src="./repo-banner.png" alt="relayflows">
+<a href="https://www.npmjs.com/package/@relayflows/core"><img alt="npm" src="https://img.shields.io/npm/v/@relayflows/core"></a>
+<a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+<br/><br/>
 
 Workflow engine and CLI for Agent Relay. Orchestrate multi-agent workflows using YAML, TypeScript, or Python. Define agents, wire up dependencies, and let the runner handle execution, retries, and verification.
 
