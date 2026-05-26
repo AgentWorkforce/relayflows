@@ -54,12 +54,12 @@
   "dependencies": {
     "@agent-relay/browser-primitive": "^7.1.1",
     "@agent-relay/cloud": "^7.1.1",
-    "@agent-relay/cloud-sdk": "^7.1.1",
     "@agent-relay/config": "^7.1.1",
     "@agent-relay/github-primitive": "^7.1.1",
     "@agent-relay/sdk": "^7.1.1",
     "@agent-relay/slack-primitive": "^7.1.1",
     "@relaycast/sdk": "^1.1.0",
+    "@relayfile/sdk": "^0.8.0",
     "@sinclair/typebox": "^0.34.48",
     "agent-trajectories": "^0.6.0",
     "chalk": "^4.1.2",

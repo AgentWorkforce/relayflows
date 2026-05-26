@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createLocalJwksKeyPair } from '@agent-relay/cloud-sdk';
+import { createLocalJwksKeyPair } from '@agent-relay/cloud';
 import { provisionWorkflowAgents } from '../provisioner.js';
 
 async function createWorkspace(): Promise<{ dir: string; cleanup: () => Promise<void> }> {

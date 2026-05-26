@@ -53,8 +53,8 @@ import {
   RELAYAUTH_JWT_PRIVATE_KEY_PEM_ENV,
   resolveAgentPermissions,
   type LocalJwksSigningKey,
-  type MountHandle,
-} from '@agent-relay/cloud-sdk';
+} from '@agent-relay/cloud';
+import type { MountHandle } from '@relayfile/sdk';
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
 import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';

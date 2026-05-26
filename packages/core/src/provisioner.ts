@@ -1,12 +1,11 @@
 /**
  * Workflow agent provisioning.
  *
- * Composes cloud-sdk primitives (token minting, scope compilation, workspace
- * seeding, mount management, audit logging) into a single
- * `provisionWorkflowAgents` orchestration suitable for workflow runners.
- *
- * `@agent-relay/cloud-sdk` owns the cross-product identity/permission/provisioning
- * layer; this file owns the workflow-specific orchestration on top.
+ * Composes identity primitives (token minting, scope compilation, JWKS,
+ * audit logging from @agent-relay/cloud) with relayfile-server primitives
+ * (workspace seeding, ACL seeding, mount lifecycle from @relayfile/sdk)
+ * into a single `provisionWorkflowAgents` orchestration suitable for
+ * workflow runners.
  */
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -15,18 +14,20 @@ import {
   type AgentPermissions,
   type CompiledAgentPermissions,
   compileAgentScopes,
-  createWorkspaceIfNeeded,
   DEFAULT_ADMIN_AGENT_NAME,
   DEFAULT_ADMIN_SCOPES,
-  ensureRelayfileMount,
   getDefaultPermissionAuditPath,
   type LocalJwksSigningKey,
-  type MountHandle,
   mintAgentToken,
   PermissionAuditLog,
+} from '@agent-relay/cloud';
+import {
+  createWorkspaceIfNeeded,
+  ensureRelayfileMount,
+  type MountHandle,
   seedWorkflowAcls,
   seedWorkspace,
-} from '@agent-relay/cloud-sdk';
+} from '@relayfile/sdk';
 
 // ── Workflow-specific provisioning types ────────────────────────────────────
 
@@ -406,4 +407,4 @@ export async function provisionWorkflowAgents(config: WorkflowProvisionConfig): 
 // Backwards-compatible re-export so callers that previously did
 // `import { resolveAgentPermissions } from '@agent-relay/sdk/provisioner'`
 // can swap to `@relayflows/core`.
-export { resolveAgentPermissions } from '@agent-relay/cloud-sdk';
+export { resolveAgentPermissions } from '@agent-relay/cloud';

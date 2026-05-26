@@ -5,7 +5,8 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createLocalJwksKeyPair, ensureRelayfileMount } from '@agent-relay/cloud-sdk';
+import { createLocalJwksKeyPair } from '@agent-relay/cloud';
+import { ensureRelayfileMount } from '@relayfile/sdk';
 import { provisionWorkflowAgents } from '../provisioner.js';
 
 const tempDirs: string[] = [];
