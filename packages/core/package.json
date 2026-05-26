@@ -15,10 +15,13 @@
       "types": "./dist/schema.d.ts",
       "import": "./dist/schema.js",
       "default": "./dist/schema.js"
-    }
+    },
+    "./builtin-templates/*": "./dist/builtin-templates/*",
+    "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run build:assets",
+    "build:assets": "mkdir -p dist/builtin-templates && cp src/builtin-templates/*.yaml dist/builtin-templates/ && cp src/schema.json dist/ 2>/dev/null || true",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
