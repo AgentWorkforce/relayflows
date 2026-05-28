@@ -6,7 +6,10 @@
   "type": "module",
   "workspaces": [
     "packages/core",
-    "packages/cli"
+    "packages/cli",
+    "packages/github-primitive",
+    "packages/slack-primitive",
+    "packages/browser-primitive"
   ],
   "scripts": {
     "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/cli",
