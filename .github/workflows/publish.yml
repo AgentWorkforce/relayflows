@@ -11,6 +11,9 @@ on:
           - all
           - core
           - cli
+          - github-primitive
+          - slack-primitive
+          - browser-primitive
         default: 'all'
       version:
         description: 'Version bump type'
@@ -123,6 +126,9 @@ jobs:
             const packagePaths = [
               'packages/core/package.json',
               'packages/cli/package.json',
+              'packages/github-primitive/package.json',
+              'packages/slack-primitive/package.json',
+              'packages/browser-primitive/package.json',
             ];
 
             for (const pkgPath of packagePaths) {
@@ -146,6 +152,9 @@ jobs:
         run: |
           npm run build --workspace=packages/core
           npm run build --workspace=packages/cli
+          npm run build --workspace=packages/github-primitive
+          npm run build --workspace=packages/slack-primitive
+          npm run build --workspace=packages/browser-primitive
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -157,6 +166,12 @@ jobs:
             packages/core/dist/
             packages/cli/package.json
             packages/cli/dist/
+            packages/github-primitive/package.json
+            packages/github-primitive/dist/
+            packages/slack-primitive/package.json
+            packages/slack-primitive/dist/
+            packages/browser-primitive/package.json
+            packages/browser-primitive/dist/
           retention-days: 1
 
   publish-packages:
@@ -173,6 +188,12 @@ jobs:
             path: packages/core
           - package: cli
             path: packages/cli
+          - package: github-primitive
+            path: packages/github-primitive
+          - package: slack-primitive
+            path: packages/slack-primitive
+          - package: browser-primitive
+            path: packages/browser-primitive
 
     steps:
       - name: Checkout code
@@ -237,6 +258,9 @@ jobs:
           case "${{ github.event.inputs.package }}" in
             core) echo "path=packages/core" >> "$GITHUB_OUTPUT" ;;
             cli) echo "path=packages/cli" >> "$GITHUB_OUTPUT" ;;
+            github-primitive) echo "path=packages/github-primitive" >> "$GITHUB_OUTPUT" ;;
+            slack-primitive) echo "path=packages/slack-primitive" >> "$GITHUB_OUTPUT" ;;
+            browser-primitive) echo "path=packages/browser-primitive" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "Unsupported package: ${{ github.event.inputs.package }}" >&2
               exit 1
@@ -288,7 +312,10 @@ jobs:
           git add \
             package.json \
             packages/core/package.json \
-            packages/cli/package.json
+            packages/cli/package.json \
+            packages/github-primitive/package.json \
+            packages/slack-primitive/package.json \
+            packages/browser-primitive/package.json
 
           if ! git diff --staged --quiet; then
             git commit -m "chore(release): v${NEW_VERSION}"
@@ -309,11 +336,17 @@ jobs:
             ### Packages
             - `@relayflows/core@${{ needs.build.outputs.new_version }}`
             - `@relayflows/cli@${{ needs.build.outputs.new_version }}`
+            - `@agent-relay/github-primitive@${{ needs.build.outputs.new_version }}`
+            - `@agent-relay/slack-primitive@${{ needs.build.outputs.new_version }}`
+            - `@agent-relay/browser-primitive@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash
             npm install @relayflows/core@${{ needs.build.outputs.new_version }}
             npm install -g @relayflows/cli@${{ needs.build.outputs.new_version }}
+            npm install @agent-relay/github-primitive@${{ needs.build.outputs.new_version }}
+            npm install @agent-relay/slack-primitive@${{ needs.build.outputs.new_version }}
+            npm install @agent-relay/browser-primitive@${{ needs.build.outputs.new_version }}
             ```
 
             ### Publish Details
