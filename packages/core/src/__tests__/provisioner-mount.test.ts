@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createLocalJwksKeyPair } from '@agent-relay/cloud';
+import { createLocalJwksKeyPair } from '../provisioner/compiler.js';
 import { ensureRelayfileMount } from '@relayfile/sdk/workspace-mount';
 import { provisionWorkflowAgents } from '../provisioner.js';
 

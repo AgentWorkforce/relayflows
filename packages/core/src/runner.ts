@@ -53,7 +53,7 @@ import {
   RELAYAUTH_JWT_PRIVATE_KEY_PEM_ENV,
   resolveAgentPermissions,
   type LocalJwksSigningKey,
-} from '@agent-relay/cloud';
+} from './provisioner/compiler.js';
 import type { MountHandle } from '@relayfile/sdk/workspace-mount';
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
 import { executeApiStep } from './api-executor.js';

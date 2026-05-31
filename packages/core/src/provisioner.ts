@@ -20,7 +20,7 @@ import {
   type LocalJwksSigningKey,
   mintAgentToken,
   PermissionAuditLog,
-} from '@agent-relay/cloud';
+} from './provisioner/compiler.js';
 import {
   createWorkspaceIfNeeded,
   seedWorkflowAcls,
@@ -409,4 +409,4 @@ export async function provisionWorkflowAgents(config: WorkflowProvisionConfig): 
 // Backwards-compatible re-export so callers that previously did
 // `import { resolveAgentPermissions } from '@agent-relay/sdk/provisioner'`
 // can swap to `@relayflows/core`.
-export { resolveAgentPermissions } from '@agent-relay/cloud';
+export { resolveAgentPermissions } from './provisioner/compiler.js';

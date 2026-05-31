@@ -150,11 +150,11 @@ jobs:
 
       - name: Build packages
         run: |
-          npm run build --workspace=packages/core
-          npm run build --workspace=packages/cli
           npm run build --workspace=packages/github-primitive
           npm run build --workspace=packages/slack-primitive
           npm run build --workspace=packages/browser-primitive
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/cli
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

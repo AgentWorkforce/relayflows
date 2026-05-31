@@ -38,7 +38,7 @@
     "build": "tsc && npm run build:assets",
     "build:assets": "mkdir -p dist/builtin-templates && cp src/builtin-templates/*.yaml dist/builtin-templates/ && cp src/schema.json dist/ 2>/dev/null || true",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "files": [
     "dist"
