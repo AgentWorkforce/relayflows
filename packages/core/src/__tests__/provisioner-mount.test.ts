@@ -76,23 +76,21 @@ afterEach(async () => {
 describe('ensureRelayfileMount', () => {
   it('runs initial sync, starts the watcher, and removes the mount on stop', async () => {
     const binaryPath = await createFakeMountBinary();
-    const mountPoint = path.join(await makeTempDir('relayfile-mount-target-'), 'workspace');
 
     const mount = await ensureRelayfileMount({
       binaryPath,
       relayfileUrl: 'http://127.0.0.1:8080',
       workspace: 'rw_test',
       token: 'test-token',
-      mountPoint,
     });
 
     expect(mount.pid).toBeGreaterThan(0);
-    expect(existsSync(path.join(mountPoint, 'seeded.txt'))).toBe(true);
-    expect(await waitForPath(path.join(mountPoint, 'live.txt'))).toBe(true);
+    expect(existsSync(path.join(mount.mountPoint, 'seeded.txt'))).toBe(true);
+    expect(await waitForPath(path.join(mount.mountPoint, 'live.txt'))).toBe(true);
 
     await mount.stop();
 
-    expect(existsSync(mountPoint)).toBe(false);
+    expect(existsSync(mount.mountPoint)).toBe(false);
   });
 });
 

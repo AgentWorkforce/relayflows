@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { WorkflowDb } from '../runner.js';
 import type { RelayYamlConfig, WorkflowRunRow, WorkflowStepRow } from '../types.js';
-import type { ProvisionResult, WorkflowProvisionConfig } from '../../provisioner/types.js';
+import type { ProvisionResult, WorkflowProvisionConfig } from '../provisioner.js';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/permission-test.yaml', import.meta.url));
 
@@ -124,8 +124,8 @@ const mockResolveAgentPermissions = vi.fn(
     )
 );
 
-vi.mock('../../provisioner/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../provisioner/index.js')>();
+vi.mock('../provisioner.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../provisioner.js')>();
   return {
     ...actual,
     provisionWorkflowAgents: mockProvisionWorkflowAgents,
@@ -228,9 +228,13 @@ const mockRelayInstance = {
   listAgentsRaw: vi.fn().mockResolvedValue([]),
 };
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/sdk')>();
+  return {
+    ...actual,
+    AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
+  };
+});
 
 const { WorkflowRunner } = await import('../runner.js');
 const { formatDryRunReport } = await import('../dry-run-format.js');
@@ -393,7 +397,7 @@ describe('WorkflowRunner permissions integration', () => {
         expect.objectContaining({
           agent: 'writer',
           access: 'readwrite',
-          writePaths: 1,
+          writePaths: 3,
         }),
         expect.objectContaining({
           agent: 'admin-lead',

@@ -111,8 +111,19 @@ export function compileAgentScopes(options: CompileAgentScopesOptions): Compiled
   const yamlWritePatterns = permissions.files?.write ?? [];
   const yamlDenyPatterns = permissions.files?.deny ?? [];
 
+  const inheritedDeniedSet = new Set(matchingFiles(files, inheritedDenyPatterns));
+  const yamlDeniedSet = new Set(matchingFiles(files, yamlDenyPatterns));
+  const yamlAllowedSet = new Set([
+    ...matchingFiles(files, yamlReadPatterns),
+    ...matchingFiles(files, yamlWritePatterns),
+  ]);
+  const deniedSet = new Set<string>();
+  for (const file of files) {
+    if (yamlDeniedSet.has(file) || (inheritedDeniedSet.has(file) && !yamlAllowedSet.has(file))) {
+      deniedSet.add(file);
+    }
+  }
   const deniedPatterns = [...inheritedDenyPatterns, ...yamlDenyPatterns];
-  const deniedSet = new Set(matchingFiles(files, deniedPatterns));
   const readonlySet = new Set<string>();
   const readwriteSet = new Set<string>();
 
@@ -131,12 +142,13 @@ export function compileAgentScopes(options: CompileAgentScopesOptions): Compiled
   }
 
   for (const file of matchingFiles(files, inheritedReadonlyPatterns)) {
-    if (!deniedSet.has(file) && !readwriteSet.has(file)) {
+    if (!deniedSet.has(file)) {
+      readwriteSet.delete(file);
       readonlySet.add(file);
     }
   }
 
-  for (const file of matchingFiles(files, yamlReadPatterns)) {
+  for (const file of yamlAllowedSet) {
     if (!deniedSet.has(file) && !readwriteSet.has(file)) {
       readonlySet.add(file);
     }

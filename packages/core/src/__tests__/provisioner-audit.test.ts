@@ -1,8 +1,7 @@
-import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import { expect, test } from 'vitest';
 
 import { createLocalJwksKeyPair } from '../provisioner/compiler.js';
 import { provisionWorkflowAgents } from '../provisioner.js';
@@ -46,17 +45,17 @@ test('provisionWorkflowAgents writes a permission audit without token values', a
       }>;
     };
 
-    assert.ok(auditJson.entries.length >= 3);
-    assert.deepEqual(
-      auditJson.entries.map((entry) => `${entry.agentName}:${entry.action}`),
-      ['worker:resolve', 'worker:mint', 'relay-admin:mint']
-    );
-    assert.equal(
-      auditJson.entries[1]?.details.jwtPath,
+    expect(auditJson.entries.length).toBeGreaterThanOrEqual(3);
+    expect(auditJson.entries.map((entry) => `${entry.agentName}:${entry.action}`)).toEqual([
+      'worker:resolve',
+      'worker:mint',
+      'relay-admin:mint',
+    ]);
+    expect(auditJson.entries[1]?.details.jwtPath).toBe(
       path.join(workspace.dir, '.relay', 'tokens', 'worker.jwt')
     );
-    assert.ok(!auditRaw.includes(result.agents.worker.token));
-    assert.ok(!auditRaw.includes(result.adminToken));
+    expect(auditRaw).not.toContain(result.agents.worker.token);
+    expect(auditRaw).not.toContain(result.adminToken);
   } finally {
     await workspace.cleanup();
   }

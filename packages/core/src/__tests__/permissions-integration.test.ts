@@ -25,10 +25,8 @@ let lastProvisionResult:
 
 const mockProvisionWorkflowAgents = vi.fn();
 
-vi.mock('../../provisioner/index.js', async () => {
-  const actual = await vi.importActual<typeof import('../../provisioner/index.js')>(
-    '../../provisioner/index.js'
-  );
+vi.mock('../provisioner.js', async () => {
+  const actual = await vi.importActual<typeof import('../provisioner.js')>('../provisioner.js');
 
   mockProvisionWorkflowAgents.mockImplementation(async (config) => {
     const scopes = new Map<string, string[]>();
@@ -155,9 +153,13 @@ const defaultSpawnPtyImplementation = async ({ name, task }: { name: string; tas
   return { ...mockAgent, name };
 };
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/sdk')>();
+  return {
+    ...actual,
+    AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
+  };
+});
 
 type QueuedSubprocessResult = {
   stdout?: string;
