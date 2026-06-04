@@ -1,4 +1,4 @@
-# @agent-relay/github-primitive
+# @relayflows/github-primitive
 
 GitHub workflow primitive for Agent Relay. It exposes a typed client and a
 workflow integration step that can run through the local `gh` CLI or a cloud
@@ -14,7 +14,7 @@ The primitive supports three runtime modes:
 - `cloud`: use Nango first, then relay-cloud proxy when configured.
 
 ```ts
-import { GitHubClient } from '@agent-relay/github-primitive';
+import { GitHubClient } from '@relayflows/github-primitive';
 
 const github = await GitHubClient.create({
   runtime: 'auto',
@@ -85,7 +85,7 @@ helper:
 
 ```ts
 // cloud/packages/web/lib/github/connection-resolver.ts
-import type { GitHubRuntimeConfig } from '@agent-relay/github-primitive';
+import type { GitHubRuntimeConfig } from '@relayflows/github-primitive';
 
 export async function githubConfigForRepo(opts: {
   repo: string; // "owner/repo"

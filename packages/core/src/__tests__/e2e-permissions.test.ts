@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { WorkflowDb } from '../runner.js';
 import type { RelayYamlConfig, WorkflowRunRow, WorkflowStepRow } from '../types.js';
-import type { ProvisionResult, WorkflowProvisionConfig } from '../../provisioner/types.js';
+import type { ProvisionResult, WorkflowProvisionConfig } from '../provisioner.js';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/permission-test.yaml', import.meta.url));
 
@@ -124,8 +124,8 @@ const mockResolveAgentPermissions = vi.fn(
     )
 );
 
-vi.mock('../../provisioner/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../provisioner/index.js')>();
+vi.mock('../provisioner.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../provisioner.js')>();
   return {
     ...actual,
     provisionWorkflowAgents: mockProvisionWorkflowAgents,

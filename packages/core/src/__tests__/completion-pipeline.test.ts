@@ -181,7 +181,7 @@ vi.mock('../relay.js', () => ({
 }));
 
 // Import after mocking
-const { WorkflowRunner } = await import('../workflows/runner.js');
+const { WorkflowRunner } = await import('../runner.js');
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 

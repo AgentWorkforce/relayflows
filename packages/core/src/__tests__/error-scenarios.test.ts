@@ -557,7 +557,7 @@ describe('WorkflowRunner error scenarios', () => {
   let runner: any;
 
   beforeEach(async () => {
-    const mod = await import('../workflows/runner.js');
+    const mod = await import('../runner.js');
     WorkflowRunner = mod.WorkflowRunner;
 
     const runs = new Map();

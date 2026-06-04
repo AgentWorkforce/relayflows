@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 
-import type { AgentRelayOptions } from '@agent-relay/sdk';
+import type { RuntimeSpawnOptions } from '@agent-relay/harness-driver';
 import type {
   AgentCli,
   AgentDefinition,
@@ -126,7 +126,7 @@ export interface WorkflowRunOptions {
   /** Working directory (default: process.cwd()). */
   cwd?: string;
   /** AgentRelay options (all optional). */
-  relay?: AgentRelayOptions;
+  relay?: RuntimeSpawnOptions;
   /** Progress callback. */
   onEvent?: WorkflowEventListener;
   /** Validate and print execution plan without spawning agents. */

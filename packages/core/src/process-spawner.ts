@@ -1,8 +1,8 @@
 import { spawn as cpSpawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
-import { getCliDefinition } from '@agent-relay/sdk';
-import { resolveCliSync } from '@agent-relay/sdk';
+import { getCliDefinition } from './cli-registry.js';
+import { resolveCliSync } from './cli-registry.js';
 import { runVerification } from './verification.js';
 import type { AgentCli, AgentDefinition, VerificationCheck } from './types.js';
 

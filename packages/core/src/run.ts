@@ -1,4 +1,4 @@
-import type { AgentRelayOptions } from '@agent-relay/sdk';
+import type { RuntimeSpawnOptions } from '@agent-relay/harness-driver';
 import type { DryRunReport, TrajectoryConfig, WorkflowRunRow } from './types.js';
 import { WorkflowRunner, type WorkflowEventListener } from './runner.js';
 import { createDefaultEventLogger } from './default-logger.js';
@@ -16,7 +16,7 @@ export interface RunWorkflowOptions {
   /** Working directory. Defaults to process.cwd(). */
   cwd?: string;
   /** AgentRelay options (all optional — broker starts automatically). */
-  relay?: AgentRelayOptions;
+  relay?: RuntimeSpawnOptions;
   /** Progress callback for workflow events. */
   onEvent?: WorkflowEventListener;
   /** Override trajectory config. Set to false to disable trajectory recording. */

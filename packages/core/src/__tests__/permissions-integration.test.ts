@@ -25,9 +25,9 @@ let lastProvisionResult:
 
 const mockProvisionWorkflowAgents = vi.fn();
 
-vi.mock('../../provisioner/index.js', async () => {
-  const actual = await vi.importActual<typeof import('../../provisioner/index.js')>(
-    '../../provisioner/index.js'
+vi.mock('../provisioner.js', async () => {
+  const actual = await vi.importActual<typeof import('../provisioner.js')>(
+    '../provisioner.js'
   );
 
   mockProvisionWorkflowAgents.mockImplementation(async (config) => {

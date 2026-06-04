@@ -1,6 +1,6 @@
 import type { RunnerStepExecutor, WorkflowStep } from '../types.js';
 
-import { GitHubClient } from '@agent-relay/github-primitive';
+import { GitHubClient } from '@relayflows/github-primitive';
 import type {
   GitHubActionName,
   GitHubActionParamsMap,
@@ -8,8 +8,8 @@ import type {
   GitHubRuntime,
   GitHubRuntimeConfig,
   RepositoryRef,
-} from '@agent-relay/github-primitive';
-import { GITHUB_ACTIONS } from '@agent-relay/github-primitive';
+} from '@relayflows/github-primitive';
+import { GITHUB_ACTIONS } from '@relayflows/github-primitive';
 
 export type GitHubStepOutputMode = 'data' | 'result' | 'summary' | 'raw' | 'none';
 export type GitHubStepOutputFormat = 'json' | 'text';

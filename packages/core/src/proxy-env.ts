@@ -1,4 +1,4 @@
-import { getCliDefinition } from '@agent-relay/sdk';
+import { getCliDefinition } from './cli-registry.js';
 import type { AgentDefinition, SwarmConfig } from './types.js';
 
 export interface ProxyEnvBinding {

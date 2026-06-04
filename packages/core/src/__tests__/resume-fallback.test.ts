@@ -115,8 +115,8 @@ vi.mock('../relay.js', () => ({
 }));
 
 // Import after mocking
-const { WorkflowRunner } = await import('../workflows/runner.js');
-const { JsonFileWorkflowDb } = await import('../workflows/file-db.js');
+const { WorkflowRunner } = await import('../runner.js');
+const { JsonFileWorkflowDb } = await import('../file-db.js');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
