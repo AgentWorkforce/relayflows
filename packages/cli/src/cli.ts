@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { Command } from 'commander';
 import {
@@ -45,12 +46,19 @@ async function runYamlWorkflow(
   return result;
 }
 
+// Read the version from package.json at runtime so it stays in sync with the
+// version the publish workflow bumps. `../package.json` resolves to the package
+// root from both src/cli.ts (dev) and dist/cli.js (published). createRequire
+// avoids a static JSON import, which would fall outside tsconfig's rootDir.
+const require = createRequire(import.meta.url);
+const { version } = require('../package.json') as { version: string };
+
 const program = new Command();
 
 program
   .name('relayflows')
   .description('Run Agent Relay workflows from the command line')
-  .version('0.1.0');
+  .version(version);
 
 program
   .command('run <file>')

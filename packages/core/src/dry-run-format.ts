@@ -52,7 +52,10 @@ export function formatDryRunReport(report: DryRunReport): string {
       for (let i = 0; i < wave.steps.length; i++) {
         const step = wave.steps[i];
         const prefix = i === 0 ? `  Wave ${String(wave.wave).padStart(2)}:` : '          ';
-        lines.push(`${prefix}  ${step.name} (${step.agent})`);
+        // Steps without an agent are deterministic (shell/gate) steps; label
+        // them as such rather than printing the literal "undefined".
+        const actor = step.agent ?? 'deterministic';
+        lines.push(`${prefix}  ${step.name} (${actor})`);
       }
     }
     lines.push('');
