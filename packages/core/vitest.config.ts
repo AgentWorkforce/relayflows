@@ -36,7 +36,7 @@ function nodeSqliteExternal(): Plugin {
 export default defineConfig({
   plugins: [nodeSqliteExternal()],
   test: {
-    include: ['packages/*/src/**/*.test.ts'],
+    include: ['src/**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
     testTimeout: 30000,
     // Cap concurrent worker processes. Workflow tests can spawn child

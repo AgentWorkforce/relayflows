@@ -36,13 +36,17 @@ function findFirstJsonFile(dir: string): string | null {
   return null;
 }
 
+// agent-trajectories' default data dir relative to the base/cwd. v0.6 relocated
+// this from the legacy `.trajectories` to `.agentworkforce/trajectories`.
+const DEFAULT_TRAJECTORY_DIR = path.join('.agentworkforce', 'trajectories');
+
 function readTrajectoryFile(dir: string): any {
-  const file = findFirstJsonFile(path.join(dir, '.trajectories', 'active'));
+  const file = findFirstJsonFile(path.join(dir, DEFAULT_TRAJECTORY_DIR, 'active'));
   return file ? JSON.parse(readFileSync(file, 'utf-8')) : null;
 }
 
 function readCompletedTrajectoryFile(dir: string): any {
-  const file = findFirstJsonFile(path.join(dir, '.trajectories', 'completed'));
+  const file = findFirstJsonFile(path.join(dir, DEFAULT_TRAJECTORY_DIR, 'completed'));
   return file ? JSON.parse(readFileSync(file, 'utf-8')) : null;
 }
 
@@ -89,7 +93,7 @@ describe('WorkflowTrajectory', () => {
 
       expect(traj.isEnabled()).toBe(false);
       expect(traj.getTrajectoryId()).toBeNull();
-      expect(existsSync(path.join(tmpDir, '.trajectories'))).toBe(false);
+      expect(existsSync(path.join(tmpDir, DEFAULT_TRAJECTORY_DIR))).toBe(false);
     });
 
     it('should not create files when enabled is false', async () => {

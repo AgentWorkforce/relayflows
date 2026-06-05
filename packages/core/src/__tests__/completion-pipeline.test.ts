@@ -65,7 +65,7 @@ vi.mock('@relaycast/sdk', () => ({
   RelayError: MockRelayError,
 }));
 
-// ── Mock AgentRelay ──────────────────────────────────────────────────────────
+// ── Mock HarnessDriverClient ─────────────────────────────────────────────────
 
 let waitForExitFn: (ms?: number) => Promise<'exited' | 'timeout' | 'released'>;
 let waitForIdleFn: (ms?: number) => Promise<'idle' | 'timeout' | 'exited'>;
@@ -95,24 +95,23 @@ vi.mock('node:child_process', async () => {
   };
 });
 
-const mockAgent = {
-  name: 'test-agent-abc',
-  get waitForExit() {
-    return waitForExitFn;
-  },
-  get waitForIdle() {
-    return waitForIdleFn;
-  },
-  release: vi.fn().mockResolvedValue(undefined),
-};
-
-const mockHuman = {
-  name: 'WorkflowRunner',
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-};
-
 function never<T>(): Promise<T> {
   return new Promise(() => {});
+}
+
+// Spawned-agent handle shaped like harness-driver's SpawnedAgentHandle, but
+// driven by the test's waitForExitFn/waitForIdleFn. waitForExit/waitForIdle
+// return `{ reason }` objects (the runner reads `.reason`), not raw strings.
+function makeMockHandle(name: string) {
+  return {
+    name,
+    runtime: 'pty' as const,
+    exitCode: undefined as number | undefined,
+    exitSignal: undefined as string | undefined,
+    waitForExit: (ms?: number) => waitForExitFn(ms).then((reason) => ({ reason })),
+    waitForIdle: (ms?: number) => waitForIdleFn(ms).then((reason) => ({ reason })),
+    release: vi.fn().mockResolvedValue({ name }),
+  };
 }
 
 const defaultSpawnPtyImplementation = async ({ name, task }: { name: string; task?: string }) => {
@@ -128,45 +127,71 @@ const defaultSpawnPtyImplementation = async ({ name, task }: { name: string; tas
         : 'STEP_COMPLETE:unknown\n');
 
   queueMicrotask(() => {
-    emitRelayEvent('workerOutput', { name, chunk: output });
+    emitMockEvent('workerOutput', { name, chunk: output });
   });
 
-  return { ...mockAgent, name };
+  return makeMockHandle(name);
 };
 
-const relayListeners = new Map<string, Set<(...args: any[]) => void>>();
-
-function emitRelayEvent(event: string, payload: any) {
-  const set = relayListeners.get(event);
-  if (!set) return;
-  for (const fn of set) fn(payload);
+// The runner consumes broker events via `client.onEvent(BrokerEvent)`. Tests
+// still call `emitMockEvent('workerOutput'|'messageReceived'|...)`; translate
+// those legacy named events into the BrokerEvent shapes the runner switches on.
+const eventListeners = new Set<(event: any) => void>();
+function emitMockEvent(event: string, payload: any = {}): void {
+  let broker: any;
+  switch (event) {
+    case 'workerOutput':
+      broker = { kind: 'worker_stream', name: payload.name, stream: 'stdout', chunk: payload.chunk };
+      break;
+    case 'messageReceived':
+      broker = {
+        kind: 'relay_inbound',
+        event_id: payload.eventId,
+        from: payload.from,
+        target: payload.to,
+        body: payload.text,
+        thread_id: payload.threadId,
+      };
+      break;
+    case 'agentSpawned':
+      broker = { kind: 'agent_spawned', name: payload.name, runtime: payload.runtime ?? 'pty' };
+      break;
+    case 'agentReleased':
+      broker = { kind: 'agent_released', name: payload.name };
+      break;
+    case 'agentExited':
+      broker = { kind: 'agent_exited', name: payload.name, code: payload.exitCode, signal: payload.exitSignal };
+      break;
+    case 'agentIdle':
+      broker = { kind: 'agent_idle', name: payload.name, idle_secs: payload.idleSecs };
+      break;
+    default:
+      broker = { kind: event, ...payload };
+  }
+  for (const cb of [...eventListeners]) cb(broker);
 }
+
+// Back-compat alias for tests that still call emitRelayEvent.
+const emitRelayEvent = emitMockEvent;
 
 const mockRelayInstance = {
   spawnPty: vi.fn().mockImplementation(defaultSpawnPtyImplementation),
-  human: vi.fn().mockReturnValue(mockHuman),
-  shutdown: vi.fn().mockResolvedValue(undefined),
-  onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-  addListener: vi.fn((event: string, fn: (...args: any[]) => void) => {
-    let set = relayListeners.get(event);
-    if (!set) {
-      set = new Set();
-      relayListeners.set(event, set);
-    }
-    set.add(fn);
-    return () => {
-      set!.delete(fn);
-    };
+  onEvent: vi.fn((cb: (event: any) => void) => {
+    eventListeners.add(cb);
+    return () => eventListeners.delete(cb);
   }),
+  connectEvents: vi.fn(),
   listAgents: vi.fn().mockResolvedValue([]),
-  listAgentsRaw: vi.fn().mockResolvedValue([]),
+  release: vi.fn().mockResolvedValue({ name: '' }),
+  sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
+  shutdown: vi.fn().mockResolvedValue(undefined),
 };
 
 let relayEventCounter = 0;
 
 function emitRelayChannelMessage(message: { from: string; to: string; text: string }) {
   setTimeout(() => {
-    emitRelayEvent('messageReceived', {
+    emitMockEvent('messageReceived', {
       eventId: `evt-${++relayEventCounter}`,
       from: message.from,
       to: message.to,
@@ -176,12 +201,16 @@ function emitRelayChannelMessage(message: { from: string; to: string; text: stri
   }, 0);
 }
 
-vi.mock('../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+  };
+});
 
 // Import after mocking
-const { WorkflowRunner } = await import('../workflows/runner.js');
+const { WorkflowRunner } = await import('../runner.js');
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -241,6 +270,11 @@ type WorkflowStepOverride = Partial<NonNullable<RelayYamlConfig['workflows']>[nu
 
 function makeSupervisedConfig(stepOverrides: WorkflowStepOverride = {}): RelayYamlConfig {
   return makeConfig({
+    // The runner now defaults to strategy:'retry' with repairRetries; these
+    // supervised tests assert first-pass review/owner outcomes, so opt into
+    // fail-fast to exercise the failure path deterministically (no retry loop).
+    // Step-level `retries` overrides still drive the explicit retry tests.
+    errorHandling: { strategy: 'fail-fast' },
     swarm: { pattern: 'hub-spoke' },
     agents: [
       { name: 'specialist', cli: 'claude', role: 'engineer' },
@@ -314,9 +348,8 @@ describe('Completion Pipeline', () => {
     waitForExitFn = vi.fn().mockResolvedValue('exited');
     waitForIdleFn = vi.fn().mockImplementation(() => never());
     mockSpawnOutputs = [];
-    mockAgent.release.mockResolvedValue(undefined);
     mockRelayInstance.spawnPty.mockImplementation(defaultSpawnPtyImplementation);
-    relayListeners.clear();
+    eventListeners.clear();
     db = makeDb();
     runner = new WorkflowRunner({ db, workspaceId: 'ws-test' });
   });
@@ -478,6 +511,7 @@ describe('Completion Pipeline', () => {
 
       const run = await runner.execute(
         makeConfig({
+          errorHandling: { strategy: 'fail-fast' },
           agents: [{ name: 'reviewer', cli: 'claude', preset: 'reviewer' }],
           workflows: [
             {
@@ -754,7 +788,9 @@ describe('Completion Pipeline', () => {
     // These tests validate the tolerant parser once it's implemented.
     // The tolerant parser should accept semantic equivalents.
 
-    it('should still fail on review output with no usable approval or rejection signal', async () => {
+    it('should fail closed (reject) when the reviewer hedges instead of deciding', async () => {
+      // Declared indecision ("I need more context before deciding") is treated as
+      // a fail-closed REJECT so the step retries instead of crashing as malformed.
       mockSpawnOutputs = [
         'worker finished\n',
         'STEP_COMPLETE:step-1\n',
@@ -763,7 +799,7 @@ describe('Completion Pipeline', () => {
 
       const run = await runner.execute(makeSupervisedConfig(), 'default');
       expect(run.status).toBe('failed');
-      expect(run.error).toContain('review response malformed');
+      expect(run.error).toContain('review rejected');
     }, 15000);
   });
 
@@ -1014,7 +1050,7 @@ describe('Completion Pipeline', () => {
             emitRelayEvent('workerOutput', { name, chunk: output });
           });
 
-          const agent = { ...mockAgent, name };
+          const agent = makeMockHandle(name);
           if (name.includes('map-1-worker')) {
             emitRelayChannelMessage({
               from: agent.name,
@@ -1259,7 +1295,10 @@ describe('Completion Pipeline', () => {
 
     it('should still fail when marker, owner decision, and evidence are all missing', async () => {
       mockSpawnOutputs = ['Did the work but no marker\n'];
-      const run = await runner.execute(makeConfig(), 'default');
+      const run = await runner.execute(
+        makeConfig({ errorHandling: { strategy: 'fail-fast' } }),
+        'default'
+      );
       expect(run.status).toBe('failed');
       expect(run.error).toContain('owner completion decision missing');
     }, 15000);
@@ -1706,6 +1745,7 @@ describe('Completion Pipeline', () => {
     it('should fail when process exits with non-zero code and no signal', async () => {
       // Agent exits with non-zero and no coordination signal — should fail
       const config = makeConfig({
+        errorHandling: { strategy: 'fail-fast' },
         swarm: { pattern: 'dag', completionGracePeriodMs: 5000 },
         agents: [{ name: 'agent-a', cli: 'claude' }],
         workflows: [
@@ -1735,6 +1775,7 @@ describe('Completion Pipeline', () => {
     it('should respect completionGracePeriodMs: 0 to disable fallback', async () => {
       // With grace period disabled, missing signals should always fail
       const config = makeConfig({
+        errorHandling: { strategy: 'fail-fast' },
         swarm: { pattern: 'dag', completionGracePeriodMs: 0 },
         agents: [{ name: 'agent-a', cli: 'claude' }],
         workflows: [
@@ -1862,6 +1903,7 @@ describe('Completion Pipeline', () => {
 
     it('should not complete via process-exit fallback when output contains INCOMPLETE_RETRY', async () => {
       const config = makeConfig({
+        errorHandling: { strategy: 'fail-fast' },
         swarm: { pattern: 'dag', completionGracePeriodMs: 5000 },
         agents: [{ name: 'agent-a', cli: 'claude' }],
         workflows: [

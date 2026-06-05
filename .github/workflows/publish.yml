@@ -150,11 +150,12 @@ jobs:
 
       - name: Build packages
         run: |
-          npm run build --workspace=packages/core
-          npm run build --workspace=packages/cli
+          # Primitives first: core imports their built types/dist.
           npm run build --workspace=packages/github-primitive
           npm run build --workspace=packages/slack-primitive
           npm run build --workspace=packages/browser-primitive
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/cli
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -336,17 +337,17 @@ jobs:
             ### Packages
             - `@relayflows/core@${{ needs.build.outputs.new_version }}`
             - `@relayflows/cli@${{ needs.build.outputs.new_version }}`
-            - `@agent-relay/github-primitive@${{ needs.build.outputs.new_version }}`
-            - `@agent-relay/slack-primitive@${{ needs.build.outputs.new_version }}`
-            - `@agent-relay/browser-primitive@${{ needs.build.outputs.new_version }}`
+            - `@relayflows/github-primitive@${{ needs.build.outputs.new_version }}`
+            - `@relayflows/slack-primitive@${{ needs.build.outputs.new_version }}`
+            - `@relayflows/browser-primitive@${{ needs.build.outputs.new_version }}`
 
             ### Install
             ```bash
             npm install @relayflows/core@${{ needs.build.outputs.new_version }}
             npm install -g @relayflows/cli@${{ needs.build.outputs.new_version }}
-            npm install @agent-relay/github-primitive@${{ needs.build.outputs.new_version }}
-            npm install @agent-relay/slack-primitive@${{ needs.build.outputs.new_version }}
-            npm install @agent-relay/browser-primitive@${{ needs.build.outputs.new_version }}
+            npm install @relayflows/github-primitive@${{ needs.build.outputs.new_version }}
+            npm install @relayflows/slack-primitive@${{ needs.build.outputs.new_version }}
+            npm install @relayflows/browser-primitive@${{ needs.build.outputs.new_version }}
             ```
 
             ### Publish Details

@@ -1,6 +1,6 @@
 import type { RunnerStepExecutor, WorkflowStep } from '../types.js';
 
-import { BrowserClient, type BrowserClientOptions } from '@agent-relay/browser-primitive';
+import { BrowserClient, type BrowserClientOptions } from '@relayflows/browser-primitive';
 import type {
   ActionResult,
   BrowserActionName,
@@ -8,7 +8,7 @@ import type {
   BrowserActionRequest,
   BrowserConfig,
   BrowserSession,
-} from '@agent-relay/browser-primitive';
+} from '@relayflows/browser-primitive';
 
 export type BrowserStepOutputMode = 'last' | 'all' | 'captures' | 'summary' | 'none';
 export type BrowserStepOutputFormat = 'json' | 'text';

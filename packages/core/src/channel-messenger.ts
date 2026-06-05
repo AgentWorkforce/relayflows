@@ -1,4 +1,4 @@
-import { stripAnsi as stripAnsiFn } from '@agent-relay/sdk';
+import stripAnsiFn from 'strip-ansi';
 import type { StepOutcome } from './trajectory.js';
 import type { AgentDefinition, WorkflowStepRow } from './types.js';
 

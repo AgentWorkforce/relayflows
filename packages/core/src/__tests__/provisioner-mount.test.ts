@@ -76,15 +76,18 @@ afterEach(async () => {
 describe('ensureRelayfileMount', () => {
   it('runs initial sync, starts the watcher, and removes the mount on stop', async () => {
     const binaryPath = await createFakeMountBinary();
-    const mountPoint = path.join(await makeTempDir('relayfile-mount-target-'), 'workspace');
 
+    // @relayfile/sdk v0.8 only removes mount points it created itself; a
+    // caller-provided `mountPoint` is treated as owned by the caller and is
+    // preserved on stop. Omit it so the SDK creates (and thus cleans up) the
+    // mount, and read the resolved path back from the returned handle.
     const mount = await ensureRelayfileMount({
       binaryPath,
       relayfileUrl: 'http://127.0.0.1:8080',
       workspace: 'rw_test',
       token: 'test-token',
-      mountPoint,
     });
+    const mountPoint = mount.mountPoint;
 
     expect(mount.pid).toBeGreaterThan(0);
     expect(existsSync(path.join(mountPoint, 'seeded.txt'))).toBe(true);
