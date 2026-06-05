@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createLocalJwksKeyPair } from '../provisioner/compiler.js';
+import { createLocalJwksKeyPair } from '@agent-relay/cloud';
 import { ensureRelayfileMount } from '@relayfile/sdk/workspace-mount';
 import { provisionWorkflowAgents } from '../provisioner.js';
 
@@ -77,20 +77,25 @@ describe('ensureRelayfileMount', () => {
   it('runs initial sync, starts the watcher, and removes the mount on stop', async () => {
     const binaryPath = await createFakeMountBinary();
 
+    // @relayfile/sdk v0.8 only removes mount points it created itself; a
+    // caller-provided `mountPoint` is treated as owned by the caller and is
+    // preserved on stop. Omit it so the SDK creates (and thus cleans up) the
+    // mount, and read the resolved path back from the returned handle.
     const mount = await ensureRelayfileMount({
       binaryPath,
       relayfileUrl: 'http://127.0.0.1:8080',
       workspace: 'rw_test',
       token: 'test-token',
     });
+    const mountPoint = mount.mountPoint;
 
     expect(mount.pid).toBeGreaterThan(0);
-    expect(existsSync(path.join(mount.mountPoint, 'seeded.txt'))).toBe(true);
-    expect(await waitForPath(path.join(mount.mountPoint, 'live.txt'))).toBe(true);
+    expect(existsSync(path.join(mountPoint, 'seeded.txt'))).toBe(true);
+    expect(await waitForPath(path.join(mountPoint, 'live.txt'))).toBe(true);
 
     await mount.stop();
 
-    expect(existsSync(mount.mountPoint)).toBe(false);
+    expect(existsSync(mountPoint)).toBe(false);
   });
 });
 

@@ -12,8 +12,8 @@
     "packages/browser-primitive"
   ],
   "scripts": {
-    "build": "npm run build --workspace=packages/github-primitive && npm run build --workspace=packages/slack-primitive && npm run build --workspace=packages/browser-primitive && npm run build --workspace=packages/core && npm run build --workspace=packages/cli",
-    "typecheck": "npm run build --workspace=packages/github-primitive && npm run build --workspace=packages/slack-primitive && npm run build --workspace=packages/browser-primitive && npm run typecheck --workspace=packages/core && npm run build --workspace=packages/core && npm run typecheck --workspace=packages/cli",
+    "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/cli",
+    "typecheck": "npm run typecheck --workspace=packages/core && npm run typecheck --workspace=packages/cli",
     "test": "npm run test --workspace=packages/core"
   },
   "devDependencies": {

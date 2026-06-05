@@ -29,23 +29,28 @@ vi.mock('@relaycast/sdk', () => ({
   RelayError: class RelayError extends Error {},
 }));
 
-const mockHuman = {
-  name: 'WorkflowRunner',
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-};
+const eventListeners = new Set<(event: any) => void>();
 
 const mockRelayInstance = {
   spawnPty: vi.fn(),
-  human: vi.fn().mockReturnValue(mockHuman),
+  onEvent: vi.fn((cb: (event: any) => void) => {
+    eventListeners.add(cb);
+    return () => eventListeners.delete(cb);
+  }),
+  connectEvents: vi.fn(),
+  listAgents: vi.fn().mockResolvedValue([]),
+  release: vi.fn().mockResolvedValue({ name: '' }),
+  sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
   shutdown: vi.fn().mockResolvedValue(undefined),
-  onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-  listAgentsRaw: vi.fn().mockResolvedValue([]),
-  addListener: vi.fn(() => () => {}),
 };
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+  };
+});
 
 type QueuedSubprocessResult = {
   stdout?: string;
@@ -159,6 +164,11 @@ function makeConfig(projectDir: string, verificationValue: string): RelayYamlCon
     errorHandling: {
       strategy: 'retry',
       retryDelayMs: 0,
+      // The runner now defaults to spawning a repair agent between retries when
+      // strategy is 'retry'. This test asserts a plain first-attempt + retry
+      // (exactly 2 spawns) and checks the verification-failure retry prompt, so
+      // opt out of the repair agent to exercise the standard retry path.
+      repairRetries: 0,
     },
     agents: [{ name: 'worker', cli: 'claude', interactive: false }],
     workflows: [

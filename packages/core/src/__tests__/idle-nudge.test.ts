@@ -53,46 +53,61 @@ vi.mock('@relaycast/sdk', () => ({
   RelayError: MockRelayError,
 }));
 
-// ── Mock AgentRelay ───────────────────────────────────────────────────────────
+// ── Mock HarnessDriverClient ─────────────────────────────────────────────────
 
 let waitForExitFn: (ms?: number) => Promise<'exited' | 'timeout' | 'released'>;
 let waitForIdleFn: (ms?: number) => Promise<'idle' | 'timeout' | 'exited'>;
 
-const mockSendMessage = vi.fn().mockResolvedValue(undefined);
-const mockRelease = vi.fn().mockResolvedValue(undefined);
+const mockRelease = vi.fn().mockResolvedValue({ name: 'test-agent-abc' });
 
+// Spawned-agent handle shaped like harness-driver's SpawnedAgentHandle, driven
+// by the test's waitForExitFn/waitForIdleFn. waitForExit/waitForIdle return
+// `{ reason }` objects (the runner reads `.reason`), not raw strings.
 const mockAgent = {
   name: 'test-agent-abc',
+  runtime: 'pty' as const,
   exitCode: 0,
   exitSignal: undefined,
-  get waitForExit() {
-    return waitForExitFn;
-  },
-  get waitForIdle() {
-    return waitForIdleFn;
-  },
+  waitForExit: (ms?: number) => waitForExitFn(ms).then((reason) => ({ reason })),
+  waitForIdle: (ms?: number) => waitForIdleFn(ms).then((reason) => ({ reason })),
   release: mockRelease,
+};
+
+// Idle nudges now go through `client.sendMessage({ from, to, text })` (the v8
+// HarnessDriverClient API) instead of the legacy `human().sendMessage(...)`.
+const mockSendMessage = vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] });
+
+const eventListeners = new Set<(event: any) => void>();
+
+const mockRelayInstance = {
+  spawnPty: vi.fn().mockResolvedValue(mockAgent),
+  onEvent: vi.fn((cb: (event: any) => void) => {
+    eventListeners.add(cb);
+    return () => eventListeners.delete(cb);
+  }),
+  connectEvents: vi.fn(),
+  listAgents: vi.fn().mockResolvedValue([]),
+  release: vi.fn().mockResolvedValue({ name: '' }),
   sendMessage: mockSendMessage,
+  shutdown: vi.fn().mockResolvedValue(undefined),
 };
 
-const mockHumanSendMessage = vi.fn().mockResolvedValue(undefined);
-const mockHuman = {
-  name: 'workflow-runner',
-  sendMessage: mockHumanSendMessage,
-};
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+  };
+});
 
-vi.mock('../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => ({
-    spawnPty: vi.fn().mockResolvedValue(mockAgent),
-    human: vi.fn().mockReturnValue(mockHuman),
-    shutdown: vi.fn().mockResolvedValue(undefined),
-    onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-    addListener: vi.fn(() => () => {}),
-    listAgentsRaw: vi.fn().mockResolvedValue([]),
-  })),
-}));
+const { WorkflowRunner } = await import('../runner.js');
+const { WorkflowAgentHandle } = await import('../agent-handle.js');
 
-const { WorkflowRunner } = await import('../workflows/runner.js');
+// The runner internally wraps spawnPty handles in a WorkflowAgentHandle (which
+// maps the driver's `{ reason }` results to the legacy string contract). Tests
+// that invoke `waitForExitWithIdleNudging` directly must pass an equivalently
+// wrapped handle so `agent.waitForExit()` yields a string, not `{ reason }`.
+const wrappedMockAgent = () => new WorkflowAgentHandle(mockAgent as any);
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -178,8 +193,8 @@ describe('Idle Nudge Detection', () => {
       );
 
       expect(run.status).toBe('completed');
-      expect(mockHumanSendMessage).toHaveBeenCalledTimes(1);
-      expect(mockHumanSendMessage).toHaveBeenCalledWith(
+      expect(mockSendMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           to: 'test-agent-abc',
           text: expect.stringContaining('/exit'),
@@ -210,11 +225,16 @@ describe('Idle Nudge Detection', () => {
       const agentDef = { name: 'worker', cli: 'claude' };
 
       (runner as any).currentConfig = config;
-      (runner as any).relay = { human: vi.fn().mockReturnValue(mockHuman) };
-      const result = await (runner as any).waitForExitWithIdleNudging(mockAgent, agentDef, step, 500);
+      (runner as any).relay = { sendMessage: mockSendMessage };
+      const result = await (runner as any).waitForExitWithIdleNudging(
+        wrappedMockAgent(),
+        agentDef,
+        step,
+        500
+      );
 
       expect(result).toBe('exited');
-      expect(mockHumanSendMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendMessage).toHaveBeenCalledTimes(1);
     });
 
     it('force-releases after maxNudges is exceeded', async () => {
@@ -222,6 +242,9 @@ describe('Idle Nudge Detection', () => {
 
       const run = await runner.execute(
         makeConfig({
+          // fail-fast so the force-release failure surfaces immediately instead
+          // of triggering the runner's default retry/repair loop.
+          errorHandling: { strategy: 'fail-fast' },
           swarm: {
             pattern: 'dag',
             idleNudge: { nudgeAfterMs: 50, escalateAfterMs: 50, maxNudges: 1 },
@@ -232,7 +255,7 @@ describe('Idle Nudge Detection', () => {
 
       expect(run.status).toBe('failed');
       expect(run.error).toContain('force-released');
-      expect(mockHumanSendMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendMessage).toHaveBeenCalledTimes(1);
       expect(mockRelease).toHaveBeenCalledTimes(1);
       expect(waitForIdleFn).not.toHaveBeenCalled();
     });
@@ -242,6 +265,7 @@ describe('Idle Nudge Detection', () => {
 
       const run = await runner.execute(
         makeConfig({
+          errorHandling: { strategy: 'fail-fast' },
           swarm: {
             pattern: 'dag',
             idleNudge: { nudgeAfterMs: 50, escalateAfterMs: 50, maxNudges: 3 },
@@ -252,7 +276,7 @@ describe('Idle Nudge Detection', () => {
 
       expect(run.status).toBe('failed');
       expect(run.error).toContain('force-released');
-      expect(mockHumanSendMessage).toHaveBeenCalledTimes(3);
+      expect(mockSendMessage).toHaveBeenCalledTimes(3);
       expect(mockRelease).toHaveBeenCalledTimes(1);
     });
 
@@ -287,6 +311,7 @@ describe('Idle Nudge Detection', () => {
 
       await runner.execute(
         makeConfig({
+          errorHandling: { strategy: 'fail-fast' },
           swarm: {
             pattern: 'dag',
             idleNudge: { nudgeAfterMs: 50, escalateAfterMs: 50, maxNudges: 1 },
@@ -303,6 +328,7 @@ describe('Idle Nudge Detection', () => {
 
       const run = await runner.execute(
         makeConfig({
+          errorHandling: { strategy: 'fail-fast' },
           swarm: {
             pattern: 'dag',
             idleNudge: {},
@@ -314,7 +340,7 @@ describe('Idle Nudge Detection', () => {
       expect(run.status).toBe('failed');
       expect(run.error).toContain('force-released');
       // default maxNudges is 1
-      expect(mockHumanSendMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendMessage).toHaveBeenCalledTimes(1);
       expect(mockRelease).toHaveBeenCalledTimes(1);
     });
 
@@ -368,7 +394,7 @@ describe('Idle Nudge Detection', () => {
       expect((runner as any).shouldPreserveIdleSupervisor(agentDef, step)).toBe(true);
 
       const result = await (runner as any).waitForExitWithIdleNudging(
-        mockAgent,
+        wrappedMockAgent(),
         agentDef,
         step,
         500,
@@ -427,7 +453,7 @@ describe('Idle Nudge Detection', () => {
       expect((runner as any).shouldPreserveIdleSupervisor(agentDef, step)).toBe(true);
 
       const result = await (runner as any).waitForExitWithIdleNudging(
-        mockAgent,
+        wrappedMockAgent(),
         agentDef,
         step,
         500,
@@ -445,7 +471,10 @@ describe('Idle Nudge Detection', () => {
       waitForExitFn = vi.fn().mockResolvedValue('timeout');
       waitForIdleFn = vi.fn().mockResolvedValue('timeout');
 
-      const run = await runner.execute(makeConfig(), 'default');
+      const run = await runner.execute(
+        makeConfig({ errorHandling: { strategy: 'fail-fast' } }),
+        'default'
+      );
       const steps = await db.getStepsByRunId(run.id);
 
       expect(run.status).toBe('failed');

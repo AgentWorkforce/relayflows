@@ -99,12 +99,12 @@ vi.mock('node:child_process', async () => {
 
 const mockRelayInstance = {
   spawnPty: vi.fn(),
-  human: vi.fn().mockReturnValue({ sendMessage: vi.fn().mockResolvedValue(undefined) }),
-  shutdown: vi.fn().mockResolvedValue(undefined),
-  onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-  listAgentsRaw: vi.fn().mockResolvedValue([]),
+  onEvent: vi.fn(() => () => {}),
+  connectEvents: vi.fn(),
   listAgents: vi.fn().mockResolvedValue([]),
-  addListener: vi.fn(() => () => {}),
+  release: vi.fn().mockResolvedValue({ name: '' }),
+  sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
+  shutdown: vi.fn().mockResolvedValue(undefined),
 };
 
 vi.mock('@relaycast/sdk', () => ({
@@ -112,9 +112,13 @@ vi.mock('@relaycast/sdk', () => ({
   RelayError: class RelayError extends Error {},
 }));
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+  };
+});
 
 const { WorkflowRunner } = await import('../runner.js');
 
@@ -274,7 +278,7 @@ beforeEach(() => {
   collectorResultsByCwd = new Map();
   activeRunner = undefined;
   mockRelayInstance.shutdown.mockResolvedValue(undefined);
-  mockRelayInstance.onBrokerStderr.mockReturnValue(() => {});
+  mockRelayInstance.onEvent.mockReturnValue(() => {});
   mockRelayInstance.listAgents.mockResolvedValue([]);
 });
 

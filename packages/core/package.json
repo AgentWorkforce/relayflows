@@ -38,7 +38,7 @@
     "build": "tsc && npm run build:assets",
     "build:assets": "mkdir -p dist/builtin-templates && cp src/builtin-templates/*.yaml dist/builtin-templates/ && cp src/schema.json dist/ 2>/dev/null || true",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "files": [
     "dist"
@@ -52,19 +52,22 @@
     "directory": "packages/core"
   },
   "dependencies": {
-    "@agent-relay/browser-primitive": "^7.1.1",
-    "@agent-relay/cloud": "^7.1.1",
-    "@agent-relay/config": "^7.1.1",
-    "@agent-relay/github-primitive": "^7.1.1",
-    "@agent-relay/sdk": "^7.1.1",
-    "@agent-relay/slack-primitive": "^7.1.1",
+    "@agent-relay/cloud": "^8.2.0",
+    "@agent-relay/config": "^8.2.0",
+    "@agent-relay/harness-driver": "^8.2.0",
+    "@agent-relay/harnesses": "^8.2.0",
+    "@agent-relay/sdk": "^8.2.0",
     "@relaycast/sdk": "^1.1.0",
     "@relayfile/sdk": "^0.8.0",
+    "@relayflows/browser-primitive": "0.1.0",
+    "@relayflows/github-primitive": "0.1.0",
+    "@relayflows/slack-primitive": "0.1.0",
     "@sinclair/typebox": "^0.34.48",
     "agent-trajectories": "^0.6.0",
     "chalk": "^4.1.2",
     "ignore": "^7.0.5",
     "listr2": "^10.2.1",
+    "strip-ansi": "^7.2.0",
     "yaml": "^2.7.0",
     "zod": "^3.23.8"
   },

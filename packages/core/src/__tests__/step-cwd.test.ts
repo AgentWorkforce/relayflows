@@ -6,9 +6,23 @@ vi.mock('@relaycast/sdk', () => ({
   RelayError: class RelayError extends Error {},
 }));
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn(),
-}));
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: {
+      spawn: vi.fn(async () => ({
+        spawnPty: vi.fn(),
+        onEvent: vi.fn(() => () => {}),
+        connectEvents: vi.fn(),
+        listAgents: vi.fn().mockResolvedValue([]),
+        release: vi.fn().mockResolvedValue({ name: '' }),
+        sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
+        shutdown: vi.fn().mockResolvedValue(undefined),
+      })),
+    },
+  };
+});
 
 const { WorkflowRunner } = await import('../runner.js');
 

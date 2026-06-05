@@ -1,2 +1,0 @@
-artifact complete
-RICKY_MASTER_CHILD_RUN_VERIFIED

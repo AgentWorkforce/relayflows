@@ -1,13 +1,13 @@
 import type { RunnerStepExecutor, WorkflowStep } from '../types.js';
 
-import { SlackClient } from '@agent-relay/slack-primitive';
+import { SlackClient } from '@relayflows/slack-primitive';
 import {
   SlackAction,
   SLACK_ACTIONS,
   type PostMessageParams,
   type SlackActionResult,
   type SlackRuntimeConfig,
-} from '@agent-relay/slack-primitive';
+} from '@relayflows/slack-primitive';
 
 export type SlackStepOutputMode = 'data' | 'result' | 'summary' | 'raw' | 'none';
 export type SlackStepOutputFormat = 'json' | 'text';

@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { compileAgentScopes, resolveAgentPermissions } from '../provisioner/compiler.js';
+import { compileAgentScopes, resolveAgentPermissions } from '@agent-relay/cloud';
 import type {
   AccessPreset,
   AgentDefinition,

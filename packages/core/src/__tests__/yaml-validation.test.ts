@@ -29,7 +29,7 @@ import {
 } from '../custom-steps.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TEMPLATES_DIR = path.resolve(__dirname, '../workflows/builtin-templates');
+const TEMPLATES_DIR = path.resolve(__dirname, '../builtin-templates');
 
 // Mock DB for coordinator tests
 const mockDb = {
