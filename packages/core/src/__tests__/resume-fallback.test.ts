@@ -7,11 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { WorkflowRunner } from '../runner.js';
+import { JsonFileWorkflowDb } from '../file-db.js';
 import type { WorkflowDb } from '../runner.js';
-import type { RelayYamlConfig, WorkflowRunRow, WorkflowStepRow } from '../types.js';
+import type {
+  AgentDefinition,
+  RelayYamlConfig,
+  RunnerStepExecutor,
+  WorkflowRunRow,
+  WorkflowStep,
+  WorkflowStepRow,
+} from '../types.js';
 
-// ── Mock fetch ───────────────────────────────────────────────────────────────
-
+// ── Stub fetch ───────────────────────────────────────────────────────────────
+// The injected executor (below) means the runner never provisions a relay
+// broker, but keep a harmless fetch stub so no real network call can occur.
 const mockFetch = vi.fn().mockResolvedValue({
   ok: true,
   json: () => Promise.resolve({ data: { api_key: 'rk_live_test', workspace_id: 'ws-test' } }),
@@ -19,104 +29,24 @@ const mockFetch = vi.fn().mockResolvedValue({
 });
 vi.stubGlobal('fetch', mockFetch);
 
-// ── Mock RelayCast SDK ───────────────────────────────────────────────────────
-
-const mockRelaycastAgent = {
-  send: vi.fn().mockResolvedValue(undefined),
-  heartbeat: vi.fn().mockResolvedValue(undefined),
-  channels: {
-    create: vi.fn().mockResolvedValue(undefined),
-    join: vi.fn().mockResolvedValue(undefined),
-    invite: vi.fn().mockResolvedValue(undefined),
-  },
-};
-
-const mockRelaycast = {
-  agents: {
-    register: vi.fn().mockResolvedValue({ token: 'token-1' }),
-  },
-  as: vi.fn().mockReturnValue(mockRelaycastAgent),
-};
-
-class MockRelayError extends Error {
-  code: string;
-  constructor(code: string, message: string, status = 400) {
-    super(message);
-    this.code = code;
-    this.name = 'RelayError';
-    (this as any).status = status;
-  }
-}
-
-vi.mock('@relaycast/sdk', () => ({
-  RelayCast: vi.fn().mockImplementation(() => mockRelaycast),
-  RelayError: MockRelayError,
-}));
-
-// ── Mock AgentRelay ──────────────────────────────────────────────────────────
-
-let waitForExitFn: (ms?: number) => Promise<'exited' | 'timeout' | 'released'>;
-
-const mockAgent = {
-  name: 'test-agent-abc',
-  get waitForExit() {
-    return waitForExitFn;
-  },
-  get waitForIdle() {
-    return vi.fn().mockImplementation(() => new Promise(() => {}));
-  },
-  release: vi.fn().mockResolvedValue(undefined),
-};
-
-const mockHuman = {
-  name: 'WorkflowRunner',
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-};
-
-const mockListeners = new Map<string, Set<(...args: any[]) => void>>();
-function emitMockEvent(event: string, ...args: any[]): void {
-  const set = mockListeners.get(event);
-  if (set) for (const cb of set) cb(...args);
-}
-
-const mockRelayInstance = {
-  spawnPty: vi.fn().mockImplementation(async ({ name, task }: { name: string; task?: string }) => {
-    const stepComplete = task?.match(/STEP_COMPLETE:([^\n]+)/)?.[1]?.trim();
-    const isReview = task?.includes('REVIEW_DECISION: APPROVE or REJECT');
-    const output = isReview
-      ? 'REVIEW_DECISION: APPROVE\nREVIEW_REASON: looks good\n'
-      : stepComplete
-        ? `STEP_COMPLETE:${stepComplete}\n`
-        : 'STEP_COMPLETE:unknown\n';
-
-    queueMicrotask(() => {
-      emitMockEvent('workerOutput', { name, chunk: output });
-    });
-
-    return { ...mockAgent, name };
-  }),
-  human: vi.fn().mockReturnValue(mockHuman),
-  shutdown: vi.fn().mockResolvedValue(undefined),
-  onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-  addListener: vi.fn((event: string, cb: (...args: any[]) => void) => {
-    let set = mockListeners.get(event);
-    if (!set) {
-      set = new Set();
-      mockListeners.set(event, set);
+// ── Injected step executor ────────────────────────────────────────────────────
+// Replaces real agent/PTY spawning with an in-process stub. Supplying an
+// `executor` makes the runner skip broker/relay init entirely (see runner.ts),
+// so resume/cache machinery is exercised without launching any processes. The
+// captured `resolvedTask` lets tests assert on what each step was handed.
+function makeExecutor(): RunnerStepExecutor & {
+  executeAgentStep: ReturnType<typeof vi.fn>;
+} {
+  const executeAgentStep = vi.fn(
+    async (step: WorkflowStep, _agent: AgentDefinition, resolvedTask: string) => {
+      const isReview = resolvedTask.includes('REVIEW_DECISION: APPROVE or REJECT');
+      return isReview
+        ? 'REVIEW_DECISION: APPROVE\nREVIEW_REASON: looks good\n'
+        : `STEP_COMPLETE:${step.name}\n`;
     }
-    set.add(cb);
-    return () => set!.delete(cb);
-  }),
-  listAgentsRaw: vi.fn().mockResolvedValue([]),
-};
-
-vi.mock('../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
-
-// Import after mocking
-const { WorkflowRunner } = await import('../runner.js');
-const { JsonFileWorkflowDb } = await import('../file-db.js');
+  );
+  return { executeAgentStep };
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -250,15 +180,15 @@ function writeCachedOutput(tmpDir: string, runId: string, stepName: string, outp
 describe('resume fallback to step-output cache', () => {
   let db: WorkflowDb;
   let runner: InstanceType<typeof WorkflowRunner>;
+  let executor: ReturnType<typeof makeExecutor>;
   let tmpDir: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    waitForExitFn = vi.fn().mockResolvedValue('exited');
-    mockListeners.clear();
     tmpDir = mkdtempSync(path.join(os.tmpdir(), 'resume-fallback-'));
     db = makeDb();
-    runner = new WorkflowRunner({ db, workspaceId: 'ws-test', cwd: tmpDir });
+    executor = makeExecutor();
+    runner = new WorkflowRunner({ db, workspaceId: 'ws-test', cwd: tmpDir, executor });
   });
 
   afterEach(() => {
@@ -302,7 +232,12 @@ describe('resume fallback to step-output cache', () => {
     const config = makeResumeConfig();
     const dbPath = path.join(tmpDir, '.agent-relay', 'workflow-runs.jsonl');
     const fileDb = new JsonFileWorkflowDb(dbPath);
-    const dbRunner = new WorkflowRunner({ db: fileDb, workspaceId: 'ws-test', cwd: tmpDir });
+    const dbRunner = new WorkflowRunner({
+      db: fileDb,
+      workspaceId: 'ws-test',
+      cwd: tmpDir,
+      executor: makeExecutor(),
+    });
 
     await fileDb.insertRun(makeRunRow(runId, config));
     await fileDb.insertStep(makeStepRow(runId, 'step-a', 'Do step A', [], 'failed'));
@@ -356,8 +291,8 @@ describe('resume fallback to step-output cache', () => {
     const run = await (runner as any).resume(runId, undefined, config);
     expect(run.status, run.error).toBe('completed');
 
-    const spawnedTasks = mockRelayInstance.spawnPty.mock.calls.map(
-      ([args]) => (args as { task?: string }).task ?? ''
+    const spawnedTasks = executor.executeAgentStep.mock.calls.map(
+      (call) => (call[2] as string | undefined) ?? ''
     );
     expect(spawnedTasks.some((task) => task.includes('Use cached value: hello world'))).toBe(true);
   });

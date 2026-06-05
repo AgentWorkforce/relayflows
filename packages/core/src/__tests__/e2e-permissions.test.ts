@@ -177,26 +177,57 @@ let waitForExitFn: (ms?: number) => Promise<'exited' | 'timeout' | 'released'>;
 let waitForIdleFn: (ms?: number) => Promise<'idle' | 'timeout' | 'exited'>;
 let mockSpawnOutputs: string[] = [];
 
-const mockAgent = {
-  name: 'test-agent-abc',
-  get waitForExit() {
-    return waitForExitFn;
-  },
-  get waitForIdle() {
-    return waitForIdleFn;
-  },
-  release: vi.fn().mockResolvedValue(undefined),
-};
+// Spawned-agent handle shaped like harness-driver's SpawnedAgentHandle, driven
+// by the test's waitForExitFn/waitForIdleFn. The runner wraps these in a
+// WorkflowAgentHandle that reads `.reason`, so they must resolve to { reason }.
+function makeMockHandle(name: string) {
+  return {
+    name,
+    runtime: 'pty' as const,
+    exitCode: undefined as number | undefined,
+    exitSignal: undefined as string | undefined,
+    waitForExit: (ms?: number) => waitForExitFn(ms).then((reason) => ({ reason })),
+    waitForIdle: (ms?: number) => waitForIdleFn(ms).then((reason) => ({ reason })),
+    release: vi.fn().mockResolvedValue({ name }),
+  };
+}
 
-const mockHuman = {
-  name: 'WorkflowRunner',
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-};
-
-const mockListeners = new Map<string, Set<(...args: any[]) => void>>();
-function emitMockEvent(event: string, ...args: any[]): void {
-  const set = mockListeners.get(event);
-  if (set) for (const cb of set) cb(...args);
+// The runner consumes broker events via `client.onEvent(BrokerEvent)`. Tests
+// still call `emitMockEvent('workerOutput'|...)`; translate those legacy named
+// events into the BrokerEvent shapes the runner switches on.
+const eventListeners = new Set<(event: any) => void>();
+function emitMockEvent(event: string, payload: any = {}): void {
+  let broker: any;
+  switch (event) {
+    case 'workerOutput':
+      broker = { kind: 'worker_stream', name: payload.name, stream: 'stdout', chunk: payload.chunk };
+      break;
+    case 'messageReceived':
+      broker = {
+        kind: 'relay_inbound',
+        event_id: payload.eventId,
+        from: payload.from,
+        target: payload.to,
+        body: payload.text,
+        thread_id: payload.threadId,
+      };
+      break;
+    case 'agentSpawned':
+      broker = { kind: 'agent_spawned', name: payload.name, runtime: payload.runtime ?? 'pty' };
+      break;
+    case 'agentReleased':
+      broker = { kind: 'agent_released', name: payload.name };
+      break;
+    case 'agentExited':
+      broker = { kind: 'agent_exited', name: payload.name, code: payload.exitCode, signal: payload.exitSignal };
+      break;
+    case 'agentIdle':
+      broker = { kind: 'agent_idle', name: payload.name, idle_secs: payload.idleSecs };
+      break;
+    default:
+      broker = { kind: event, ...payload };
+  }
+  for (const cb of [...eventListeners]) cb(broker);
 }
 
 const defaultSpawnPtyImplementation = async ({ name, task }: { name: string; task?: string }) => {
@@ -208,29 +239,29 @@ const defaultSpawnPtyImplementation = async ({ name, task }: { name: string; tas
     emitMockEvent('workerOutput', { name, chunk: output });
   });
 
-  return { ...mockAgent, name };
+  return makeMockHandle(name);
 };
 
 const mockRelayInstance = {
   spawnPty: vi.fn().mockImplementation(defaultSpawnPtyImplementation),
-  human: vi.fn().mockReturnValue(mockHuman),
-  shutdown: vi.fn().mockResolvedValue(undefined),
-  onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-  addListener: vi.fn((event: string, cb: (...args: any[]) => void) => {
-    let set = mockListeners.get(event);
-    if (!set) {
-      set = new Set();
-      mockListeners.set(event, set);
-    }
-    set.add(cb);
-    return () => set!.delete(cb);
+  onEvent: vi.fn((cb: (event: any) => void) => {
+    eventListeners.add(cb);
+    return () => eventListeners.delete(cb);
   }),
-  listAgentsRaw: vi.fn().mockResolvedValue([]),
+  connectEvents: vi.fn(),
+  listAgents: vi.fn().mockResolvedValue([]),
+  release: vi.fn().mockResolvedValue({ name: '' }),
+  sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
+  shutdown: vi.fn().mockResolvedValue(undefined),
 };
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+  };
+});
 
 const { WorkflowRunner } = await import('../runner.js');
 const { formatDryRunReport } = await import('../dry-run-format.js');
@@ -311,9 +342,8 @@ describe('WorkflowRunner permissions integration', () => {
     waitForExitFn = vi.fn().mockResolvedValue('exited');
     waitForIdleFn = vi.fn().mockImplementation(() => never());
     mockSpawnOutputs = [];
-    mockAgent.release.mockResolvedValue(undefined);
     mockRelayInstance.spawnPty.mockImplementation(defaultSpawnPtyImplementation);
-    mockListeners.clear();
+    eventListeners.clear();
     lastProvisionCall = null;
     lastProvisionResult = null;
     workspaceDir = createWorkspace();
@@ -393,7 +423,10 @@ describe('WorkflowRunner permissions integration', () => {
         expect.objectContaining({
           agent: 'writer',
           access: 'readwrite',
-          writePaths: 1,
+          // cloud v8 grants write on every non-denied file under readwrite
+          // access (5 workspace files − 2 denied: .env, secrets/** = 3), where
+          // the old compiler counted only the explicit files.write pattern (1).
+          writePaths: 3,
         }),
         expect.objectContaining({
           agent: 'admin-lead',

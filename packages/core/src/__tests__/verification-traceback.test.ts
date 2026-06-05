@@ -118,18 +118,19 @@ vi.mock('node:child_process', async () => {
   };
 });
 
-const mockHuman = {
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-};
+const eventListeners = new Set<(event: any) => void>();
 
 const mockRelayInstance = {
   spawnPty: vi.fn(),
-  human: vi.fn().mockReturnValue(mockHuman),
-  shutdown: vi.fn().mockResolvedValue(undefined),
-  onBrokerStderr: vi.fn().mockReturnValue(() => {}),
-  listAgentsRaw: vi.fn().mockResolvedValue([]),
+  onEvent: vi.fn((cb: (event: any) => void) => {
+    eventListeners.add(cb);
+    return () => eventListeners.delete(cb);
+  }),
+  connectEvents: vi.fn(),
   listAgents: vi.fn().mockResolvedValue([]),
-  addListener: vi.fn(() => () => {}),
+  release: vi.fn().mockResolvedValue({ name: '' }),
+  sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
+  shutdown: vi.fn().mockResolvedValue(undefined),
 };
 
 vi.mock('@relaycast/sdk', () => ({
@@ -137,9 +138,13 @@ vi.mock('@relaycast/sdk', () => ({
   RelayError: class RelayError extends Error {},
 }));
 
-vi.mock('../../relay.js', () => ({
-  AgentRelay: vi.fn().mockImplementation(() => mockRelayInstance),
-}));
+vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
+  return {
+    ...actual,
+    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+  };
+});
 
 const { workflow } = await import('../builder.js');
 const { WorkflowRunner } = await import('../runner.js');
@@ -244,6 +249,11 @@ function makeConfig(input: {
     errorHandling: {
       strategy: 'retry',
       retryDelayMs: 0,
+      // The runner now spawns a repair agent between retries by default under
+      // strategy 'retry'. These tests count execNonInteractive calls to assert
+      // the diagnostic-agent vs standard-retry flow, so opt out of the repair
+      // agent to keep the expected attempt/diagnostic call sequence.
+      repairRetries: 0,
     },
     agents: [
       {
@@ -303,9 +313,8 @@ describe('verification traceback retry handling', () => {
     queuedSubprocessResults = [];
     queuedCollectorResults = [];
     mockRelayInstance.shutdown.mockResolvedValue(undefined);
-    mockRelayInstance.onBrokerStderr.mockReturnValue(() => {});
     mockRelayInstance.listAgents.mockResolvedValue([]);
-    mockRelayInstance.listAgentsRaw.mockResolvedValue([]);
+    eventListeners.clear();
   });
 
   afterAll(async () => {

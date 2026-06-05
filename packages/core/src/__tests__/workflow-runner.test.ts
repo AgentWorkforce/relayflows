@@ -252,14 +252,28 @@ function makeSupervisedConfig(stepOverrides: WorkflowStepOverride = {}): RelayYa
   });
 }
 
-function readCompletedTrajectoryFile(dir: string): any {
-  const completedDir = path.join(dir, '.trajectories', 'completed');
-  if (!existsSync(completedDir)) return null;
+function findFirstJsonFile(dir: string): string | null {
+  if (!existsSync(dir)) return null;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const nested = findFirstJsonFile(entryPath);
+      if (nested) return nested;
+    }
+    if (entry.isFile() && entry.name.endsWith('.json')) return entryPath;
+  }
+  return null;
+}
 
-  const jsonFile = readdirSync(completedDir).find((file) => file.endsWith('.json'));
+function readCompletedTrajectoryFile(dir: string): any {
+  // agent-trajectories v0.6 relocated the default data dir from `.trajectories`
+  // to `.agentworkforce/trajectories` and stores each trajectory in a per-id
+  // subdirectory (completed/<id>/trajectory.json), so scan recursively.
+  const completedDir = path.join(dir, '.agentworkforce', 'trajectories', 'completed');
+  const jsonFile = findFirstJsonFile(completedDir);
   if (!jsonFile) return null;
 
-  return JSON.parse(readFileSync(path.join(completedDir, jsonFile), 'utf-8'));
+  return JSON.parse(readFileSync(jsonFile, 'utf-8'));
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -641,7 +655,12 @@ agents:
       }
     });
 
-    it('does not spawn deterministic repair agents unless repair retries are explicitly enabled', async () => {
+    it('does not spawn deterministic repair agents when retries are disabled (fail-fast)', async () => {
+      // The runner's applyReliabilityDefaults auto-enables strategy:'retry' with
+      // repairRetries when agents are present, so a failing deterministic gate is
+      // repaired by default. Opting into fail-fast is the contract for disabling
+      // that — a deterministic failure should then surface immediately with no
+      // repair agent spawned.
       const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relay-deterministic-no-implicit-repair-'));
       const repairAgent = vi.fn(async () => 'unexpected repair');
       runner = new WorkflowRunner({
@@ -656,6 +675,7 @@ agents:
       try {
         const run = await runner.execute(
           makeConfig({
+            errorHandling: { strategy: 'fail-fast' },
             agents: [{ name: 'fixer', cli: 'claude', role: 'implementation engineer' }],
             workflows: [
               {
@@ -682,7 +702,10 @@ agents:
 
     it('should fail when owner response provides no decision, marker, or evidence', async () => {
       mockSpawnOutputs = ['Owner completed work but forgot sentinel\n'];
-      const run = await runner.execute(makeConfig(), 'default');
+      // The runner now defaults to strategy:'retry' with repairRetries. This test
+      // asserts the first-pass failure path, so opt into fail-fast to surface the
+      // missing-decision error immediately instead of entering the repair/retry loop.
+      const run = await runner.execute(makeConfig({ errorHandling: { strategy: 'fail-fast' } }), 'default');
       expect(run.status).toBe('failed');
       expect(run.error).toContain('owner completion decision missing');
     });
@@ -924,7 +947,10 @@ agents:
       expect(stepRows[0].output).not.toContain('Worker already exited; artifacts look correct');
     });
 
-    it('should fail when review response lacks any usable decision signal', async () => {
+    it('should fail closed (reject) when the reviewer hedges instead of deciding', async () => {
+      // A reviewer that explicitly defers ("I need more context before deciding")
+      // never emitted a decision. The runner treats declared indecision as a
+      // fail-closed REJECT so the step retries rather than crashing as malformed.
       mockSpawnOutputs = [
         'worker finished\n',
         'STEP_COMPLETE:step-1\n',
@@ -932,7 +958,7 @@ agents:
       ];
       const run = await runner.execute(makeSupervisedConfig(), 'default');
       expect(run.status).toBe('failed');
-      expect(run.error).toContain('review response malformed');
+      expect(run.error).toContain('review rejected');
     });
 
     it('should fail when review explicitly rejects step output', async () => {
@@ -1027,20 +1053,29 @@ agents:
           if (isOwner) {
             return {
               name,
+              runtime: 'pty' as const,
+              exitCode: undefined,
+              exitSignal: undefined,
+              // SpawnedAgentHandle resolves to `{ reason }` objects; the runner's
+              // WorkflowAgentHandle destructures `reason`, so raw strings would
+              // map to `undefined` and the timeout would go undetected.
               waitForExit: vi.fn().mockImplementation(async () => {
                 await Promise.resolve();
-                return 'timeout';
+                return { reason: 'timeout' };
               }),
-              waitForIdle: vi.fn().mockResolvedValue('timeout'),
+              waitForIdle: vi.fn().mockResolvedValue({ reason: 'timeout' }),
               release: ownerRelease,
             };
           }
 
           return {
             name,
+            runtime: 'pty' as const,
+            exitCode: undefined,
+            exitSignal: undefined,
             waitForExit: vi.fn().mockImplementation(async () => {
               await workerRelease();
-              return 'released';
+              return { reason: 'released' };
             }),
             waitForIdle: vi.fn().mockImplementation(() => never()),
             release: workerRelease,
@@ -1070,7 +1105,9 @@ agents:
       waitForExitFn = vi.fn().mockResolvedValue('timeout');
       waitForIdleFn = vi.fn().mockResolvedValue('timeout');
 
-      const run = await runner.execute(makeConfig(), 'default');
+      // fail-fast so the single timeout surfaces immediately instead of entering
+      // the auto-enabled repair/retry loop (which would re-spawn timing-out mocks).
+      const run = await runner.execute(makeConfig({ errorHandling: { strategy: 'fail-fast' } }), 'default');
       expect(run.status).toBe('failed');
       expect(run.error).toContain('timed out');
       expect(events).toContainEqual({ type: 'step:owner-timeout', stepName: 'step-1' });

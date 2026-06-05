@@ -1,10 +1,10 @@
-import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
 
-import { createLocalJwksKeyPair } from '@agent-relay/cloud';
+import { expect, test } from 'vitest';
+
+import { createLocalJwksKeyPair, getDefaultPermissionAuditPath } from '@agent-relay/cloud';
 import { provisionWorkflowAgents } from '../provisioner.js';
 
 async function createWorkspace(): Promise<{ dir: string; cleanup: () => Promise<void> }> {
@@ -36,7 +36,7 @@ test('provisionWorkflowAgents writes a permission audit without token values', a
       skipMount: true,
     });
 
-    const auditPath = path.join(workspace.dir, '.agent-relay', 'permission-audit.json');
+    const auditPath = getDefaultPermissionAuditPath(workspace.dir);
     const auditRaw = await readFile(auditPath, 'utf8');
     const auditJson = JSON.parse(auditRaw) as {
       entries: Array<{
@@ -46,17 +46,17 @@ test('provisionWorkflowAgents writes a permission audit without token values', a
       }>;
     };
 
-    assert.ok(auditJson.entries.length >= 3);
-    assert.deepEqual(
-      auditJson.entries.map((entry) => `${entry.agentName}:${entry.action}`),
-      ['worker:resolve', 'worker:mint', 'relay-admin:mint']
-    );
-    assert.equal(
-      auditJson.entries[1]?.details.jwtPath,
+    expect(auditJson.entries.length).toBeGreaterThanOrEqual(3);
+    expect(auditJson.entries.map((entry) => `${entry.agentName}:${entry.action}`)).toEqual([
+      'worker:resolve',
+      'worker:mint',
+      'relay-admin:mint',
+    ]);
+    expect(auditJson.entries[1]?.details.jwtPath).toBe(
       path.join(workspace.dir, '.relay', 'tokens', 'worker.jwt')
     );
-    assert.ok(!auditRaw.includes(result.agents.worker.token));
-    assert.ok(!auditRaw.includes(result.adminToken));
+    expect(auditRaw.includes(result.agents.worker.token)).toBe(false);
+    expect(auditRaw.includes(result.adminToken)).toBe(false);
   } finally {
     await workspace.cleanup();
   }

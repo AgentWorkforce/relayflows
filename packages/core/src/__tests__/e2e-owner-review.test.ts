@@ -207,6 +207,11 @@ type WorkflowStepOverride = Partial<NonNullable<RelayYamlConfig['workflows']>[nu
 
 function makeSupervisedConfig(stepOverrides: WorkflowStepOverride = {}): RelayYamlConfig {
   return makeConfig({
+    // The runner auto-enables strategy:'retry' with repairRetries when agents are
+    // present (applyReliabilityDefaults). These supervised scenarios assert
+    // first-pass owner/review outcomes, so opt into fail-fast to exercise the
+    // failure path deterministically instead of entering the repair/retry loop.
+    errorHandling: { strategy: 'fail-fast' },
     swarm: { pattern: 'hub-spoke' },
     agents: [
       { name: 'specialist', cli: 'claude', role: 'engineer' },
@@ -562,7 +567,13 @@ describe('PR #511 E2E: Auto Step Owner + Review Gating', () => {
 
           return {
             name,
-            waitForExit: vi.fn().mockResolvedValue(isReview ? 'timeout' : 'exited'),
+            runtime: 'pty' as const,
+            exitCode: undefined,
+            exitSignal: undefined,
+            // SpawnedAgentHandle resolves to `{ reason }`; the runner's
+            // WorkflowAgentHandle destructures it, so raw strings would map to
+            // undefined and the timeout would never be detected.
+            waitForExit: vi.fn().mockResolvedValue({ reason: isReview ? 'timeout' : 'exited' }),
             waitForIdle: vi.fn().mockImplementation(() => never()),
             release: vi.fn().mockResolvedValue(undefined),
           };
@@ -599,7 +610,13 @@ describe('PR #511 E2E: Auto Step Owner + Review Gating', () => {
 
           return {
             name,
-            waitForExit: vi.fn().mockResolvedValue(isReview ? 'timeout' : 'exited'),
+            runtime: 'pty' as const,
+            exitCode: undefined,
+            exitSignal: undefined,
+            // SpawnedAgentHandle resolves to `{ reason }`; the runner's
+            // WorkflowAgentHandle destructures it, so raw strings would map to
+            // undefined and the timeout would never be detected.
+            waitForExit: vi.fn().mockResolvedValue({ reason: isReview ? 'timeout' : 'exited' }),
             waitForIdle: vi.fn().mockImplementation(() => never()),
             release: vi.fn().mockResolvedValue(undefined),
           };
@@ -630,7 +647,9 @@ describe('PR #511 E2E: Auto Step Owner + Review Gating', () => {
       waitForExitFn = vi.fn().mockResolvedValue('timeout');
       waitForIdleFn = vi.fn().mockResolvedValue('timeout');
 
-      const run = await runner.execute(makeConfig(), 'default');
+      // fail-fast so the single owner timeout surfaces immediately rather than
+      // re-entering the auto-enabled repair/retry loop with timing-out mocks.
+      const run = await runner.execute(makeConfig({ errorHandling: { strategy: 'fail-fast' } }), 'default');
       expect(run.status).toBe('failed');
       expect(run.error).toContain('timed out');
       expect(events.length).toBeGreaterThanOrEqual(1);
@@ -758,7 +777,9 @@ describe('PR #511 E2E: Auto Step Owner + Review Gating', () => {
     it('should fail when owner does not provide a marker, decision, or evidence', async () => {
       mockSpawnOutputs = ['The work is done but I forgot the sentinel.\n'];
 
-      const run = await runner.execute(makeConfig(), 'default');
+      // fail-fast so the missing-decision failure surfaces on the first pass
+      // instead of entering the auto-enabled repair/retry loop.
+      const run = await runner.execute(makeConfig({ errorHandling: { strategy: 'fail-fast' } }), 'default');
       expect(run.status).toBe('failed');
       expect(run.error).toContain('owner completion decision missing');
     }, 15000);

@@ -475,10 +475,16 @@ export async function runScriptWorkflow(
 ): Promise<void> {
   diag(`runScriptWorkflow: resolving ${filePath}`);
   const resolved = path.resolve(filePath);
+  // Validate the extension before existence so an unsupported file type is
+  // reported as such even when the path does not exist — the file type is a
+  // caller mistake regardless of whether the file is present.
+  const ext = path.extname(resolved).toLowerCase();
+  if (ext !== '.ts' && ext !== '.tsx' && ext !== '.py') {
+    throw new Error(`Unsupported file type: ${ext}. Use .yaml, .yml, .ts, or .py`);
+  }
   if (!fs.existsSync(resolved)) {
     throw new Error(`File not found: ${resolved}`);
   }
-  const ext = path.extname(resolved).toLowerCase();
   const runIdFile = path.join(
     process.cwd(),
     '.agent-relay',

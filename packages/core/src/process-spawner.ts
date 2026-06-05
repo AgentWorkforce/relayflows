@@ -68,18 +68,29 @@ export function spawnProcess(command: string[], options: SpawnOptions): ChildPro
   return cpSpawn(bin, args, options);
 }
 
-export function collectOutput(process: ChildProcess): Promise<string> {
+export function collectOutput(
+  process: ChildProcess,
+  onChunk?: (accumulated: string) => void,
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let settled = false;
     const stdout: string[] = [];
     const stderr: string[] = [];
 
+    const notify = () => {
+      if (onChunk && !settled) {
+        onChunk(`${stdout.join('')}${stderr.join('')}`);
+      }
+    };
+
     process.stdout?.on('data', (chunk: Buffer | string) => {
       stdout.push(chunk.toString());
+      notify();
     });
 
     process.stderr?.on('data', (chunk: Buffer | string) => {
       stderr.push(chunk.toString());
+      notify();
     });
 
     process.once('error', (err) => {
@@ -124,7 +135,23 @@ async function runCommand(command: SpawnCommand, opts: ShellOpts): Promise<Spawn
     stdio: 'pipe',
   });
 
-  const outputPromise = collectOutput(child);
+  // Some agent CLIs keep their process alive after emitting a completion
+  // marker (session-style REPLs). Once the marker is observed in the streamed
+  // output the step's required artifact already exists, so wait no longer:
+  // terminate gracefully and treat it as a success. Without this, such a step
+  // sits idle until the full timeout fires and is reported as a spurious
+  // "Process timed out" failure despite having already completed.
+  let completedEarly = false;
+  let earlyKillTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const outputPromise = collectOutput(child, (accumulated) => {
+    if (!completedEarly && detectCompletion(accumulated)) {
+      completedEarly = true;
+      child.kill('SIGTERM');
+      earlyKillTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+    }
+  });
+
   const exitPromise = new Promise<{ exitCode?: number; exitSignal?: string }>((resolve, reject) => {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -141,6 +168,7 @@ async function runCommand(command: SpawnCommand, opts: ShellOpts): Promise<Spawn
     const clearTimer = () => {
       if (timer) clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      if (earlyKillTimer) clearTimeout(earlyKillTimer);
     };
 
     child.once('error', (error) => {
@@ -150,6 +178,16 @@ async function runCommand(command: SpawnCommand, opts: ShellOpts): Promise<Spawn
 
     child.once('close', (exitCode, exitSignal) => {
       clearTimer();
+
+      // Early completion wins over the timeout: even though we SIGTERM'd the
+      // child, the marker was already present, so this is a clean success.
+      // Normalise the outcome to exit code 0 with no signal — otherwise the
+      // SIGTERM would surface downstream as `exitCode === undefined &&
+      // exitSignal !== undefined`, which step execution treats as a failure.
+      if (completedEarly) {
+        resolve({ exitCode: 0, exitSignal: undefined });
+        return;
+      }
 
       if (timedOut) {
         reject(new Error(`Process timed out after ${opts.timeoutMs ?? 'unknown'}ms`));

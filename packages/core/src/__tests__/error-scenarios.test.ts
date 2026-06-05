@@ -537,21 +537,9 @@ describe('SwarmCoordinator error scenarios', () => {
 // ── WorkflowRunner error scenarios ───────────────────────────────────────────
 
 describe('WorkflowRunner error scenarios', () => {
-  // Mock AgentRelay for runner tests
-  const mockAgent = {
-    name: 'test-agent',
-    waitForExit: vi.fn().mockResolvedValue(0),
-    release: vi.fn(),
-  };
-
-  vi.mock('@agent-relay/sdk/relay', () => ({
-    AgentRelay: vi.fn().mockImplementation(() => ({
-      spawnPty: vi.fn().mockResolvedValue(mockAgent),
-      human: vi.fn().mockReturnValue({ sendMessage: vi.fn() }),
-      shutdown: vi.fn(),
-    })),
-  }));
-
+  // These tests only exercise validation / variable-resolution paths and
+  // early-rejecting execute()/resume() calls, none of which reach agent
+  // spawning — so no harness-driver mock is required here.
   let WorkflowRunner: any;
   let db: any;
   let runner: any;
