@@ -1,6 +1,6 @@
 {
   "name": "@relayflows/github-primitive",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "GitHub workflow primitive for Agent Relay",
   "type": "module",
   "main": "dist/index.js",
