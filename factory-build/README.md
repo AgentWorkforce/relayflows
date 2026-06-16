@@ -29,8 +29,12 @@ targets, acceptance command, tier, and the implementation goal.
 - **standard** (Claude loop): p1, p2, p3, p5 — low-risk, focused refactors.
 - **deep** (Claude + Codex loops): p6–p13, p11 — cloud/relay integration and the crux.
 
+## ⚠️ Prerequisite: land pear#368 before wave1
+[pear#368](https://github.com/AgentWorkforce/pear/pull/368) (`resolve Linear states dynamically per team`) rewrites `packages/factory-sdk/` — `config/schema.ts`, `orchestrator/factory.ts`, `types.ts`, `cli/fleet.ts` — the exact files **p1/p2/p3** edit. **Merge #368 first**, then run wave1 on top of it (otherwise the workflow PRs conflict). p2 must fold #368's new `linear.states` / `linear.statesByTeam` (per-team Linear state names) + the `stateIds` UUID fallback into **WorkspaceConfig**. Provider dependency carried in by #368: the `/linear/states` resource (relayfile-adapters `feat/linear-states-adapter`) must be materialized — this flows into the cloud lift (**p6/p8**), since the cloud watch path needs `/linear/states` too.
+
 ## Waves & dependency order
 ```
+wave0 (prereq)    pear#368 merged (dynamic per-team Linear states)
 wave1 (parallel)  p1 p2 p3 (pear prep)   p11 (relay broker — independent)
 wave2             p4  extraction  ──►  ⛔ PUBLISH GATE (human: npm publish + pear swap)
 wave3 (parallel)  p5 (pear teardown)     p6 (cloud host orchestrator)
