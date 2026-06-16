@@ -84,6 +84,10 @@ program
             console.log('\nWorkflow resumed and completed successfully.');
             return;
           }
+          if (result.status === 'needs_human') {
+            console.log(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`);
+            return;
+          }
           console.error(`\nWorkflow ${result.status}${result.error ? `: ${result.error}` : ''}`);
           if (result.id) {
             console.error(`Run ID: ${result.id} — resume with: relayflows run ${filePath} --resume ${result.id}`);
@@ -109,6 +113,10 @@ program
 
         if (result.status === 'completed') {
           console.log('\nWorkflow completed successfully.');
+          return;
+        }
+        if (result.status === 'needs_human') {
+          console.log(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`);
           return;
         }
         console.error(`\nWorkflow ${result.status}${result.error ? `: ${result.error}` : ''}`);

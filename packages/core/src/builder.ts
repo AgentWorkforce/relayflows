@@ -114,6 +114,7 @@ export interface ErrorOptions {
   notifyChannel?: string;
   repairAgent?: string;
   repairRetries?: number;
+  onExhaustion?: 'fail' | 'needs-human';
 }
 
 export type ReliabilityOptions = ErrorOptions;
@@ -390,6 +391,7 @@ export class WorkflowBuilder {
     if (options?.notifyChannel !== undefined) this._errorHandling.notifyChannel = options.notifyChannel;
     if (options?.repairAgent !== undefined) this._errorHandling.repairAgent = options.repairAgent;
     if (options?.repairRetries !== undefined) this._errorHandling.repairRetries = options.repairRetries;
+    if (options?.onExhaustion !== undefined) this._errorHandling.onExhaustion = options.onExhaustion;
     return this;
   }
 
@@ -404,6 +406,7 @@ export class WorkflowBuilder {
       notifyChannel: options.notifyChannel,
       repairAgent: options.repairAgent,
       repairRetries: options.repairRetries ?? options.maxRetries ?? 2,
+      onExhaustion: options.onExhaustion,
     });
   }
 

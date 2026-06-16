@@ -41,7 +41,12 @@ export async function runInCloud(config: RelayYamlConfig, options: CloudRunOptio
     const data = (await statusRes.json()) as { runId: string; status: WorkflowRunStatus; error?: string; createdAt?: string; updatedAt?: string };
     if (data.status !== lastStatus) { lastStatus = data.status; options.onStatusChange?.(lastStatus, runId); }
 
-    if (data.status === 'completed' || data.status === 'failed') {
+    if (
+      data.status === 'completed' ||
+      data.status === 'failed' ||
+      data.status === 'cancelled' ||
+      data.status === 'needs_human'
+    ) {
       return {
         id: runId, workspaceId: '', workflowName: config.name ?? 'cloud-workflow',
         pattern: (config.swarm?.pattern as any) ?? 'dag', status: data.status, config,

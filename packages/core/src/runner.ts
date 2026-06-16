@@ -250,6 +250,7 @@ export type WorkflowEvent =
   | { type: 'run:started'; runId: string }
   | { type: 'run:completed'; runId: string }
   | { type: 'run:failed'; runId: string; error: string }
+  | { type: 'run:needs-human'; runId: string; error: string; stepName: string }
   | { type: 'run:cancelled'; runId: string }
   | { type: 'broker:event'; runId: string; event: BrokerEvent }
   | { type: 'step:started'; runId: string; stepName: string }
@@ -3343,35 +3344,40 @@ export class WorkflowRunner {
         });
 
         this.postCompletionReport(workflow.name, outcomes, summary, confidence);
-        this.logRunSummary(workflow.name, outcomes, runId);
+        this.logRunSummary(workflow.name, outcomes, runId, 'completed');
       } else {
         const failedStep = [...stepStates.values()].find((s) => s.row.status === 'failed');
         const errorMsg = failedStep?.row.error ?? 'One or more steps failed';
-        await this.updateRunStatus(runId, 'failed', errorMsg);
-        this.emit({ type: 'run:failed', runId, error: errorMsg });
+        const needsHumanStep = this.findNeedsHumanExhaustedStep(config.errorHandling, stepStates);
 
-        const outcomes = this.collectOutcomes(stepStates, workflow.steps);
-        const summary = this.trajectory.buildRunSummary(outcomes);
-        const confidence = this.trajectory.computeConfidence(outcomes);
-        const learnings = this.trajectory.extractLearnings(outcomes);
-        const challenges = this.trajectory.extractChallenges(outcomes);
-        this.postFailureReport(workflow.name, outcomes, errorMsg);
-        this.logRunSummary(workflow.name, outcomes, runId);
-        await this.trajectory.abandon(errorMsg, {
-          summary,
-          confidence,
-          learnings,
-          challenges,
-        });
+        if (needsHumanStep) {
+          await this.completeNeedsHumanRun(runId, workflow, stepStates, needsHumanStep);
+        } else {
+          await this.updateRunStatus(runId, 'failed', errorMsg);
+          this.emit({ type: 'run:failed', runId, error: errorMsg });
+
+          const outcomes = this.collectOutcomes(stepStates, workflow.steps);
+          const summary = this.trajectory.buildRunSummary(outcomes);
+          const confidence = this.trajectory.computeConfidence(outcomes);
+          const learnings = this.trajectory.extractLearnings(outcomes);
+          const challenges = this.trajectory.extractChallenges(outcomes);
+          this.postFailureReport(workflow.name, outcomes, errorMsg);
+          this.logRunSummary(workflow.name, outcomes, runId, 'failed');
+          await this.trajectory.abandon(errorMsg, {
+            summary,
+            confidence,
+            learnings,
+            challenges,
+          });
+        }
       }
     } catch (err) {
       if (process.env.RF_DEBUG_STACK) console.error('RF_DEBUG_STACK_EXEC', (err as Error)?.stack);
       const errorMsg = err instanceof Error ? err.message : String(err);
-      const status: WorkflowRunStatus =
-        !isResume && this.abortController?.signal.aborted ? 'cancelled' : 'failed';
-      await this.updateRunStatus(runId, status, errorMsg);
+      const isCancelled = !isResume && this.abortController?.signal.aborted;
 
-      if (status === 'cancelled') {
+      if (isCancelled) {
+        await this.updateRunStatus(runId, 'cancelled', errorMsg);
         // Mark any pending or in-progress steps as failed due to cancellation
         for (const [stepName, state] of stepStates) {
           if (state.row.status === 'pending' || state.row.status === 'running') {
@@ -3390,15 +3396,21 @@ export class WorkflowRunner {
         this.postToChannel(`Workflow **${workflow.name}** cancelled`);
         await this.trajectory.abandon('Cancelled by user');
       } else {
-        this.emit({ type: 'run:failed', runId, error: errorMsg });
-        this.postToChannel(`Workflow failed: ${errorMsg}`);
-        const outcomes = this.collectOutcomes(stepStates, workflow.steps);
-        await this.trajectory.abandon(errorMsg, {
-          summary: this.trajectory.buildRunSummary(outcomes),
-          confidence: this.trajectory.computeConfidence(outcomes),
-          learnings: this.trajectory.extractLearnings(outcomes),
-          challenges: this.trajectory.extractChallenges(outcomes),
-        });
+        const needsHumanStep = this.findNeedsHumanExhaustedStep(config.errorHandling, stepStates);
+        if (needsHumanStep) {
+          await this.completeNeedsHumanRun(runId, workflow, stepStates, needsHumanStep);
+        } else {
+          await this.updateRunStatus(runId, 'failed', errorMsg);
+          this.emit({ type: 'run:failed', runId, error: errorMsg });
+          this.postToChannel(`Workflow failed: ${errorMsg}`);
+          const outcomes = this.collectOutcomes(stepStates, workflow.steps);
+          await this.trajectory.abandon(errorMsg, {
+            summary: this.trajectory.buildRunSummary(outcomes),
+            confidence: this.trajectory.computeConfidence(outcomes),
+            learnings: this.trajectory.extractLearnings(outcomes),
+            challenges: this.trajectory.extractChallenges(outcomes),
+          });
+        }
       }
     } finally {
       this.lastFailedStepOutput.clear();
@@ -3909,6 +3921,9 @@ export class WorkflowRunner {
         if (process.env.RF_DEBUG_STACK) console.error('RF_DEBUG_STACK', (error as Error)?.stack);
         lastError = error instanceof Error ? error.message : String(error);
         lastCompletionReason = error instanceof WorkflowCompletionError ? error.completionReason : undefined;
+        if (lastCommandOutput) {
+          this.lastFailedStepOutput.set(step.name, lastCommandOutput);
+        }
       },
       getFailureResult: () => ({
         status: 'failed',
@@ -7304,12 +7319,72 @@ export class WorkflowRunner {
 
   // ── State helpers ─────────────────────────────────────────────────────
 
+  private findNeedsHumanExhaustedStep(
+    errorHandling: ErrorHandlingConfig | undefined,
+    stepStates: Map<string, StepState>
+  ): StepState | undefined {
+    if (errorHandling?.strategy !== 'retry' || errorHandling.onExhaustion !== 'needs-human') {
+      return undefined;
+    }
+
+    const repairRetries = errorHandling.repairRetries ?? 0;
+    if (repairRetries <= 0) return undefined;
+
+    return [...stepStates.values()].find(
+      (state) => state.row.status === 'failed' && state.row.retryCount >= repairRetries
+    );
+  }
+
+  private buildNeedsHumanError(failedStep: StepState): string {
+    const stepName = failedStep.row.stepName;
+    const stepError = failedStep.row.error ?? 'repair budget exhausted';
+    const evidence = (
+      failedStep.row.output ??
+      this.lastFailedStepOutput.get(stepName) ??
+      ''
+    ).trim();
+    const suffix = evidence ? `\n\nLast evidence:\n${evidence.slice(-2000)}` : '';
+    return `Step "${stepName}" exhausted its repair budget and needs human input: ${stepError}${suffix}`;
+  }
+
+  private async completeNeedsHumanRun(
+    runId: string,
+    workflow: WorkflowDefinition,
+    stepStates: Map<string, StepState>,
+    failedStep: StepState
+  ): Promise<void> {
+    const errorMsg = this.buildNeedsHumanError(failedStep);
+    await this.updateRunStatus(runId, 'needs_human', errorMsg);
+    this.emit({
+      type: 'run:needs-human',
+      runId,
+      stepName: failedStep.row.stepName,
+      error: errorMsg,
+    });
+
+    const outcomes = this.collectOutcomes(stepStates, workflow.steps);
+    this.postToChannel(`Workflow **${workflow.name}** needs human input: ${failedStep.row.stepName}`);
+    this.logRunSummary(workflow.name, outcomes, runId, 'needs_human');
+    if (this.trajectory) {
+      const summary = this.trajectory.buildRunSummary(outcomes);
+      const confidence = this.trajectory.computeConfidence(outcomes);
+      const learnings = this.trajectory.extractLearnings(outcomes);
+      const challenges = this.trajectory.extractChallenges(outcomes);
+      await this.trajectory.abandon(errorMsg, {
+        summary,
+        confidence,
+        learnings,
+        challenges,
+      });
+    }
+  }
+
   private async updateRunStatus(runId: string, status: WorkflowRunStatus, error?: string): Promise<void> {
     const patch: Partial<WorkflowRunRow> = {
       status,
       updatedAt: new Date().toISOString(),
     };
-    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+    if (status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'needs_human') {
       patch.completedAt = new Date().toISOString();
     }
     if (error) {
@@ -7555,16 +7630,25 @@ export class WorkflowRunner {
    * Log a human-readable run summary to the console after completion or failure.
    * Extracts the last meaningful lines from each step's raw PTY output.
    */
-  private logRunSummary(workflowName: string, outcomes: StepOutcome[], runId: string): void {
+  private logRunSummary(
+    workflowName: string,
+    outcomes: StepOutcome[],
+    runId: string,
+    status: Extract<WorkflowRunStatus, 'completed' | 'failed' | 'needs_human'> = 'failed'
+  ): void {
     const completed = outcomes.filter((o) => o.status === 'completed');
     const failed = outcomes.filter((o) => o.status === 'failed');
     const skipped = outcomes.filter((o) => o.status === 'skipped');
+    const statusLabel =
+      status === 'completed'
+        ? chalk.green('COMPLETED')
+        : status === 'needs_human'
+          ? chalk.yellow('NEEDS HUMAN')
+          : chalk.red('FAILED');
 
     console.log('');
     console.log(chalk.dim('━'.repeat(70)));
-    console.log(
-      `  Workflow "${workflowName}" — ${failed.length === 0 ? chalk.green('COMPLETED') : chalk.red('FAILED')}`
-    );
+    console.log(`  Workflow "${workflowName}" — ${statusLabel}`);
     console.log(
       `  ${chalk.green(`${completed.length} passed`)}, ${chalk.red(`${failed.length} failed`)}, ${chalk.dim(`${skipped.length} skipped`)}`
     );

@@ -30,6 +30,10 @@ export function createDefaultEventLogger(level: LogLevel = 'normal'): WorkflowEv
         console.log(chalk.red(`[workflow] FAILED: ${event.error}`));
         break;
 
+      case 'run:needs-human':
+        console.log(chalk.yellow(`[workflow] needs human: ${event.error}`));
+        break;
+
       case 'run:cancelled':
         if (level !== 'quiet') {
           console.log(chalk.yellow(`[workflow] cancelled`));
