@@ -241,6 +241,12 @@ export function createWorkflowRenderer(): WorkflowRenderer {
         break;
       }
 
+      case 'run:needs-human': {
+        setHeader(chalk.yellow(`Workflow needs human: ${event.stepName}`));
+        resolveWorkflow();
+        break;
+      }
+
       case 'run:cancelled': {
         setHeader(chalk.yellow('Workflow cancelled'));
         resolveWorkflow();

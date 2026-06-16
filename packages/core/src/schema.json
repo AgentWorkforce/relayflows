@@ -933,6 +933,11 @@
           "type": "integer",
           "minimum": 0,
           "description": "Retry budget for repair agents before terminal failure. Defaults to the retry budget when repair-capable agents are available; set 0 to disable repair agents."
+        },
+        "onExhaustion": {
+          "type": "string",
+          "enum": ["fail", "needs-human"],
+          "description": "Terminal run status when retry/repair exhaustion is handled but unresolved. Defaults to fail."
         }
       }
     }

@@ -290,6 +290,12 @@ async function runWithListr(
         break;
       }
 
+      case 'run:needs-human': {
+        setHeader(chalk.yellow(`Workflow needs human: ${event.stepName}`));
+        resolveWorkflow();
+        break;
+      }
+
       case 'run:cancelled': {
         setHeader(chalk.yellow('Workflow cancelled'));
         resolveWorkflow();
@@ -411,6 +417,9 @@ async function main(): Promise<void> {
     if (result.status === 'completed') {
       console.log(chalk.green('\nWorkflow completed successfully.'));
       process.exit(0);
+    } else if (result.status === 'needs_human') {
+      console.log(chalk.yellow(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`));
+      process.exit(0);
     } else {
       console.error(chalk.red(`\nWorkflow ${result.status}${result.error ? `: ${result.error}` : ''}`));
       process.exit(1);
@@ -468,6 +477,9 @@ async function main(): Promise<void> {
 
   if (result.status === 'completed') {
     console.log(chalk.green('\nWorkflow completed successfully.'));
+    process.exit(0);
+  } else if (result.status === 'needs_human') {
+    console.log(chalk.yellow(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`));
     process.exit(0);
   } else {
     console.error(chalk.red(`\nWorkflow ${result.status}${result.error ? `: ${result.error}` : ''}`));

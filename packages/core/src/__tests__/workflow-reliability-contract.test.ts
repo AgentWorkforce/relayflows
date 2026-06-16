@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { workflow } from '../builder.js';
-import { WorkflowRunner, type WorkflowDb } from '../runner.js';
+import { WorkflowRunner, type WorkflowDb, type WorkflowEvent } from '../runner.js';
 import type { RelayYamlConfig, WorkflowRunRow, WorkflowStepRow } from '../types.js';
 
 afterEach(() => {
@@ -104,6 +104,20 @@ describe('workflow reliability contract', () => {
     });
   });
 
+  it('passes through repair exhaustion handling options from the SDK builder', () => {
+    const config = workflow('repairable-needs-human')
+      .agent('fixer', { cli: 'claude', role: 'implementation engineer' })
+      .step('verify', { type: 'deterministic', command: 'npm test' })
+      .repairable({ repairRetries: 1, onExhaustion: 'needs-human' })
+      .toConfig();
+
+    expect(config.errorHandling).toMatchObject({
+      strategy: 'retry',
+      repairRetries: 1,
+      onExhaustion: 'needs-human',
+    });
+  });
+
   it('applies repair-aware defaults to raw runner configs with agents', async () => {
     const executeDeterministicStep = vi
       .fn()
@@ -198,6 +212,77 @@ describe('workflow reliability contract', () => {
     expect(run.error).toContain('verify');
     expect(executeAgentStep).toHaveBeenCalledTimes(2);
     expect(executeDeterministicStep).toHaveBeenCalledTimes(3);
+  });
+
+  it('ends needs_human when opted-in repair exhaustion leaves a gate unresolved', async () => {
+    const executeDeterministicStep = vi.fn(async () => ({
+      output: 'still broken: missing release approval',
+      exitCode: 1,
+    }));
+    const executeAgentStep = vi.fn(async () => 'attempted repair');
+    const events: WorkflowEvent[] = [];
+    const runner = new WorkflowRunner({
+      db: makeDb(),
+      workspaceId: 'ws-test',
+      cwd: process.cwd(),
+      executor: { executeDeterministicStep, executeAgentStep },
+    });
+    runner.on((event) => events.push(event));
+
+    const run = await runner.execute(
+      baseConfig({
+        errorHandling: {
+          strategy: 'retry',
+          repairRetries: 1,
+          retryDelayMs: 1,
+          repairAgent: 'fixer',
+          onExhaustion: 'needs-human',
+        },
+      }),
+      'default'
+    );
+
+    expect(run.status).toBe('needs_human');
+    expect(run.error).toContain('Step "verify" exhausted its repair budget');
+    expect(run.error).toContain('still broken: missing release approval');
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'run:needs-human', stepName: 'verify' })
+    );
+    expect(events.some((event) => event.type === 'run:failed')).toBe(false);
+    expect(executeAgentStep).toHaveBeenCalledTimes(1);
+    expect(executeDeterministicStep).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps real runner errors failed even when exhaustion handling is needs-human', async () => {
+    const runner = new WorkflowRunner({
+      db: makeDb(),
+      workspaceId: 'ws-test',
+      cwd: process.cwd(),
+    });
+
+    const run = await runner.execute(
+      baseConfig({
+        errorHandling: { strategy: 'retry', repairRetries: 1, onExhaustion: 'needs-human' },
+        workflows: [
+          {
+            name: 'default',
+            preflight: [{ command: 'exit 1' }],
+            steps: [
+              {
+                name: 'verify',
+                type: 'deterministic',
+                command: 'verify',
+                captureOutput: true,
+              },
+            ],
+          },
+        ],
+      }),
+      'default'
+    );
+
+    expect(run.status).toBe('failed');
+    expect(run.error).toContain('Preflight check failed');
   });
 
   it('keeps soft deterministic checks non-terminal so a later agent step can fix them', async () => {

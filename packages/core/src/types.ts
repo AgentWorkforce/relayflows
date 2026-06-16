@@ -491,6 +491,8 @@ export interface ErrorHandlingConfig {
   repairAgent?: string;
   /** Retry budget for repair agents before terminal failure. Set 0 to disable repair agents. */
   repairRetries?: number;
+  /** Terminal run status to use when retry/repair exhaustion is handled but unresolved. */
+  onExhaustion?: 'fail' | 'needs-human';
 }
 
 // ── Dry-run report types ────────────────────────────────────────────────
@@ -546,7 +548,13 @@ export interface WorkflowExecuteOptions {
 
 // ── Database row types ──────────────────────────────────────────────────────
 
-export type WorkflowRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type WorkflowRunStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'needs_human';
 
 /** Database row representing a workflow run. */
 export interface WorkflowRunRow {

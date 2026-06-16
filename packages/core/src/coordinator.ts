@@ -172,6 +172,7 @@ export interface SwarmCoordinatorEvents {
   'run:completed': (run: WorkflowRunRow) => void;
   'run:failed': (run: WorkflowRunRow) => void;
   'run:cancelled': (run: WorkflowRunRow) => void;
+  'run:needs_human': (run: WorkflowRunRow) => void;
   'step:started': (step: WorkflowStepRow) => void;
   'step:completed': (step: WorkflowStepRow) => void;
   'step:failed': (step: WorkflowStepRow) => void;
