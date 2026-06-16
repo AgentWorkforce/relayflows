@@ -529,6 +529,49 @@ describe('workflow reliability contract', () => {
     }
   });
 
+  it('retries transient agent-step network failures without consuming the step retry budget', async () => {
+    const executeAgentStep = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValueOnce('artifact complete\nRICKY_MASTER_CHILD_RUN_VERIFIED');
+    const events: WorkflowEvent[] = [];
+    const runner = new WorkflowRunner({
+      db: makeDb(),
+      workspaceId: 'ws-test',
+      cwd: process.cwd(),
+      executor: { executeAgentStep },
+    });
+    runner.on((event) => events.push(event));
+
+    const run = await runner.execute(
+      baseConfig({
+        errorHandling: { strategy: 'fail-fast' },
+        workflows: [
+          {
+            name: 'default',
+            steps: [
+              {
+                name: 'write-artifact',
+                agent: 'fixer',
+                task: 'Write a structured workflow artifact.',
+                retries: 0,
+                verification: {
+                  type: 'output_contains',
+                  value: 'RICKY_MASTER_CHILD_RUN_VERIFIED',
+                },
+              },
+            ],
+          },
+        ],
+      }),
+      'default'
+    );
+
+    expect(run.status, run.error).toBe('completed');
+    expect(executeAgentStep).toHaveBeenCalledTimes(2);
+    expect(events.some((event) => event.type === 'step:retrying')).toBe(false);
+  });
+
   it('repairs malformed agent artifacts before retrying the agent step', async () => {
     const executeAgentStep = vi.fn(async (step) => {
       if (step.name.includes('-repair-')) return 'patched artifact instructions';
