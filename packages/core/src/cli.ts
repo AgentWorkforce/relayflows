@@ -347,7 +347,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n[workflow] ${signal} received — shutting down broker...`);
-    await runner.relay?.shutdown().catch(() => undefined);
+    await runner.shutdownRelay().catch(() => undefined);
     process.exit(130);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));

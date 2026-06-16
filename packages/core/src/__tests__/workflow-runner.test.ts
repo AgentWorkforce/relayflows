@@ -147,9 +147,11 @@ const mockRelayInstance = {
     return () => eventListeners.delete(cb);
   }),
   connectEvents: vi.fn(),
+  getStatus: vi.fn().mockResolvedValue({ status: 'running' }),
   listAgents: vi.fn().mockResolvedValue([]),
   release: vi.fn().mockResolvedValue({ name: '' }),
   sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
+  disconnect: vi.fn(),
   shutdown: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -157,12 +159,16 @@ vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agent-relay/harness-driver')>();
   return {
     ...actual,
-    HarnessDriverClient: { spawn: vi.fn(async () => mockRelayInstance) },
+    HarnessDriverClient: {
+      connect: vi.fn(() => mockRelayInstance),
+      spawn: vi.fn(async () => mockRelayInstance),
+    },
   };
 });
 
 // Import after mocking
 const { WorkflowRunner } = await import('../runner.js');
+const { HarnessDriverClient } = await import('@agent-relay/harness-driver');
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
@@ -439,6 +445,97 @@ agents:
       expect(db.insertRun).toHaveBeenCalledTimes(1);
       expect(db.insertStep).toHaveBeenCalledTimes(2);
       expect(run.status, run.error).toBe('completed');
+    });
+
+    it('reuses a healthy shared broker connection without owning shutdown', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-shared-broker-'));
+      try {
+        const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
+        mkdirSync(stateDir, { recursive: true });
+        const connectionPath = path.join(stateDir, 'connection.json');
+        writeFileSync(
+          connectionPath,
+          JSON.stringify({
+            url: 'http://127.0.0.1:3889',
+            port: 3889,
+            api_key: 'br_test',
+            pid: process.pid,
+          }),
+          'utf-8'
+        );
+
+        const localRunner = new WorkflowRunner({
+          db,
+          workspaceId: 'ws-test',
+          cwd: tmpDir,
+          relay: { env: { AGENT_RELAY_WORKFLOW_DISABLE_RELAYCAST: '1' } },
+        });
+
+        const run = await localRunner.execute(makeConfig(), 'default');
+
+        expect(run.status).toBe('completed');
+        expect(HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tmpDir, connectionPath });
+        expect(HarnessDriverClient.spawn).not.toHaveBeenCalled();
+        expect(mockRelayInstance.disconnect).toHaveBeenCalledTimes(1);
+        expect(mockRelayInstance.shutdown).not.toHaveBeenCalled();
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('converges concurrent first-start broker acquisition on one spawned broker', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-shared-start-'));
+      try {
+        vi.mocked(HarnessDriverClient.spawn).mockImplementationOnce(async (options: any) => {
+          const stateDir = options.binaryArgs.stateDir;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          mkdirSync(stateDir, { recursive: true });
+          writeFileSync(
+            path.join(stateDir, 'connection.json'),
+            JSON.stringify({
+              url: 'http://127.0.0.1:3889',
+              port: 3889,
+              api_key: 'br_test',
+              pid: process.pid,
+            }),
+            'utf-8'
+          );
+          return mockRelayInstance as any;
+        });
+
+        const runners = Array.from(
+          { length: 4 },
+          () =>
+            new WorkflowRunner({
+              db,
+              workspaceId: 'ws-test',
+              cwd: tmpDir,
+              relay: { env: { AGENT_RELAY_WORKFLOW_DISABLE_RELAYCAST: '1' } },
+            })
+        );
+
+        await Promise.all(
+          runners.map((candidate, index) =>
+            (candidate as any).startOrReuseSharedBroker(`run-${index}`, `wf-${index}`, true)
+          )
+        );
+
+        expect(HarnessDriverClient.spawn).toHaveBeenCalledTimes(1);
+        expect(HarnessDriverClient.connect).toHaveBeenCalledTimes(3);
+
+        const starter = runners.find((candidate) => (candidate as any).sharedBrokerLease?.startedBroker);
+        expect(starter).toBeDefined();
+        const attached = runners.filter((candidate) => candidate !== starter);
+
+        await starter!.shutdownRelay();
+        expect(mockRelayInstance.shutdown).not.toHaveBeenCalled();
+        expect(mockRelayInstance.disconnect).toHaveBeenCalledTimes(1);
+
+        await Promise.all(attached.map((candidate) => candidate.shutdownRelay()));
+        expect(mockRelayInstance.shutdown).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it('should throw when workflow not found', async () => {

@@ -14,7 +14,9 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import type { Dirent, WriteStream } from 'node:fs';
@@ -203,6 +205,76 @@ function filteredEnv(extra?: Record<string, string | undefined>): Record<string,
     Object.assign(env, extra);
   }
   return env;
+}
+
+// ── Shared broker coordination ──────────────────────────────────────────────
+
+const BROKER_CONNECTION_FILENAME = 'connection.json';
+const SHARED_BROKER_LOCK_DIRNAME = '.relayflows-start.lock';
+const SHARED_BROKER_LEASE_DIRNAME = 'relayflows-runs';
+const SHARED_BROKER_OWNER_FILENAME = 'relayflows-owner.json';
+const SHARED_BROKER_LOCK_POLL_MS = 200;
+const SHARED_BROKER_DEFAULT_STARTUP_TIMEOUT_MS = 45_000;
+
+interface BrokerConnectionFile {
+  url: string;
+  api_key: string;
+  pid: number;
+  port?: number;
+}
+
+interface SharedBrokerLease {
+  stateDir: string;
+  connectionPath: string;
+  ownerPath: string;
+  leasePath: string;
+  startedBroker: boolean;
+}
+
+function parseBrokerConnectionFile(raw: string): BrokerConnectionFile | null {
+  try {
+    const conn = JSON.parse(raw);
+    if (
+      typeof conn.url === 'string' &&
+      typeof conn.api_key === 'string' &&
+      typeof conn.pid === 'number' &&
+      conn.pid > 0
+    ) {
+      return conn as BrokerConnectionFile;
+    }
+  } catch {
+    // Invalid JSON is handled as no reusable broker.
+  }
+  return null;
+}
+
+function readBrokerConnectionFile(connectionPath: string): BrokerConnectionFile | null {
+  try {
+    return parseBrokerConnectionFile(readFileSync(connectionPath, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeUnlinkSync(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── DB adapter interface ────────────────────────────────────────────────────
@@ -522,6 +594,8 @@ export class WorkflowRunner {
   /** Unsubscribe handle for broker stderr listener wired during a run. */
   private unsubBrokerStderr?: () => void;
   private unsubRelayListeners: Array<() => void> = [];
+  /** Local lease metadata for the shared workflow broker, when broker init was needed. */
+  private sharedBrokerLease?: SharedBrokerLease;
   /** Tracks last idle log time per agent to debounce idle warnings (30s multiples). */
   private readonly lastIdleLog = new Map<string, number>();
   /** Tracks last logged activity type per agent to avoid duplicate status lines. */
@@ -1899,6 +1973,269 @@ export class WorkflowRunner {
     return env;
   }
 
+  private getBrokerCwd(): string {
+    return this.relayOptions.cwd ?? this.cwd;
+  }
+
+  private getBrokerStateDir(brokerCwd: string): string {
+    const configured =
+      this.relayOptions.binaryArgs?.stateDir ??
+      this.relayOptions.env?.AGENT_RELAY_STATE_DIR ??
+      process.env.AGENT_RELAY_STATE_DIR;
+    return path.resolve(configured ?? path.join(brokerCwd, '.agentworkforce', 'relay'));
+  }
+
+  private async tryConnectSharedBroker(
+    connectionPath: string,
+    brokerCwd: string
+  ): Promise<HarnessDriverClient | null> {
+    const conn = readBrokerConnectionFile(connectionPath);
+    if (!conn) {
+      return null;
+    }
+
+    if (!isPidRunning(conn.pid)) {
+      safeUnlinkSync(connectionPath);
+      return null;
+    }
+
+    try {
+      const client = HarnessDriverClient.connect({ cwd: brokerCwd, connectionPath });
+      await client.getStatus();
+      return client;
+    } catch {
+      return null;
+    }
+  }
+
+  private async acquireSharedBrokerStartLock(
+    stateDir: string,
+    startupTimeoutMs: number
+  ): Promise<() => void> {
+    mkdirSync(stateDir, { recursive: true });
+    const lockDir = path.join(stateDir, SHARED_BROKER_LOCK_DIRNAME);
+    const deadline = Date.now() + Math.max(startupTimeoutMs + 5_000, 10_000);
+    const staleAfterMs = Math.max(startupTimeoutMs * 2, 30_000);
+
+    for (;;) {
+      try {
+        mkdirSync(lockDir);
+        writeFileSync(
+          path.join(lockDir, 'owner.json'),
+          JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }),
+          'utf-8'
+        );
+        return () => {
+          rmSync(lockDir, { recursive: true, force: true });
+        };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw err;
+        }
+      }
+
+      try {
+        const stat = statSync(lockDir);
+        if (Date.now() - stat.mtimeMs > staleAfterMs) {
+          rmSync(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for shared broker startup lock at ${lockDir}`);
+      }
+      await sleepMs(SHARED_BROKER_LOCK_POLL_MS);
+    }
+  }
+
+  private createSharedBrokerLease(
+    stateDir: string,
+    connectionPath: string,
+    runId: string,
+    startedBroker: boolean
+  ): SharedBrokerLease {
+    const leaseDir = path.join(stateDir, SHARED_BROKER_LEASE_DIRNAME);
+    const ownerPath = path.join(stateDir, SHARED_BROKER_OWNER_FILENAME);
+    mkdirSync(leaseDir, { recursive: true });
+    const leasePath = path.join(
+      leaseDir,
+      `${process.pid}-${runId}-${randomBytes(4).toString('hex')}.json`
+    );
+    writeFileSync(
+      leasePath,
+      JSON.stringify({
+        pid: process.pid,
+        runId,
+        startedBroker,
+        createdAt: new Date().toISOString(),
+      }),
+      'utf-8'
+    );
+    return { stateDir, connectionPath, ownerPath, leasePath, startedBroker };
+  }
+
+  private writeSharedBrokerOwner(lease: SharedBrokerLease): void {
+    const conn = readBrokerConnectionFile(lease.connectionPath);
+    writeFileSync(
+      lease.ownerPath,
+      JSON.stringify({
+        pid: conn?.pid,
+        createdByPid: process.pid,
+        createdAt: new Date().toISOString(),
+      }),
+      'utf-8'
+    );
+  }
+
+  private isWorkflowOwnedSharedBroker(lease: SharedBrokerLease): boolean {
+    const conn = readBrokerConnectionFile(lease.connectionPath);
+    if (!conn) {
+      return false;
+    }
+    try {
+      const owner = JSON.parse(readFileSync(lease.ownerPath, 'utf-8')) as { pid?: unknown };
+      return owner.pid === conn.pid;
+    } catch {
+      return false;
+    }
+  }
+
+  private disconnectRelayClient(relay: HarnessDriverClient): void {
+    const disconnect = (relay as { disconnect?: () => void }).disconnect;
+    if (typeof disconnect === 'function') {
+      disconnect.call(relay);
+    }
+  }
+
+  private countLiveSharedBrokerLeases(stateDir: string): number {
+    const leaseDir = path.join(stateDir, SHARED_BROKER_LEASE_DIRNAME);
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(leaseDir, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+
+    let live = 0;
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const leasePath = path.join(leaseDir, entry.name);
+      try {
+        const lease = JSON.parse(readFileSync(leasePath, 'utf-8')) as { pid?: unknown };
+        if (typeof lease.pid === 'number' && lease.pid > 0 && isPidRunning(lease.pid)) {
+          live += 1;
+        } else {
+          safeUnlinkSync(leasePath);
+        }
+      } catch {
+        safeUnlinkSync(leasePath);
+      }
+    }
+    return live;
+  }
+
+  private async startOrReuseSharedBroker(
+    runId: string,
+    channel: string,
+    relaycastDisabled: boolean
+  ): Promise<void> {
+    const brokerCwd = this.getBrokerCwd();
+    const stateDir = this.getBrokerStateDir(brokerCwd);
+    const connectionPath = path.join(stateDir, BROKER_CONNECTION_FILENAME);
+    const startupTimeoutMs =
+      this.relayOptions.startupTimeoutMs ?? SHARED_BROKER_DEFAULT_STARTUP_TIMEOUT_MS;
+    const lease = this.createSharedBrokerLease(stateDir, connectionPath, runId, false);
+    this.sharedBrokerLease = lease;
+
+    const existing = await this.tryConnectSharedBroker(connectionPath, brokerCwd);
+    if (existing) {
+      this.log('Reusing shared broker...');
+      this.relay = existing;
+      return;
+    }
+
+    const releaseLock = await this.acquireSharedBrokerStartLock(stateDir, startupTimeoutMs);
+    try {
+      const lockedExisting = await this.tryConnectSharedBroker(connectionPath, brokerCwd);
+      if (lockedExisting) {
+        this.log('Reusing shared broker...');
+        this.relay = lockedExisting;
+        return;
+      }
+
+      this.log('Starting broker...');
+      // Include a short run ID suffix in the broker name so a newly-created
+      // broker keeps the same Relaycast identity behavior as previous runs.
+      const brokerBaseName = path.basename(this.cwd) || 'workflow';
+      const brokerName = `${brokerBaseName}-${runId.slice(0, 8)}`;
+      const relayEnv = {
+        ...(this.getRelayEnv() ?? filteredEnv()),
+        AGENT_RELAY_STATE_DIR: stateDir,
+      };
+      this.relay = await HarnessDriverClient.spawn({
+        ...this.relayOptions,
+        cwd: brokerCwd,
+        brokerName,
+        channels: relaycastDisabled ? [] : [channel],
+        binaryArgs: {
+          ...(this.relayOptions.binaryArgs ?? {}),
+          persist: true,
+          stateDir,
+        },
+        env: relayEnv,
+        // Workflows spawn agents across multiple waves; each spawn requires a PTY +
+        // Relaycast registration. 60s is too tight when the broker is saturated with
+        // long-running PTY processes from earlier steps. 120s gives room to breathe.
+        requestTimeoutMs: this.relayOptions.requestTimeoutMs ?? 120_000,
+        // Wire broker stderr to console for observability — skip empty and
+        // JSON event lines (already surfaced via the broker:event emitter).
+        onStderr: (line: string) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          if (trimmed.startsWith('{') && trimmed.endsWith('}')) return;
+          console.log(`${chalk.dim.yellow('[broker]')} ${line}`);
+        },
+      });
+      lease.startedBroker = true;
+      this.writeSharedBrokerOwner(lease);
+    } finally {
+      releaseLock();
+    }
+  }
+
+  async shutdownRelay(): Promise<void> {
+    const relay = this.relay;
+    const lease = this.sharedBrokerLease;
+    this.sharedBrokerLease = undefined;
+
+    if (!relay) {
+      if (lease) {
+        safeUnlinkSync(lease.leasePath);
+      }
+      return;
+    }
+
+    this.relay = undefined;
+
+    if (!lease) {
+      await relay.shutdown();
+      return;
+    }
+
+    safeUnlinkSync(lease.leasePath);
+    const liveLeases = this.countLiveSharedBrokerLeases(lease.stateDir);
+    if (liveLeases === 0 && (lease.startedBroker || this.isWorkflowOwnedSharedBroker(lease))) {
+      await relay.shutdown();
+      safeUnlinkSync(lease.connectionPath);
+      safeUnlinkSync(lease.ownerPath);
+    } else {
+      this.disconnectRelayClient(relay);
+    }
+  }
+
   private async provisionAgents(config: RelayYamlConfig): Promise<void> {
     // Cloud launcher already compiled and seeded relayfile ACLs before the
     // sandbox started.  Skip in-sandbox provisioning — the relayfile API has
@@ -3124,36 +3461,17 @@ export class WorkflowRunner {
           }
         }
 
-        this.log('Starting broker...');
-        // Include a short run ID suffix in the broker name so each workflow execution
-        // registers a unique identity in Relaycast. Without this, re-running in the same
-        // workspace hits a 409 conflict because the previous run's agent is still registered.
-        const brokerBaseName = path.basename(this.cwd) || 'workflow';
-        const brokerName = `${brokerBaseName}-${runId.slice(0, 8)}`;
-        this.relay = await HarnessDriverClient.spawn({
-          ...this.relayOptions,
-          brokerName,
-          channels: relaycastDisabled ? [] : [channel],
-          env: this.getRelayEnv(),
-          // Workflows spawn agents across multiple waves; each spawn requires a PTY +
-          // Relaycast registration. 60s is too tight when the broker is saturated with
-          // long-running PTY processes from earlier steps. 120s gives room to breathe.
-          requestTimeoutMs: this.relayOptions.requestTimeoutMs ?? 120_000,
-          // Wire broker stderr to console for observability — skip empty and
-          // JSON event lines (already surfaced via the broker:event emitter).
-          onStderr: (line: string) => {
-            const trimmed = line.trim();
-            if (!trimmed) return;
-            if (trimmed.startsWith('{') && trimmed.endsWith('}')) return;
-            console.log(`${chalk.dim.yellow('[broker]')} ${line}`);
-          },
-        });
+        await this.startOrReuseSharedBroker(runId, channel, relaycastDisabled);
+        const relay = this.relay;
+        if (!relay) {
+          throw new Error('Broker client was not initialized');
+        }
 
         // Single dispatcher over the broker event stream. The named event bus
         // (`addListener('workerOutput'|...)`) is not fed for direct clients, so
         // broker events must be consumed via `onEvent` (the BrokerEvent stream).
         this.unsubRelayListeners.push(
-          this.relay.onEvent((event: BrokerEvent) => {
+          relay.onEvent((event: BrokerEvent) => {
             // Re-emit every broker event except the high-volume PTY stream.
             if (event.kind !== 'worker_stream') {
               this.emit({ type: 'broker:event', runId, event });
@@ -3281,7 +3599,7 @@ export class WorkflowRunner {
         );
 
         // Open the broker event stream so the dispatcher above receives events.
-        this.relay.connectEvents();
+        relay.connectEvents();
 
         this.relaycast = undefined;
         this.relaycastAgent = undefined;
@@ -3439,8 +3757,7 @@ export class WorkflowRunner {
       this.activeReviewers.clear();
 
       this.log('Shutting down broker...');
-      await this.relay?.shutdown();
-      this.relay = undefined;
+      await this.shutdownRelay();
       this.runStartTime = undefined;
       this.relaycast = undefined;
       this.relaycastAgent = undefined;
