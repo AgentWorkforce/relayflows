@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { askQuestion } from '../actions/ask-question.js';
 import { postMessage } from '../actions/post-message.js';
 import { resolveChannel } from '../actions/resolve-channel.js';
 import { SlackWebApiClient } from '../local-runtime.js';
@@ -83,6 +84,49 @@ describe('Slack primitive', () => {
       })
     ).rejects.toThrow('provide channel or set SLACK_DEFAULT_CHANNEL');
   });
+
+  it('posts a question and returns the first threaded human reply', async () => {
+    const slack = createRecordingSlack({
+      replies: [
+        { ts: '1710000000.000001', text: 'Question root', user: 'UBOT' },
+        { ts: '1710000001.000001', text: 'Use the smaller migration.', user: 'UHUMAN' },
+      ],
+    });
+
+    const result = await askQuestion(slack, {
+      channel: '#engineering',
+      text: 'Which migration path should I use?',
+      ignoreUserIds: ['UBOT'],
+      timeoutMs: 10,
+      pollIntervalMs: 1,
+    });
+
+    expect(result.question).toMatchObject({
+      channel: 'CENGINEERING',
+      ts: '1710000000.000001',
+    });
+    expect(result.answer).toEqual({
+      user: 'UHUMAN',
+      botId: undefined,
+      text: 'Use the smaller migration.',
+      ts: '1710000001.000001',
+    });
+    expect(slack.calls.conversationsReplies).toBe(1);
+  });
+
+  it('times out when no threaded reply arrives', async () => {
+    const slack = createRecordingSlack({
+      replies: [{ ts: '1710000000.000001', text: 'Question root', user: 'UBOT' }],
+    });
+
+    await expect(
+      askQuestion(slack, {
+        channel: '#engineering',
+        text: 'Can someone unblock this?',
+        timeoutMs: 0,
+      })
+    ).rejects.toThrow('Timed out waiting 0ms for a Slack reply');
+  });
 });
 
 interface RecordingSlack extends SlackWebApiLike {
@@ -91,6 +135,7 @@ interface RecordingSlack extends SlackWebApiLike {
     usersList: number;
     lookupByEmail: number;
     postMessage: number;
+    conversationsReplies: number;
   };
   lastPost?: {
     channel: string;
@@ -98,13 +143,14 @@ interface RecordingSlack extends SlackWebApiLike {
   };
 }
 
-function createRecordingSlack(): RecordingSlack {
+function createRecordingSlack(options: { replies?: Array<{ ts: string; text: string; user?: string }> } = {}): RecordingSlack {
   const slack: RecordingSlack = {
     calls: {
       conversationsList: 0,
       usersList: 0,
       lookupByEmail: 0,
       postMessage: 0,
+      conversationsReplies: 0,
     },
     conversations: {
       async list() {
@@ -117,6 +163,13 @@ function createRecordingSlack(): RecordingSlack {
               name: 'engineering',
             },
           ],
+        };
+      },
+      async replies() {
+        slack.calls.conversationsReplies += 1;
+        return {
+          ok: true,
+          messages: options.replies ?? [],
         };
       },
     },

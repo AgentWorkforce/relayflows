@@ -1,6 +1,8 @@
 import { BaseSlackAdapter, normalizeSlackRuntimeConfig } from './adapter.js';
 import {
   SlackPostBackError,
+  type AskQuestionOutput,
+  type AskQuestionParams,
   type PostMessageOutput,
   type PostMessageParams,
   type ResolveChannelParams,
@@ -166,6 +168,13 @@ export class SlackCloudRelayClient extends BaseSlackAdapter {
       unresolvedMentions,
       warnings,
     };
+  }
+
+  async askQuestion(_params: AskQuestionParams): Promise<AskQuestionOutput> {
+    throw new SlackPostBackError(
+      'unsupported_in_cloud_relay',
+      'askQuestion is not supported in cloud-relay runtime yet. Use SLACK_BOT_TOKEN local runtime to wait for replies.'
+    );
   }
 
   async resolveUser(_params: ResolveUserParams): Promise<SlackResolvedMention> {

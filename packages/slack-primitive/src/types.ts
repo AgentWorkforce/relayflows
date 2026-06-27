@@ -4,6 +4,7 @@ export type SlackRuntimePreference = SlackRuntime | 'auto';
 
 export enum SlackAction {
   PostMessage = 'postMessage',
+  AskQuestion = 'askQuestion',
   ResolveUser = 'resolveUser',
   ResolveChannel = 'resolveChannel',
 }
@@ -117,6 +118,15 @@ export interface PostMessageParams {
   unfurl?: boolean;
 }
 
+export interface AskQuestionParams extends PostMessageParams {
+  /** Polling timeout in milliseconds. Defaults to 1 hour. */
+  timeoutMs?: number;
+  /** Delay between Slack replies polls in milliseconds. Defaults to 5 seconds. */
+  pollIntervalMs?: number;
+  /** Bot/user IDs to ignore when selecting the answer. */
+  ignoreUserIds?: string[];
+}
+
 export interface ResolveUserParams {
   mention: string;
 }
@@ -134,14 +144,28 @@ export interface PostMessageOutput {
   warnings: SlackResolutionWarning[];
 }
 
+export interface SlackReplySummary {
+  user?: string;
+  botId?: string;
+  text: string;
+  ts: string;
+}
+
+export interface AskQuestionOutput {
+  question: PostMessageOutput;
+  answer: SlackReplySummary;
+}
+
 export interface SlackActionParamsMap {
   [SlackAction.PostMessage]: PostMessageParams;
+  [SlackAction.AskQuestion]: AskQuestionParams;
   [SlackAction.ResolveUser]: ResolveUserParams;
   [SlackAction.ResolveChannel]: ResolveChannelParams;
 }
 
 export interface SlackActionOutputMap {
   [SlackAction.PostMessage]: PostMessageOutput;
+  [SlackAction.AskQuestion]: AskQuestionOutput;
   [SlackAction.ResolveUser]: SlackResolvedMention;
   [SlackAction.ResolveChannel]: SlackChannelSummary;
 }
@@ -199,6 +223,25 @@ export interface SlackConversationsListResponse {
   error?: string;
 }
 
+export interface SlackConversationsRepliesResponse {
+  ok?: boolean;
+  messages?: SlackConversationMessage[];
+  response_metadata?: {
+    next_cursor?: string;
+  };
+  error?: string;
+}
+
+export interface SlackConversationMessage {
+  type?: string;
+  subtype?: string;
+  user?: string;
+  bot_id?: string;
+  text?: string;
+  ts?: string;
+  thread_ts?: string;
+}
+
 export interface SlackWebApiLike {
   chat: {
     postMessage(params: SlackChatPostMessageParams): Promise<SlackPostMessageResponse>;
@@ -213,6 +256,12 @@ export interface SlackWebApiLike {
       limit?: number;
       types?: string;
     }): Promise<SlackConversationsListResponse>;
+    replies?(params: {
+      channel: string;
+      ts: string;
+      cursor?: string;
+      limit?: number;
+    }): Promise<SlackConversationsRepliesResponse>;
   };
   auth?: {
     test(): Promise<{ ok?: boolean; error?: string }>;
@@ -241,6 +290,7 @@ export abstract class SlackClientInterface {
     params?: unknown
   ): Promise<SlackActionResult<TOutput>>;
   abstract postMessage(params: PostMessageParams): Promise<PostMessageOutput>;
+  abstract askQuestion(params: AskQuestionParams): Promise<AskQuestionOutput>;
   abstract resolveUser(params: ResolveUserParams): Promise<SlackResolvedMention>;
   abstract resolveChannel(params: ResolveChannelParams): Promise<SlackChannelSummary>;
 }

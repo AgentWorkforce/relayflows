@@ -57,6 +57,9 @@
     "errorHandling": {
       "$ref": "#/definitions/ErrorHandlingConfig"
     },
+    "integrations": {
+      "$ref": "#/definitions/WorkflowIntegrationsConfig"
+    },
     "trajectories": {
       "description": "Trajectory recording config, or false to disable trajectory output",
       "anyOf": [
@@ -125,6 +128,9 @@
         "idleNudge": {
           "$ref": "#/definitions/IdleNudgeConfig"
         },
+        "humanAssistance": {
+          "$ref": "#/definitions/HumanAssistanceConfig"
+        },
         "completionGracePeriodMs": {
           "type": "integer",
           "minimum": 0,
@@ -154,6 +160,186 @@
           "description": "Maximum nudges before escalation (default: 1)"
         }
       }
+    },
+    "HumanAssistanceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Human-in-the-loop assistance available to interactive agents",
+      "properties": {
+        "slack": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/definitions/SlackHumanAssistanceConfig"
+            }
+          ]
+        }
+      }
+    },
+    "SlackHumanAssistanceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Slack-backed human assistance settings",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "description": "Slack channel name, #channel-name, or Slack channel id. Falls back to SLACK_DEFAULT_CHANNEL."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Blocking timeout in milliseconds"
+        },
+        "mentions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "User mentions to prefix on the Slack question"
+        },
+        "ignoreUserIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Slack user IDs to ignore when selecting the answer"
+        }
+      }
+    },
+    "WorkflowIntegrationsConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Workflow-level integration runtime configuration and subscriptions.",
+      "properties": {
+        "relayfile": {
+          "$ref": "#/definitions/RelayfileIntegrationConfig"
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IntegrationSubscriptionConfig"
+          }
+        }
+      }
+    },
+    "RelayfileIntegrationConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Relayfile connection for writebacks and event subscriptions. Defaults to existing env/Pear credentials; workspaceId and token are optional.",
+      "properties": {
+        "baseUrl": {
+          "type": "string",
+          "description": "Relayfile API base URL. Defaults to RELAYFILE_BASE_URL or the SDK default."
+        },
+        "workspaceId": {
+          "type": "string",
+          "description": "Relayfile workspace id. Optional; defaults to RELAYFILE_WORKSPACE_ID, RELAYFILE_WORKSPACE, or an existing local Pear Relayfile connection."
+        },
+        "token": {
+          "type": "string",
+          "description": "Relayfile bearer token. Optional; defaults to RELAYFILE_TOKEN or an existing local Pear Relayfile connection."
+        },
+        "mount": {
+          "type": "boolean",
+          "description": "Start/ensure a Relayfile mount for this integration. Defaults to true."
+        },
+        "localRoot": {
+          "type": "string",
+          "description": "Local Relayfile mount root for fallback writebacks or the auto-started mount. Defaults to RELAYFILE_LOCAL_ROOT or Pear's local mount."
+        }
+      }
+    },
+    "RelayfileWatchRule": {
+      "type": "object",
+      "required": ["paths", "events"],
+      "additionalProperties": false,
+      "description": "Workforce-style Relayfile watch rule declared by an agent.",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Events to watch. Short names created/updated/deleted map to file.* events."
+        },
+        "debounceMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "match": {
+          "type": "string"
+        }
+      }
+    },
+    "IntegrationSubscriptionConfig": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "description": "Relayfile event subscription. Workflow-level subscriptions may target agents; agent-level subscriptions target the owning agent.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "provider": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "agent": {
+          "type": "string"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "debounceMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "match": {
+          "type": "string"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["path"]
+        },
+        {
+          "required": ["paths"]
+        }
+      ]
     },
     "SwarmPattern": {
       "type": "string",
@@ -240,6 +426,20 @@
           "type": "string",
           "enum": ["lead", "worker", "reviewer", "analyst"],
           "description": "Role preset that automatically configures interactive mode and injects appropriate task guardrails. lead: interactive PTY, relay-aware. worker/reviewer/analyst: interactive: false, no sub-agents."
+        },
+        "watch": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RelayfileWatchRule"
+          },
+          "description": "Relayfile-change listeners for this agent, matching Workforce agent.watch."
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IntegrationSubscriptionConfig"
+          },
+          "description": "Relayflow integration subscriptions for this agent."
         }
       }
     },
@@ -544,6 +744,12 @@
           "$ref": "#/definitions/WorktreeWorkflowStep"
         },
         {
+          "$ref": "#/definitions/IntegrationWorkflowStep"
+        },
+        {
+          "$ref": "#/definitions/WaitForWorkflowStep"
+        },
+        {
           "$ref": "#/definitions/CustomWorkflowStep"
         }
       ]
@@ -596,6 +802,18 @@
         "workdir": {
           "type": "string",
           "description": "Sets this step's working directory to a named entry from the top-level paths array."
+        },
+        "humanAssistance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanAssistanceConfig"
+            },
+            {
+              "type": "boolean",
+              "enum": [false]
+            }
+          ],
+          "description": "Step-level human assistance override. Set false to disable swarm defaults."
         }
       }
     },
@@ -689,6 +907,114 @@
         "workdir": {
           "type": "string",
           "description": "Sets this step's working directory to a named entry from the top-level paths array."
+        }
+      }
+    },
+    "IntegrationWorkflowStep": {
+      "type": "object",
+      "required": ["name", "type", "integration", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["integration"],
+          "description": "Step type - must be 'integration' for external integration steps"
+        },
+        "name": {
+          "type": "string",
+          "description": "Unique step name within the workflow"
+        },
+        "integration": {
+          "type": "string",
+          "description": "Integration name, e.g. github, linear, or slack"
+        },
+        "action": {
+          "type": "string",
+          "description": "Integration action"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Step names that must complete before this step runs"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "WaitForWorkflowStep": {
+      "type": "object",
+      "required": ["name", "type", "waitFor"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["waitFor"],
+          "description": "Step type - waits for a Relayfile integration event"
+        },
+        "name": {
+          "type": "string",
+          "description": "Unique step name within the workflow"
+        },
+        "waitFor": {
+          "$ref": "#/definitions/RelayfileEventGateConfig"
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Step names that must complete before this step runs"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "RelayfileEventGateConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "event": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "match": {
+          "type": "string"
         }
       }
     },

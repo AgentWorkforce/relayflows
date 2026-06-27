@@ -99,6 +99,25 @@ describe('runScriptWorkflow', () => {
     await expect(runScriptWorkflow(fakePath)).rejects.toThrow(/Unsupported file type/);
   });
 
+  it('resolves and executes script workflows relative to the provided cwd', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-relay-runner-cwd-'));
+    fs.writeFileSync(
+      path.join(tmpDir, 'main.ts'),
+      `
+import fs from 'node:fs';
+fs.writeFileSync('cwd.txt', process.cwd());
+`,
+      'utf8'
+    );
+
+    try {
+      await expect(runScriptWorkflow('main.ts', { cwd: tmpDir })).resolves.toBeUndefined();
+      expect(fs.realpathSync(fs.readFileSync(path.join(tmpDir, 'cwd.txt'), 'utf8'))).toBe(fs.realpathSync(tmpDir));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('falls back past Node strip-only mode for valid TypeScript enums', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-relay-runner-'));
     const workflowPath = path.join(tmpDir, 'enum-workflow.ts');
