@@ -161,7 +161,7 @@ export class SlackStepExecutor implements RunnerStepExecutor {
       params
     )) as SlackActionResult<TOutput>;
 
-    if (config.action === SLACK_ASK_QUESTION_ACTION && config.injectToAgent) {
+    if (result.success && config.action === SLACK_ASK_QUESTION_ACTION && config.injectToAgent) {
       if (!context.injectAnswerToAgent) {
         throw new Error('Slack askQuestion injectToAgent requires a workflow runner injection context');
       }
@@ -185,7 +185,8 @@ export class SlackStepExecutor implements RunnerStepExecutor {
 
   async executeIntegrationStep(
     step: WorkflowStep,
-    resolvedParams: Record<string, string>
+    resolvedParams: Record<string, string>,
+    context: SlackStepExecutionContext = {}
   ): Promise<SlackIntegrationStepResult> {
     if (step.integration !== SLACK_INTEGRATION) {
       return {
@@ -196,7 +197,7 @@ export class SlackStepExecutor implements RunnerStepExecutor {
 
     try {
       const config = slackStepConfigFromWorkflowStep(step, resolvedParams);
-      const result = await this.execute(config);
+      const result = await this.execute(config, context);
 
       return {
         success: result.success,
@@ -313,8 +314,8 @@ function formatAnswerInjection(config: SlackStepConfig, data: unknown): string {
   const questionText = readNestedString(data, ['question', 'text']) ?? config.text;
   const template = config.injectTemplate ?? 'HUMAN_ANSWER: {{answer.text}}';
   return template
-    .replace(/\{\{\s*answer\.text\s*\}\}/g, answerText)
-    .replace(/\{\{\s*question\.text\s*\}\}/g, questionText);
+    .replace(/\{\{\s*answer\.text\s*\}\}/g, () => answerText)
+    .replace(/\{\{\s*question\.text\s*\}\}/g, () => questionText);
 }
 
 function readNestedString(value: unknown, path: string[]): string | undefined {

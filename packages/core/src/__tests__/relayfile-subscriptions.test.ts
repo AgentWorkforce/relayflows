@@ -169,6 +169,40 @@ describe('Relayfile integration subscriptions', () => {
     });
   });
 
+  it('does not leak waiters when waitFor subscription setup throws synchronously', async () => {
+    const client = {
+      open: () => ({
+        ready: Promise.resolve(),
+        unsubscribe: async () => undefined,
+      }),
+      subscribe: () => {
+        throw new Error('subscribe failed');
+      },
+    };
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    (runner as any).relayfileRuntimeConfig = {
+      baseUrl: 'https://file.agentrelay.com',
+      workspaceId: 'ws-test',
+      token: [
+        Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url'),
+        Buffer.from(JSON.stringify({ workspace_id: 'ws-test', agent_name: 'runner' })).toString('base64url'),
+        '',
+      ].join('.'),
+    };
+    (runner as any).relayfileClient = client;
+
+    await expect(
+      (runner as any).waitForRelayfileEvent({
+        name: 'wait-review',
+        paths: ['/github/repos/acme/web/pulls/42/reviews/**'],
+        events: ['file.created'],
+        provider: 'github',
+        source: 'workflow',
+      }, 1000)
+    ).rejects.toThrow('subscribe failed');
+    expect((runner as any).relayfileEventWaiters).toHaveLength(0);
+  });
+
   it('resolves Relayfile runtime from local Pear credentials without workflow secrets', async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), 'relayflows-relayfile-'));
     try {

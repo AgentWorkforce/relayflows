@@ -984,6 +984,14 @@
     "RelayfileEventGateConfig": {
       "type": "object",
       "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": ["path"]
+        },
+        {
+          "required": ["paths"]
+        }
+      ],
       "properties": {
         "provider": {
           "type": "string"

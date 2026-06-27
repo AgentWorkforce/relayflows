@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import type { Dirent, WriteStream } from 'node:fs';
 import { readFile, writeFile, mkdir, unlink, readdir, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import chalk from 'chalk';
 import ignore from 'ignore';
@@ -7324,12 +7324,14 @@ export class WorkflowRunner {
       // Write raw output (with ANSI codes) to log file so dashboard's
       // XTermLogViewer can render colors/formatting natively via xterm.js
       logStream.write(chunk);
-      this.observeHumanAssistanceOutput({
-        agentName,
-        step,
-        config: humanAssistanceConfig,
-        output: buffer?.join('') ?? stripped,
-      });
+      if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
+        this.observeHumanAssistanceOutput({
+          agentName,
+          step,
+          config: humanAssistanceConfig,
+          output: buffer?.join('') ?? stripped,
+        });
+      }
       options.onChunk?.({ agentName, chunk });
     });
 
@@ -7411,12 +7413,14 @@ export class WorkflowRunner {
             const buffer = this.ptyOutputBuffers.get(resolvedAgentName);
             buffer?.push(stripped);
             newLogStream.write(chunk);
-            this.observeHumanAssistanceOutput({
-              agentName: resolvedAgentName,
-              step,
-              config: humanAssistanceConfig,
-              output: buffer?.join('') ?? stripped,
-            });
+            if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
+              this.observeHumanAssistanceOutput({
+                agentName: resolvedAgentName,
+                step,
+                config: humanAssistanceConfig,
+                output: buffer?.join('') ?? stripped,
+              });
+            }
             options.onChunk?.({ agentName: resolvedAgentName, chunk });
           });
         }
@@ -7820,6 +7824,7 @@ export class WorkflowRunner {
     let handle: Subscription | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     return await new Promise<NormalizedRelayfileEvent>((resolve, reject) => {
+      let settled = false;
       const waiter: RelayfileEventWaiter = {
         name: subscription.name,
         subscription,
@@ -7827,10 +7832,12 @@ export class WorkflowRunner {
           void Promise.resolve(predicate ? predicate(event) : true)
             .then((accepted) => {
               if (!accepted) return;
+              settled = true;
               cleanup();
               resolve(event);
             })
             .catch((err) => {
+              settled = true;
               cleanup();
               reject(err);
             });
@@ -7843,22 +7850,32 @@ export class WorkflowRunner {
         void handle?.unsubscribe().catch(() => undefined);
       };
 
+      try {
+        handle = client.subscribe(
+          subscription.paths,
+          (event) => {
+            void this.handleRelayfileEvent(event).catch((err) => {
+              settled = true;
+              cleanup();
+              reject(err);
+            });
+          },
+          {
+            coalesce: 'none',
+            aclToken: runtime.token,
+          }
+        );
+      } catch (err) {
+        cleanup();
+        reject(err);
+        return;
+      }
+
+      if (settled) return;
       this.relayfileEventWaiters.push(waiter);
-      handle = client.subscribe(
-        subscription.paths,
-        (event) => {
-          void this.handleRelayfileEvent(event).catch((err) => {
-            cleanup();
-            reject(err);
-          });
-        },
-        {
-          coalesce: 'none',
-          aclToken: runtime.token,
-        }
-      );
 
       timeout = setTimeout(() => {
+        settled = true;
         cleanup();
         reject(new Error(`Timed out waiting ${timeoutMs}ms for Relayfile event "${subscription.name}"`));
       }, timeoutMs);
@@ -8437,24 +8454,34 @@ export class WorkflowRunner {
 
     const watchDirs = await this.resolveLocalSlackWatchDirs(input.localRoot, input.channel);
     return await new Promise((resolve, reject) => {
-      const watchers = watchDirs.map((dir) => watch(dir, { persistent: false }, () => {
-        void check().then((answer) => {
-          if (!answer) return;
-          cleanup();
-          resolve(answer);
-        }).catch((err) => {
-          cleanup();
-          reject(err);
-        });
-      }));
-      const timeout = setTimeout(() => {
+      const watchers: Array<ReturnType<typeof watch>> = [];
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
+        for (const watcher of watchers) watcher.close();
+      };
+      try {
+        for (const dir of watchDirs) {
+          watchers.push(watch(dir, { persistent: false }, () => {
+            void check().then((answer) => {
+              if (!answer) return;
+              cleanup();
+              resolve(answer);
+            }).catch((err) => {
+              cleanup();
+              reject(err);
+            });
+          }));
+        }
+      } catch (err) {
+        cleanup();
+        reject(err);
+        return;
+      }
+      timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out waiting ${input.timeoutMs}ms for a Slack answer via local Relayfile mount`));
       }, input.timeoutMs);
-      const cleanup = () => {
-        clearTimeout(timeout);
-        for (const watcher of watchers) watcher.close();
-      };
     });
   }
 
@@ -8472,7 +8499,7 @@ export class WorkflowRunner {
       process.env.RELAYFILE_WORKSPACE_ID ??
       process.env.RELAYFILE_WORKSPACE;
     const pearRoot = path.join(
-      process.env.HOME ?? '',
+      homedir(),
       '.agentworkforce',
       'pear',
       'relayfile',
@@ -8697,43 +8724,6 @@ export class WorkflowRunner {
       .catch(() => false);
   }
 
-  private async findRelayfileSlackAnswerDraft(input: {
-    client: RelayFileClient;
-    workspaceId: string;
-    channelPrefix: string;
-    questionPath: string;
-    questionText: string;
-    startedAt: number;
-  }): Promise<{ text: string; path?: string } | undefined> {
-    const tree = await input.client
-      .listTree(input.workspaceId, { path: `${input.channelPrefix}/messages`, depth: 1 })
-      .catch(() => undefined);
-    const entries = [...(tree?.entries ?? [])].sort((a, b) => {
-      const aTime = Date.parse(String((a as unknown as { updatedAt?: unknown }).updatedAt ?? '')) || 0;
-      const bTime = Date.parse(String((b as unknown as { updatedAt?: unknown }).updatedAt ?? '')) || 0;
-      return bTime - aTime;
-    });
-
-    for (const entry of entries) {
-      if (entry.type !== 'file') continue;
-      if (entry.path === input.questionPath) continue;
-      if (!entry.path.endsWith('.json')) continue;
-      const updatedAt = Date.parse(String((entry as unknown as { updatedAt?: unknown }).updatedAt ?? ''));
-      if (Number.isFinite(updatedAt) && updatedAt < input.startedAt) continue;
-
-      const file = await input.client.readFile(input.workspaceId, entry.path).catch(() => undefined);
-      const content = typeof file?.content === 'string' ? file.content : '';
-      const parsed = content.trim() ? this.tryParseJson(content) : undefined;
-      const text = this.extractTextFromSlackRelayfilePayload(parsed ?? content) ??
-        this.answerTextFromRelayfileAnswerDraftPath(entry.path);
-      if (!text) continue;
-      if (text.trim() === input.questionText.trim()) continue;
-      if (text.includes('Workflow step "') && text.includes(' asks:')) continue;
-      return { text: text.trim(), path: entry.path };
-    }
-    return undefined;
-  }
-
   private async readRelayfileSlackAnswerText(path: string, questionText: string): Promise<string | undefined> {
     const runtime = this.relayfileRuntimeConfig;
     if (!runtime) return undefined;
@@ -8784,22 +8774,6 @@ export class WorkflowRunner {
     } catch {
       return undefined;
     }
-  }
-
-  private answerTextFromRelayfileAnswerDraftPath(relayfilePath: string): string | undefined {
-    const filename = path.basename(relayfilePath, '.json');
-    const prefix = 'wb-relayflows-answer-';
-    if (!filename.startsWith(prefix)) return undefined;
-    const encoded = filename.slice(prefix.length).replace(/-\d+$/, '');
-    if (!encoded) return undefined;
-    if (encoded.startsWith('b64_')) {
-      try {
-        return Buffer.from(encoded.slice(4), 'base64url').toString('utf8').trim() || undefined;
-      } catch {
-        return undefined;
-      }
-    }
-    return encoded.replace(/_/g, ' ').trim() || undefined;
   }
 
   private sanitizeRelayfilePathSegment(value: string): string {

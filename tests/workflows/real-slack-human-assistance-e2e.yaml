@@ -34,8 +34,8 @@ workflows:
           Validate Relayflows Slack human assistance.
 
           You need an operator approval code before finishing. Ask the operator
-          by printing one line with the human-question marker prefix and this
-          exact question:
+          by printing exactly one line with the literal prefix `HUMAN_QUESTION:`
+          followed by this exact question:
           What approval code should I use for the Relayflows Slack assistance check?
 
           After the runner provides the operator reply back into this session as

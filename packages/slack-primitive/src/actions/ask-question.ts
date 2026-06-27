@@ -27,7 +27,7 @@ export async function askQuestion(
 
   const question = await postMessage(slack, params);
   const timeoutMs = normalizeNonNegative(params.timeoutMs, DEFAULT_TIMEOUT_MS, 'timeoutMs');
-  const pollIntervalMs = normalizeNonNegative(params.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'pollIntervalMs');
+  const pollIntervalMs = normalizePositive(params.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'pollIntervalMs');
   const deadline = Date.now() + timeoutMs;
   const ignoredUsers = new Set(params.ignoreUserIds ?? []);
 
@@ -86,6 +86,7 @@ function toReply(
 ): SlackReplySummary | undefined {
   if (!message.ts || message.ts === input.threadTs) return undefined;
   if (message.subtype === 'bot_message') return undefined;
+  if (message.bot_id) return undefined;
   if (message.user && input.ignoredUsers.has(message.user)) return undefined;
 
   const text = message.text?.trim();
@@ -103,6 +104,14 @@ function normalizeNonNegative(value: number | undefined, fallback: number, name:
   if (value === undefined) return fallback;
   if (!Number.isFinite(value) || value < 0) {
     throw new Error(`Slack askQuestion ${name} must be a non-negative number`);
+  }
+  return value;
+}
+
+function normalizePositive(value: number | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`Slack askQuestion ${name} must be a positive number`);
   }
   return value;
 }

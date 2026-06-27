@@ -219,23 +219,25 @@ in the message thread, exposes that answer through `{{steps.<name>.output}}`, an
 can inject it into a running agent when `injectToAgent` is set.
 
 ```yaml
-steps:
-  - name: ask-human
-    type: integration
-    integration: slack
-    action: askQuestion
-    params:
-      channel: "#engineering"
-      text: "The implementer is blocked on migration strategy. Which path should it take?"
-      waitTimeoutMs: "3600000"
-      injectToAgent: "backend-runtime-name"
-      injectTemplate: "HUMAN_ANSWER: {{answer.text}}"
-      output: '{"format":"text","path":"answer.text"}'
+workflows:
+  - name: default
+    steps:
+      - name: ask-human
+        type: integration
+        integration: slack
+        action: askQuestion
+        params:
+          channel: "#engineering"
+          text: "The implementer is blocked on migration strategy. Which path should it take?"
+          waitTimeoutMs: "3600000"
+          injectToAgent: "backend-runtime-name"
+          injectTemplate: "HUMAN_ANSWER: {{answer.text}}"
+          output: '{"format":"text","path":"answer.text"}'
 
-  - name: continue-with-answer
-    agent: backend
-    dependsOn: [ask-human]
-    task: "Continue using this human guidance: {{steps.ask-human.output}}"
+      - name: continue-with-answer
+        agent: backend
+        dependsOn: [ask-human]
+        task: "Continue using this human guidance: {{steps.ask-human.output}}"
 ```
 
 `askQuestion` can use the local Slack API runtime, or Relayfile-backed Slack
@@ -260,10 +262,12 @@ swarm:
 integrations:
   relayfile: {}
 
-steps:
-  - name: implement
-    agent: backend
-    task: "Proceed, but ask for human guidance if the migration strategy is ambiguous."
+workflows:
+  - name: default
+    steps:
+      - name: implement
+        agent: backend
+        task: "Proceed, but ask for human guidance if the migration strategy is ambiguous."
 ```
 
 ### Relayfile Event Subscriptions
@@ -290,13 +294,15 @@ agents:
       - paths: [/github/repos/acme/web/pulls/42/reviews/**]
         events: [created, updated]
 
-steps:
-  - name: babysit-pr
-    agent: pr-babysitter
-    task: |
-      Stay active and wait for INTEGRATION_EVENT messages about PR feedback.
-      Read the Relayfile path from the event, address comments until no open
-      feedback remains, then notify the user in Slack.
+workflows:
+  - name: default
+    steps:
+      - name: babysit-pr
+        agent: pr-babysitter
+        task: |
+          Stay active and wait for INTEGRATION_EVENT messages about PR feedback.
+          Read the Relayfile path from the event, address comments until no open
+          feedback remains, then notify the user in Slack.
 ```
 
 ### Verification Checks

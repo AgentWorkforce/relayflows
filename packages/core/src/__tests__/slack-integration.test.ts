@@ -120,4 +120,69 @@ describe('Slack integration step helpers', () => {
       },
     ]);
   });
+
+  it('does not inject askQuestion output when the Slack action fails', async () => {
+    const injected: Array<{ agentName: string; text: string; stepName: string; source: 'slack' }> = [];
+    const client = {
+      executeAction: async () => ({
+        success: false,
+        output: 'Slack step failed',
+        error: 'timeout',
+        data: {
+          question: { text: 'Choose A or B?' },
+          answer: { text: 'Use B' },
+        },
+      }),
+    };
+
+    const result = await new SlackStepExecutor().execute(
+      {
+        name: 'ask-human',
+        action: 'askQuestion',
+        text: 'Choose A or B?',
+        injectToAgent: 'builder-runtime',
+      },
+      {
+        client: client as any,
+        injectAnswerToAgent: async (input) => {
+          injected.push(input);
+        },
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(injected).toEqual([]);
+  });
+
+  it('preserves replacement metacharacters when formatting injected answers', async () => {
+    const injected: Array<{ agentName: string; text: string; stepName: string; source: 'slack' }> = [];
+    const client = {
+      executeAction: async () => ({
+        success: true,
+        output: '',
+        data: {
+          question: { text: 'Use $1 or $&?' },
+          answer: { text: 'Use $$ literal' },
+        },
+      }),
+    };
+
+    await new SlackStepExecutor().execute(
+      {
+        name: 'ask-human',
+        action: 'askQuestion',
+        text: 'Use $1 or $&?',
+        injectToAgent: 'builder-runtime',
+        injectTemplate: 'Answer={{answer.text}} Question={{question.text}}',
+      },
+      {
+        client: client as any,
+        injectAnswerToAgent: async (input) => {
+          injected.push(input);
+        },
+      }
+    );
+
+    expect(injected[0]?.text).toBe('Answer=Use $$ literal Question=Use $1 or $&?');
+  });
 });

@@ -114,6 +114,42 @@ describe('Slack primitive', () => {
     expect(slack.calls.conversationsReplies).toBe(1);
   });
 
+  it('ignores bot replies when waiting for a threaded human reply', async () => {
+    const slack = createRecordingSlack({
+      replies: [
+        { ts: '1710000000.000001', text: 'Question root', user: 'UBOT' },
+        { ts: '1710000001.000001', text: 'Automated reply', bot_id: 'B123' },
+        { ts: '1710000002.000001', text: 'Human reply', user: 'UHUMAN' },
+      ],
+    });
+
+    const result = await askQuestion(slack, {
+      channel: '#engineering',
+      text: 'Which migration path should I use?',
+      timeoutMs: 10,
+      pollIntervalMs: 1,
+    });
+
+    expect(result.answer).toMatchObject({
+      user: 'UHUMAN',
+      text: 'Human reply',
+      ts: '1710000002.000001',
+    });
+  });
+
+  it('rejects non-positive poll intervals', async () => {
+    const slack = createRecordingSlack();
+
+    await expect(
+      askQuestion(slack, {
+        channel: '#engineering',
+        text: 'Can someone unblock this?',
+        timeoutMs: 1,
+        pollIntervalMs: 0,
+      })
+    ).rejects.toThrow('pollIntervalMs must be a positive number');
+  });
+
   it('times out when no threaded reply arrives', async () => {
     const slack = createRecordingSlack({
       replies: [{ ts: '1710000000.000001', text: 'Question root', user: 'UBOT' }],
@@ -143,7 +179,7 @@ interface RecordingSlack extends SlackWebApiLike {
   };
 }
 
-function createRecordingSlack(options: { replies?: Array<{ ts: string; text: string; user?: string }> } = {}): RecordingSlack {
+function createRecordingSlack(options: { replies?: Array<{ ts: string; text: string; user?: string; bot_id?: string }> } = {}): RecordingSlack {
   const slack: RecordingSlack = {
     calls: {
       conversationsList: 0,
