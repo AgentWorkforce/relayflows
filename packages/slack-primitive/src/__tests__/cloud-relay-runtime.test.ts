@@ -155,6 +155,13 @@ describe('SlackCloudRelayClient', () => {
     });
   });
 
+  it('rejects askQuestion with unsupported_in_cloud_relay', async () => {
+    const client = new SlackCloudRelayClient(baseConfig, fakeFetch([]));
+    await expect(client.askQuestion({ channel: '#general', text: 'Need input' })).rejects.toMatchObject({
+      code: 'unsupported_in_cloud_relay',
+    });
+  });
+
   it('rejects resolveChannel with unsupported_in_cloud_relay', async () => {
     const client = new SlackCloudRelayClient(baseConfig, fakeFetch([]));
     await expect(client.resolveChannel({ channel: '#general' })).rejects.toMatchObject({

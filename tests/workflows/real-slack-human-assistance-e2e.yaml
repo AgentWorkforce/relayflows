@@ -1,0 +1,45 @@
+version: "1.0"
+name: real-slack-human-assistance-e2e
+description: "Validates Slack human-question wait and reply delivery into a live agent."
+
+swarm:
+  pattern: dag
+  timeoutMs: 600000
+  humanAssistance:
+    slack:
+      channel: C0B9Z4CLG1J
+      timeoutMs: 300000
+
+integrations:
+  relayfile: {}
+
+agents:
+  - name: slack-e2e-agent
+    cli: claude
+    role: "Slack human-assistance E2E validation agent"
+    constraints:
+      idleThresholdSecs: 5
+      timeoutMs: 600000
+
+workflows:
+  - name: default
+    steps:
+      - name: ask-human-and-use-answer
+        agent: slack-e2e-agent
+        timeoutMs: 600000
+        verification:
+          type: output_contains
+          value: "ANSWER_RECEIVED:"
+        task: |
+          Validate Relayflows Slack human assistance.
+
+          You need an operator approval code before finishing. Ask the operator
+          by printing exactly one line with the literal prefix `HUMAN_QUESTION:`
+          followed by this exact question:
+          What approval code should I use for the Relayflows Slack assistance check?
+
+          After the runner provides the operator reply back into this session as
+          HUMAN_ANSWER, print:
+          ANSWER_RECEIVED: <the approval code from the operator reply>
+
+          Then terminate with /exit.

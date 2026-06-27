@@ -211,6 +211,100 @@ await runWorkflow("workflow.yaml", {
 });
 ```
 
+### Blocking Slack Questions
+
+Workflows can pause on a Slack question by adding a Slack integration step with
+`action: askQuestion`. The step posts a question, waits for the first human reply
+in the message thread, exposes that answer through `{{steps.<name>.output}}`, and
+can inject it into a running agent when `injectToAgent` is set.
+
+```yaml
+workflows:
+  - name: default
+    steps:
+      - name: ask-human
+        type: integration
+        integration: slack
+        action: askQuestion
+        params:
+          channel: "#engineering"
+          text: "The implementer is blocked on migration strategy. Which path should it take?"
+          waitTimeoutMs: "3600000"
+          injectToAgent: "backend-runtime-name"
+          injectTemplate: "HUMAN_ANSWER: {{answer.text}}"
+          output: '{"format":"text","path":"answer.text"}'
+
+      - name: continue-with-answer
+        agent: backend
+        dependsOn: [ask-human]
+        task: "Continue using this human guidance: {{steps.ask-human.output}}"
+```
+
+`askQuestion` can use the local Slack API runtime, or Relayfile-backed Slack
+writebacks when the workflow already has a Relayfile Slack integration.
+
+Interactive agent steps can also opt into marker-driven assistance. With
+`humanAssistance.slack` enabled, an agent can print a line beginning with
+`HUMAN_QUESTION:`. The runner posts that question to Slack, blocks while waiting
+for a human reply, then injects `HUMAN_ANSWER: ...` back into that same agent
+session. If `integrations.relayfile` is present, Relayflows automatically uses
+the existing Relayfile/Pear Slack connection; no Slack bot token, Relayfile
+workspace id, or Relayfile token is required in the workflow.
+
+```yaml
+swarm:
+  pattern: dag
+  humanAssistance:
+    slack:
+      channel: proj-cloud
+      timeoutMs: 3600000
+
+integrations:
+  relayfile: {}
+
+workflows:
+  - name: default
+    steps:
+      - name: implement
+        agent: backend
+        task: "Proceed, but ask for human guidance if the migration strategy is ambiguous."
+```
+
+### Relayfile Event Subscriptions
+
+Relayflows can subscribe to Relayfile integration events and inject matching
+events into active agents. Workflow-level subscriptions live under
+`integrations.subscriptions`; agent-level subscriptions use Workforce-style
+`agents[].watch` or Relayflows-style `agents[].subscriptions`.
+
+```yaml
+integrations:
+  relayfile: {}
+  subscriptions:
+    - name: pr-feedback
+      provider: github
+      path: /github/repos/acme/web/pulls/42/**
+      events: [created, updated]
+      agents: [pr-babysitter]
+
+agents:
+  - name: pr-babysitter
+    cli: codex
+    watch:
+      - paths: [/github/repos/acme/web/pulls/42/reviews/**]
+        events: [created, updated]
+
+workflows:
+  - name: default
+    steps:
+      - name: babysit-pr
+        agent: pr-babysitter
+        task: |
+          Stay active and wait for INTEGRATION_EVENT messages about PR feedback.
+          Read the Relayfile path from the event, address comments until no open
+          feedback remains, then notify the user in Slack.
+```
+
 ### Verification Checks
 
 Each step can include a verification check. Verification is one input to the runner's **completion decision pipeline** — when verification passes, the step completes even without a sentinel marker.

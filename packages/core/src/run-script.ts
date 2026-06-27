@@ -18,6 +18,8 @@ import { execFileSync, spawn as spawnProcess, spawnSync } from 'node:child_proce
 export type ExecFileSyncLike = typeof execFileSync;
 
 export interface RunScriptWorkflowOptions {
+  /** Working directory for resolving and executing the script. Defaults to process.cwd(). */
+  cwd?: string;
   /** Validate without running. Sets `DRY_RUN=true` in the child env. */
   dryRun?: boolean;
   /** Resume a previously failed workflow run by id. */
@@ -426,10 +428,12 @@ export function formatWorkflowParseError(parsed: ParsedWorkflowError): Error {
 async function spawnRunnerWithStderrCapture(
   command: string,
   args: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  cwd: string
 ): Promise<SpawnRunnerResult> {
   return new Promise((resolve) => {
     const child = spawnProcess(command, args, {
+      cwd,
       stdio: ['inherit', 'inherit', 'pipe'],
       env,
     });
@@ -474,7 +478,8 @@ export async function runScriptWorkflow(
   options: RunScriptWorkflowOptions = {}
 ): Promise<void> {
   diag(`runScriptWorkflow: resolving ${filePath}`);
-  const resolved = path.resolve(filePath);
+  const cwd = path.resolve(options.cwd ?? process.cwd());
+  const resolved = path.resolve(cwd, filePath);
   // Validate the extension before existence so an unsupported file type is
   // reported as such even when the path does not exist — the file type is a
   // caller mistake regardless of whether the file is present.
@@ -486,7 +491,7 @@ export async function runScriptWorkflow(
     throw new Error(`File not found: ${resolved}`);
   }
   const runIdFile = path.join(
-    process.cwd(),
+    cwd,
     '.agent-relay',
     `script-run-id-${process.pid}-${Date.now()}.txt`
   );
@@ -566,7 +571,7 @@ Run ID: ${runId}`;
         continue;
       }
       diag(`runScriptWorkflow: trying runner ${label}`);
-      const result = await spawnRunnerWithStderrCapture(bin, [...preArgs, resolved], childEnv);
+      const result = await spawnRunnerWithStderrCapture(bin, [...preArgs, resolved], childEnv, cwd);
       if (result.error) {
         if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
           diag(`runScriptWorkflow: runner ${label} returned ENOENT — trying next`);
@@ -590,7 +595,7 @@ Run ID: ${runId}`;
       return;
     }
     diag('runScriptWorkflow: falling back to npx tsx');
-    const npxResult = await spawnRunnerWithStderrCapture('npx', ['tsx', resolved], childEnv);
+    const npxResult = await spawnRunnerWithStderrCapture('npx', ['tsx', resolved], childEnv, cwd);
     if (npxResult.error) {
       return augmentErrorWithRunId(npxResult.error);
     }
@@ -606,6 +611,7 @@ Run ID: ${runId}`;
     for (const runner of runners) {
       diag(`runScriptWorkflow: trying runner ${runner}`);
       const spawnResult = spawnSync(runner, [resolved], {
+        cwd,
         stdio: 'inherit',
         env: childEnv,
       });

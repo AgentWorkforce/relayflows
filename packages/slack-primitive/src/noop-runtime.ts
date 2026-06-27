@@ -1,6 +1,8 @@
 import { BaseSlackAdapter, normalizeSlackRuntimeConfig } from './adapter.js';
 import {
   SlackPostBackError,
+  type AskQuestionOutput,
+  type AskQuestionParams,
   type PostMessageOutput,
   type PostMessageParams,
   type ResolveChannelParams,
@@ -71,6 +73,13 @@ export class SlackNoopClient extends BaseSlackAdapter {
       unresolvedMentions: params.mentions ?? [],
       warnings,
     };
+  }
+
+  async askQuestion(_params: AskQuestionParams): Promise<AskQuestionOutput> {
+    throw new SlackPostBackError(
+      'auth_token_missing',
+      'askQuestion requires SLACK_BOT_TOKEN; current runtime is noop.'
+    );
   }
 
   async resolveUser(_params: ResolveUserParams): Promise<SlackResolvedMention> {

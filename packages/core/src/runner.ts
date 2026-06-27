@@ -17,11 +17,12 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import type { Dirent, WriteStream } from 'node:fs';
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile, mkdir, unlink, readdir, stat } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import chalk from 'chalk';
 import ignore from 'ignore';
@@ -56,7 +57,7 @@ import {
   resolveAgentPermissions,
   type LocalJwksSigningKey,
 } from '@agent-relay/cloud';
-import type { MountHandle } from '@relayfile/sdk/workspace-mount';
+import { ensureRelayfileMount, type MountHandle } from '@relayfile/sdk/workspace-mount';
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
 import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';
@@ -92,6 +93,7 @@ import type {
   DryRunWave,
   ErrorHandlingConfig,
   IdleNudgeConfig,
+  HumanAssistanceConfig,
   PathDefinition,
   PermissionProfileDefinition,
   PreflightCheck,
@@ -129,6 +131,8 @@ import { HarnessDriverClient } from '@agent-relay/harness-driver';
 import type { RuntimeSpawnOptions, SpawnPtyInput } from '@agent-relay/harness-driver';
 import { WorkflowAgentHandle } from './agent-handle.js';
 import { RelayCast, RelayError, type AgentClient } from '@relaycast/sdk';
+import { SlackClient } from '@relayflows/slack-primitive';
+import { RelayFileClient, type ChangeEvent, type FilesystemEvent, type Subscription } from '@relayfile/sdk';
 
 // ── Environment filtering ──────────────────────────────────────────────────
 
@@ -430,6 +434,41 @@ interface RuntimeStepAgent {
   logicalName: string;
 }
 
+interface RelayfileRuntimeConfig {
+  baseUrl: string;
+  workspaceId: string;
+  token: string;
+  source?: 'config' | 'local-creds';
+}
+
+interface ResolvedRelayfileSubscription {
+  name: string;
+  paths: string[];
+  events?: string[];
+  provider?: string;
+  targetAgents?: string[];
+  source: 'workflow' | 'agent';
+  ownerAgent?: string;
+}
+
+interface NormalizedRelayfileEvent {
+  eventId: string;
+  type: string;
+  path: string;
+  revision?: string;
+  provider?: string;
+  timestamp?: string;
+  resourceKind?: string;
+  summary?: Record<string, unknown>;
+  raw: ChangeEvent | FilesystemEvent;
+}
+
+interface RelayfileEventWaiter {
+  name: string;
+  subscription: ResolvedRelayfileSubscription;
+  resolve: (event: NormalizedRelayfileEvent) => void;
+}
+
 interface FileSnapshotEntry {
   mtimeMs: number;
   size: number;
@@ -578,6 +617,18 @@ export class WorkflowRunner {
   private currentRunId?: string;
   /** Live Agent handles keyed by name, for hub-mediated nudging. */
   private readonly activeAgentHandles = new Map<string, WorkflowAgentHandle>();
+  /** Pending Slack-backed human questions keyed by runtime agent name. */
+  private readonly pendingHumanQuestions = new Map<string, Promise<void>>();
+  /** Dedupes repeated PTY renders of the same human question marker. */
+  private readonly seenHumanQuestionKeys = new Map<string, Array<{ fingerprint: string; at: number }>>();
+  private relayfileClient?: RelayFileClient;
+  private relayfileRuntimeConfig?: RelayfileRuntimeConfig;
+  private relayfileEventStream?: { ready: Promise<void>; unsubscribe: () => Promise<void> };
+  private readonly relayfileEventSubscriptionHandles: Subscription[] = [];
+  private readonly relayfileEventSubscriptions: ResolvedRelayfileSubscription[] = [];
+  private readonly relayfileEventWaiters: RelayfileEventWaiter[] = [];
+  private readonly seenRelayfileEventIds = new Set<string>();
+  private relayfileIntegrationMount?: MountHandle;
   /** Per-agent workflow tokens for relay/relayfile auth across spawn modes. */
   private readonly agentTokens = new Map<string, string>();
   /** Per-agent credential proxy tokens keyed by logical agent definition name. */
@@ -3151,6 +3202,10 @@ export class WorkflowRunner {
         if (typeof s.action !== 'string') {
           throw new Error(`${source}: integration step "${s.name}" must have an "action" string field`);
         }
+      } else if (s.type === 'waitFor') {
+        if (typeof s.waitFor !== 'object' || s.waitFor === null) {
+          throw new Error(`${source}: waitFor step "${s.name}" must have a "waitFor" event selector`);
+        }
       } else {
         // Agent steps (type undefined or 'agent') require agent and task
         if (typeof s.agent !== 'string' || typeof s.task !== 'string') {
@@ -3701,7 +3756,7 @@ export class WorkflowRunner {
       const requiresBroker =
         !this.executor &&
         workflow.steps.some(
-          (step) => step.type !== 'deterministic' && step.type !== 'worktree' && step.type !== 'integration'
+          (step) => step.type !== 'deterministic' && step.type !== 'worktree' && step.type !== 'integration' && step.type !== 'waitFor'
         );
       // Skip broker/relay init when an external executor handles agent spawning
       if (requiresBroker) {
@@ -3745,6 +3800,8 @@ export class WorkflowRunner {
           }
         }
       }
+
+      await this.startRelayfileEventSubscriptions(config);
 
       const agentMap = new Map<string, AgentDefinition>();
       for (const agent of config.agents) {
@@ -3871,6 +3928,8 @@ export class WorkflowRunner {
       this.runtimeStepAgents.clear();
       this.activeReviewers.clear();
 
+      await this.stopRelayfileEventSubscriptions();
+
       this.log('Shutting down broker...');
       await this.shutdownRelay();
       this.currentBrokerContext = undefined;
@@ -3884,6 +3943,12 @@ export class WorkflowRunner {
       this.currentConfig = undefined;
       this.currentRunId = undefined;
       this.activeAgentHandles.clear();
+      this.relayfileClient = undefined;
+      this.relayfileRuntimeConfig = undefined;
+      this.relayfileEventSubscriptions.length = 0;
+      this.seenRelayfileEventIds.clear();
+      this.relayfileEventWaiters.length = 0;
+      await this.stopRelayfileIntegrationMount();
       await this.stopProvisionedMounts();
       this.agentTokens.clear(); // Prevent workflow-scoped tokens from leaking into a later run.
     }
@@ -4089,6 +4154,11 @@ export class WorkflowRunner {
     return step.type === 'integration';
   }
 
+  /** Check if a step is a Relayfile event gate. */
+  private isWaitForStep(step: WorkflowStep): boolean {
+    return step.type === 'waitFor';
+  }
+
   private async executeStep(
     step: WorkflowStep,
     state: StepState,
@@ -4119,6 +4189,11 @@ export class WorkflowRunner {
     // Branch: integration steps interact with external services
     if (this.isIntegrationStep(step)) {
       return this.executeIntegrationStep(step, state, stepStates, runId, lifecycle);
+    }
+
+    // Branch: event gates block until a matching Relayfile integration event arrives
+    if (this.isWaitForStep(step)) {
+      return this.executeWaitForStep(step, state, stepStates, runId, lifecycle);
     }
 
     // Agent step execution
@@ -4841,6 +4916,7 @@ export class WorkflowRunner {
 
         const integrationResult = await this.executor.executeIntegrationStep(step, resolvedParams, {
           workspaceId: this.workspaceId,
+          injectAnswerToAgent: (input) => this.injectAnswerToAgent(input),
         });
 
         if (!integrationResult.success) {
@@ -4868,6 +4944,64 @@ export class WorkflowRunner {
     }
 
     this.postToChannel(`**[${step.name}]** Completed (integration: ${step.integration}.${step.action})`);
+  }
+
+  /**
+   * Execute a waitFor step by suspending until a matching Relayfile event arrives.
+   */
+  private async executeWaitForStep(
+    step: WorkflowStep,
+    state: StepState,
+    stepStates: Map<string, StepState>,
+    runId: string,
+    lifecycle: WorkflowStepLifecycleExecutor<StepState>
+  ): Promise<void> {
+    const result = await lifecycle.monitorStep(step, state, {
+      startMessage: `**[${step.name}]** Waiting for integration event`,
+      execute: async () => {
+        const gate = step.waitFor;
+        if (!gate) {
+          throw new Error(`waitFor step "${step.name}" requires a waitFor event selector`);
+        }
+
+        const stepOutputContext = this.buildStepOutputContext(stepStates, runId);
+        const paths = this.resolveSubscriptionPaths({
+          path: gate.path ? this.interpolateStepTask(gate.path, stepOutputContext) : undefined,
+          paths: gate.paths?.map((entry) => this.interpolateStepTask(entry, stepOutputContext)),
+        });
+        if (paths.length === 0) {
+          throw new Error(`waitFor step "${step.name}" requires waitFor.path or waitFor.paths`);
+        }
+
+        const subscription: ResolvedRelayfileSubscription = {
+          name: `${step.name}.waitFor`,
+          paths,
+          events: this.normalizeRelayfileEventFilters(gate.events ?? (gate.event ? [gate.event] : undefined)),
+          provider: gate.provider,
+          source: 'workflow',
+        };
+        const event = await this.waitForRelayfileEvent(subscription, gate.timeoutMs ?? step.timeoutMs);
+        return { output: JSON.stringify(this.serializeRelayfileEvent(event), null, 2) };
+      },
+      toCompletionResult: ({ output }, attempt) => ({
+        status: 'completed',
+        output,
+        retries: attempt,
+      }),
+      getFailureResult: (error) => ({
+        status: 'failed',
+        output: '',
+        error: error instanceof Error ? error.message : String(error),
+        retries: state.row.retryCount,
+      }),
+    });
+
+    if (result.status === 'failed') {
+      this.postToChannel(`**[${step.name}]** Failed: ${result.error ?? 'Unknown error'}`);
+      throw new Error(`Step "${step.name}" failed: ${result.error ?? 'Unknown error'}`);
+    }
+
+    this.postToChannel(`**[${step.name}]** Event gate satisfied`);
   }
 
   /**
@@ -7144,6 +7278,9 @@ export class WorkflowRunner {
     const pattern = this.currentConfig?.swarm.pattern;
     const isHubPattern = pattern && WorkflowRunner.HUB_PATTERNS.has(pattern);
     const usesHeadlessWorkflowSpawner = agentDef.cli === 'opencode';
+    const humanAssistanceConfig = this.resolveHumanAssistanceConfig(step);
+    const humanAssistanceGuidance = this.buildHumanAssistanceGuidance(humanAssistanceConfig);
+    const integrationSubscriptionGuidance = this.buildIntegrationSubscriptionGuidance(agentDef);
     const delegationGuidance =
       usesHeadlessWorkflowSpawner || (!isHub && isHubPattern)
         ? ''
@@ -7162,6 +7299,8 @@ export class WorkflowRunner {
       : interactiveTaskBase +
         (relayRegistrationNote ? '\n\n' + relayRegistrationNote : '') +
         (delegationGuidance ? '\n\n' + delegationGuidance + '\n' : '') +
+        (humanAssistanceGuidance ? '\n\n' + humanAssistanceGuidance + '\n' : '') +
+        (integrationSubscriptionGuidance ? '\n\n' + integrationSubscriptionGuidance + '\n' : '') +
         '\n\n---\n' +
         'IMPORTANT: When you have fully completed this task, you MUST self-terminate by either: ' +
         '(a) calling remove_agent(name: "<your-agent-name>", reason: "task completed") — preferred, or ' +
@@ -7180,10 +7319,19 @@ export class WorkflowRunner {
 
     this.ptyListeners.set(agentName, (chunk: string) => {
       const stripped = WorkflowRunner.stripAnsi(chunk);
-      this.ptyOutputBuffers.get(agentName)?.push(stripped);
+      const buffer = this.ptyOutputBuffers.get(agentName);
+      buffer?.push(stripped);
       // Write raw output (with ANSI codes) to log file so dashboard's
       // XTermLogViewer can render colors/formatting natively via xterm.js
       logStream.write(chunk);
+      if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
+        this.observeHumanAssistanceOutput({
+          agentName,
+          step,
+          config: humanAssistanceConfig,
+          output: buffer?.join('') ?? stripped,
+        });
+      }
       options.onChunk?.({ agentName, chunk });
     });
 
@@ -7262,8 +7410,17 @@ export class WorkflowRunner {
           const resolvedAgentName = agent.name;
           this.ptyListeners.set(resolvedAgentName, (chunk: string) => {
             const stripped = WorkflowRunner.stripAnsi(chunk);
-            this.ptyOutputBuffers.get(resolvedAgentName)?.push(stripped);
+            const buffer = this.ptyOutputBuffers.get(resolvedAgentName);
+            buffer?.push(stripped);
             newLogStream.write(chunk);
+            if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
+              this.observeHumanAssistanceOutput({
+                agentName: resolvedAgentName,
+                step,
+                config: humanAssistanceConfig,
+                output: buffer?.join('') ?? stripped,
+              });
+            }
             options.onChunk?.({ agentName: resolvedAgentName, chunk });
           });
         }
@@ -7468,6 +7625,1204 @@ export class WorkflowRunner {
     };
   }
 
+  private resolveRelayfileRuntimeConfig(config: RelayYamlConfig | undefined): RelayfileRuntimeConfig | undefined {
+    const relayfileConfig = config?.integrations?.relayfile;
+    const hasExplicitWorkflowCredentials = Boolean(relayfileConfig?.workspaceId || relayfileConfig?.token);
+    if (relayfileConfig?.localRoot && !hasExplicitWorkflowCredentials) return undefined;
+
+    const workspaceId =
+      relayfileConfig?.workspaceId ??
+      process.env.RELAYFILE_WORKSPACE_ID ??
+      process.env.RELAYFILE_WORKSPACE ??
+      process.env.RELAYFILE_WORKSPACE_ID_0;
+    const token = relayfileConfig?.token ?? process.env.RELAYFILE_TOKEN ?? process.env.RELAYFILE_ACL_TOKEN;
+
+    if (!workspaceId || !token) return undefined;
+
+    return {
+      baseUrl: relayfileConfig?.baseUrl ?? process.env.RELAYFILE_BASE_URL ?? 'https://file.agentrelay.com',
+      workspaceId,
+      token,
+      source: hasExplicitWorkflowCredentials ? 'config' : undefined,
+    };
+  }
+
+  private async resolveRelayfileRuntimeConfigForUse(
+    config: RelayYamlConfig | undefined,
+    options: { ensureMount?: boolean } = {}
+  ): Promise<RelayfileRuntimeConfig | undefined> {
+    let runtime = this.relayfileRuntimeConfig ?? this.resolveRelayfileRuntimeConfig(config);
+    if (!runtime) {
+      runtime = await this.resolveRelayfileRuntimeConfigFromLocalCredentials(config);
+    }
+    if (!runtime) return undefined;
+
+    const changed =
+      !this.relayfileRuntimeConfig ||
+      this.relayfileRuntimeConfig.workspaceId !== runtime.workspaceId ||
+      this.relayfileRuntimeConfig.token !== runtime.token ||
+      this.relayfileRuntimeConfig.baseUrl !== runtime.baseUrl;
+    this.relayfileRuntimeConfig = runtime;
+    if (changed) this.relayfileClient = undefined;
+
+    if (options.ensureMount) {
+      await this.ensureRelayfileIntegrationMount(runtime, config);
+    }
+    return runtime;
+  }
+
+  private getRelayfileClient(): RelayFileClient {
+    const runtime = this.relayfileRuntimeConfig ?? this.resolveRelayfileRuntimeConfig(this.currentConfig);
+    if (!runtime) {
+      throw new Error(
+        'Relayfile integration is not ready. Declare integrations.relayfile or connect Relayfile/Pear locally, ' +
+          'or set RELAYFILE_TOKEN and RELAYFILE_WORKSPACE_ID.'
+      );
+    }
+    if (!this.relayfileClient) {
+      this.relayfileRuntimeConfig = runtime;
+      this.relayfileClient = new RelayFileClient({
+        baseUrl: runtime.baseUrl,
+        token: runtime.token,
+      });
+    }
+    return this.relayfileClient;
+  }
+
+  private collectRelayfileSubscriptions(config: RelayYamlConfig): ResolvedRelayfileSubscription[] {
+    const subscriptions: ResolvedRelayfileSubscription[] = [];
+    for (const sub of config.integrations?.subscriptions ?? []) {
+      const paths = this.resolveSubscriptionPaths(sub);
+      if (paths.length === 0) continue;
+      subscriptions.push({
+        name: sub.name,
+        paths,
+        events: this.normalizeRelayfileEventFilters(sub.events ?? (sub.event ? [sub.event] : undefined)),
+        provider: sub.provider,
+        targetAgents: sub.agents ?? (sub.agent ? [sub.agent] : undefined),
+        source: 'workflow',
+      });
+    }
+
+    for (const agent of config.agents) {
+      for (const [idx, watch] of (agent.watch ?? []).entries()) {
+        if (!watch.paths?.length) continue;
+        subscriptions.push({
+          name: `${agent.name}.watch.${idx + 1}`,
+          paths: watch.paths,
+          events: this.normalizeRelayfileEventFilters(watch.events),
+          targetAgents: [agent.name],
+          source: 'agent',
+          ownerAgent: agent.name,
+        });
+      }
+      for (const sub of agent.subscriptions ?? []) {
+        const paths = this.resolveSubscriptionPaths(sub);
+        if (paths.length === 0) continue;
+        subscriptions.push({
+          name: sub.name,
+          paths,
+          events: this.normalizeRelayfileEventFilters(sub.events ?? (sub.event ? [sub.event] : undefined)),
+          provider: sub.provider,
+          targetAgents: [agent.name],
+          source: 'agent',
+          ownerAgent: agent.name,
+        });
+      }
+    }
+
+    return subscriptions;
+  }
+
+  private resolveSubscriptionPaths(sub: { path?: string; paths?: string[] }): string[] {
+    const paths = [...(sub.paths ?? []), ...(sub.path ? [sub.path] : [])]
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return [...new Set(paths)];
+  }
+
+  private normalizeRelayfileEventFilters(events: readonly string[] | undefined): string[] | undefined {
+    if (!events || events.length === 0) return undefined;
+    const normalized = events.map((event) => this.normalizeRelayfileEventName(event));
+    return [...new Set(normalized)];
+  }
+
+  private normalizeRelayfileEventName(event: string): string {
+    const trimmed = event.trim();
+    if (trimmed === 'created') return 'file.created';
+    if (trimmed === 'updated') return 'file.updated';
+    if (trimmed === 'deleted') return 'file.deleted';
+    return trimmed;
+  }
+
+  private async startRelayfileEventSubscriptions(config: RelayYamlConfig): Promise<void> {
+    const subscriptions = this.collectRelayfileSubscriptions(config);
+    this.relayfileEventSubscriptions.length = 0;
+    this.relayfileEventSubscriptions.push(...subscriptions);
+    if (subscriptions.length === 0) return;
+
+    const runtime = await this.resolveRelayfileRuntimeConfigForUse(config, { ensureMount: true });
+    if (!runtime) {
+      throw new Error(
+        'Relayfile subscriptions are configured, but no Relayfile credentials are available. ' +
+          'Connect Relayfile/Pear locally, or set RELAYFILE_TOKEN and RELAYFILE_WORKSPACE_ID.'
+      );
+    }
+    const client = this.getRelayfileClient();
+
+    this.seenRelayfileEventIds.clear();
+    await this.ensureRelayfileEventStream(client, runtime);
+    for (const subscription of subscriptions) {
+      this.relayfileEventSubscriptionHandles.push(
+        client.subscribe(
+          subscription.paths,
+          (event) => {
+            void this.handleRelayfileEvent(event).catch((err) => {
+              this.log(`Relayfile subscription handler failed: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          },
+          {
+            coalesce: 'none',
+            aclToken: runtime.token,
+          }
+        )
+      );
+    }
+    this.log(`Relayfile subscriptions active (${subscriptions.length})`);
+  }
+
+  private async stopRelayfileEventSubscriptions(): Promise<void> {
+    const handles = this.relayfileEventSubscriptionHandles.splice(0);
+    await Promise.allSettled(handles.map((handle) => handle.unsubscribe()));
+    await this.relayfileEventStream?.unsubscribe().catch(() => undefined);
+    this.relayfileEventStream = undefined;
+  }
+
+  private async ensureRelayfileEventStream(client: RelayFileClient, runtime: RelayfileRuntimeConfig): Promise<void> {
+    if (!this.relayfileEventStream) {
+      this.relayfileEventStream = client.open({
+        workspaceId: runtime.workspaceId,
+        aclToken: runtime.token,
+        replayOnStart: 'none',
+      });
+    }
+    await this.relayfileEventStream.ready;
+  }
+
+  private async waitForRelayfileEvent(
+    subscription: ResolvedRelayfileSubscription,
+    timeoutMs = 10 * 60_000,
+    predicate?: (event: NormalizedRelayfileEvent) => Promise<boolean> | boolean
+  ): Promise<NormalizedRelayfileEvent> {
+    const runtime = await this.resolveRelayfileRuntimeConfigForUse(this.currentConfig, { ensureMount: true });
+    if (!runtime) {
+      throw new Error('waitFor event gates require Relayfile credentials');
+    }
+    const client = this.getRelayfileClient();
+    await this.ensureRelayfileEventStream(client, runtime);
+
+    let handle: Subscription | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    return await new Promise<NormalizedRelayfileEvent>((resolve, reject) => {
+      let settled = false;
+      const waiter: RelayfileEventWaiter = {
+        name: subscription.name,
+        subscription,
+        resolve: (event) => {
+          void Promise.resolve(predicate ? predicate(event) : true)
+            .then((accepted) => {
+              if (!accepted) return;
+              settled = true;
+              cleanup();
+              resolve(event);
+            })
+            .catch((err) => {
+              settled = true;
+              cleanup();
+              reject(err);
+            });
+        },
+      };
+      const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
+        const idx = this.relayfileEventWaiters.indexOf(waiter);
+        if (idx !== -1) this.relayfileEventWaiters.splice(idx, 1);
+        void handle?.unsubscribe().catch(() => undefined);
+      };
+
+      try {
+        handle = client.subscribe(
+          subscription.paths,
+          (event) => {
+            void this.handleRelayfileEvent(event).catch((err) => {
+              settled = true;
+              cleanup();
+              reject(err);
+            });
+          },
+          {
+            coalesce: 'none',
+            aclToken: runtime.token,
+          }
+        );
+      } catch (err) {
+        cleanup();
+        reject(err);
+        return;
+      }
+
+      if (settled) return;
+      this.relayfileEventWaiters.push(waiter);
+
+      timeout = setTimeout(() => {
+        settled = true;
+        cleanup();
+        reject(new Error(`Timed out waiting ${timeoutMs}ms for Relayfile event "${subscription.name}"`));
+      }, timeoutMs);
+    });
+  }
+
+  private resolveRelayfileEventWaiters(event: NormalizedRelayfileEvent): void {
+    for (const waiter of [...this.relayfileEventWaiters]) {
+      if (this.relayfileEventMatchesSubscription(event, waiter.subscription)) {
+        waiter.resolve(event);
+      }
+    }
+  }
+
+  private normalizeRelayfileEvent(event: FilesystemEvent | ChangeEvent): NormalizedRelayfileEvent {
+    if ('resource' in event) {
+      return {
+        eventId: event.id,
+        type: event.type,
+        path: event.resource.path,
+        provider: event.resource.provider,
+        timestamp: event.occurredAt,
+        resourceKind: event.resource.kind,
+        summary: event.summary as unknown as Record<string, unknown>,
+        raw: event,
+      };
+    }
+    return {
+      eventId: event.eventId,
+      type: event.type,
+      path: event.path,
+      revision: event.revision,
+      provider: event.provider,
+      timestamp: event.timestamp,
+      raw: event,
+    };
+  }
+
+  private relayfileEventTypeMatches(event: NormalizedRelayfileEvent, filters: string[]): boolean {
+    if (filters.includes(event.type)) return true;
+    if (event.type === 'relayfile.changed') {
+      return filters.some((filter) => filter === 'file.created' || filter === 'file.updated' || filter === 'file.deleted');
+    }
+    return false;
+  }
+
+  private serializeRelayfileEvent(event: NormalizedRelayfileEvent): Record<string, unknown> {
+    return {
+      eventId: event.eventId,
+      type: event.type,
+      path: event.path,
+      revision: event.revision,
+      provider: event.provider,
+      timestamp: event.timestamp,
+      resourceKind: event.resourceKind,
+      summary: event.summary,
+    };
+  }
+
+  private async ensureRelayfileIntegrationMount(
+    runtime: RelayfileRuntimeConfig,
+    config: RelayYamlConfig | undefined
+  ): Promise<void> {
+    const relayfileConfig = config?.integrations?.relayfile;
+    if (!relayfileConfig) return;
+    if (relayfileConfig.mount === false) return;
+    if (this.relayfileIntegrationMount) return;
+
+    const configuredLocalRoot =
+      relayfileConfig.localRoot ??
+      process.env.RELAYFILE_LOCAL_ROOT ??
+      process.env.RELAYFILE_MOUNT_ROOT;
+    const mountPoint = configuredLocalRoot ? WorkflowRunner.resolveEnvVars(configuredLocalRoot) : undefined;
+
+    try {
+      const handle = await ensureRelayfileMount({
+        relayfileUrl: runtime.baseUrl,
+        workspace: runtime.workspaceId,
+        token: runtime.token,
+        mountPoint,
+      });
+      this.relayfileIntegrationMount = handle;
+      this.log(
+        `Relayfile integration mount ready at ${handle.mountPoint}${typeof handle.pid === 'number' ? ` (pid ${handle.pid})` : ''}`
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`Relayfile integration mount could not be started automatically: ${message}`);
+      this.postToChannel(`Relayfile integration mount could not be started automatically: ${message}`);
+    }
+  }
+
+  private async stopRelayfileIntegrationMount(): Promise<void> {
+    const mount = this.relayfileIntegrationMount;
+    this.relayfileIntegrationMount = undefined;
+    if (!mount) return;
+    await mount.stop().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`Relayfile integration mount shutdown failed: ${message}`);
+    });
+  }
+
+  private async handleRelayfileEvent(rawEvent: FilesystemEvent | ChangeEvent): Promise<void> {
+    const event = this.normalizeRelayfileEvent(rawEvent);
+    if (!event.eventId || this.seenRelayfileEventIds.has(event.eventId)) return;
+    this.seenRelayfileEventIds.add(event.eventId);
+
+    this.resolveRelayfileEventWaiters(event);
+
+    for (const subscription of this.relayfileEventSubscriptions) {
+      if (!this.relayfileEventMatchesSubscription(event, subscription)) continue;
+      await this.injectRelayfileEventToSubscribedAgents(subscription, event).catch((err) => {
+        this.log(
+          `Failed to inject Relayfile event ${event.eventId} for "${subscription.name}": ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      });
+    }
+  }
+
+  private relayfileEventMatchesSubscription(
+    event: NormalizedRelayfileEvent,
+    subscription: ResolvedRelayfileSubscription
+  ): boolean {
+    if (subscription.provider && event.provider && subscription.provider !== event.provider) return false;
+    if (subscription.events && !this.relayfileEventTypeMatches(event, subscription.events)) return false;
+    return subscription.paths.some((glob) => WorkflowRunner.pathGlobMatches(glob, event.path));
+  }
+
+  private async injectRelayfileEventToSubscribedAgents(
+    subscription: ResolvedRelayfileSubscription,
+    event: NormalizedRelayfileEvent
+  ): Promise<void> {
+    const targets = this.resolveActiveSubscriptionTargets(subscription);
+    if (targets.length === 0) return;
+
+    const text = [
+      `INTEGRATION_EVENT: ${subscription.name}`,
+      `source: relayfile`,
+      `provider: ${event.provider ?? subscription.provider ?? 'unknown'}`,
+      `type: ${event.type}`,
+      `path: ${event.path}`,
+      `revision: ${event.revision}`,
+      `eventId: ${event.eventId}`,
+      event.timestamp ? `timestamp: ${event.timestamp}` : undefined,
+      '',
+      'Read the Relayfile path if you need the full payload, then continue the workflow.',
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join('\n');
+
+    for (const agentName of targets) {
+      await this.withBrokerRecovery(`injecting Relayfile event into "${agentName}"`, (relay) =>
+        relay.sendMessage({
+          from: 'workflow-runner',
+          to: agentName,
+          text,
+        })
+      );
+    }
+  }
+
+  private resolveActiveSubscriptionTargets(subscription: ResolvedRelayfileSubscription): string[] {
+    const targets: string[] = [];
+    const configuredTargets = subscription.targetAgents;
+    for (const [runtimeName] of this.activeAgentHandles) {
+      const meta = this.runtimeStepAgents.get(runtimeName);
+      if (
+        !configuredTargets ||
+        configuredTargets.includes(runtimeName) ||
+        (meta?.logicalName && configuredTargets.includes(meta.logicalName))
+      ) {
+        targets.push(runtimeName);
+      }
+    }
+    return targets;
+  }
+
+  private buildIntegrationSubscriptionGuidance(agentDef: AgentDefinition): string {
+    const config = this.currentConfig;
+    if (!config) return '';
+    const subscriptions = this.collectRelayfileSubscriptions(config).filter((subscription) => {
+      if (!subscription.targetAgents) return true;
+      return subscription.targetAgents.includes(agentDef.name);
+    });
+    if (subscriptions.length === 0) return '';
+
+    const lines = subscriptions.map((subscription) => {
+      const events = subscription.events?.join(', ') ?? 'all file events';
+      return `- ${subscription.name}: ${subscription.paths.join(', ')} (${events})`;
+    });
+    return [
+      '---',
+      'RELAYFILE INTEGRATION EVENTS:',
+      'This agent is subscribed to Relayfile events. While you are running, the workflow runner may inject an INTEGRATION_EVENT message with provider, type, path, revision, and eventId.',
+      'When one arrives, read the Relayfile path if needed and continue the task using that event.',
+      ...lines,
+    ].join('\n');
+  }
+
+  private static pathGlobMatches(glob: string, candidate: string): boolean {
+    const normalizedGlob = glob.startsWith('/') ? glob : `/${glob}`;
+    const normalizedCandidate = candidate.startsWith('/') ? candidate : `/${candidate}`;
+    const pattern = normalizedGlob
+      .split(/(\*\*)/)
+      .map((part) => {
+        if (part === '**') return '.*';
+        return part
+          .split(/(\*)/)
+          .map((inner) => (inner === '*' ? '[^/]*' : WorkflowRunner.escapeRegExp(inner)))
+          .join('');
+      })
+      .join('');
+    return new RegExp(`^${pattern}$`).test(normalizedCandidate);
+  }
+
+  private static escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private resolveHumanAssistanceConfig(step: WorkflowStep): HumanAssistanceConfig | undefined {
+    if (step.humanAssistance === false) return undefined;
+    return step.humanAssistance ?? this.currentConfig?.swarm.humanAssistance;
+  }
+
+  private isSlackHumanAssistanceEnabled(config: HumanAssistanceConfig | undefined): boolean {
+    return Boolean(config?.slack);
+  }
+
+  private buildHumanAssistanceGuidance(config: HumanAssistanceConfig | undefined): string {
+    if (!this.isSlackHumanAssistanceEnabled(config)) return '';
+
+    return (
+      '---\n' +
+      'HUMAN ASSISTANCE — Slack question bridge:\n' +
+      'If you are blocked by a missing decision or clarification, print one line beginning with ' +
+      'HUMAN_QUESTION followed by a colon and your concise question. Then stop and wait.\n' +
+      'The workflow runner will post the question to Slack, wait for a human reply, and inject ' +
+      'a HUMAN_ANSWER line back into your session. Do not repeat the question while waiting.'
+    );
+  }
+
+  private observeHumanAssistanceOutput(input: {
+    agentName: string;
+    step: WorkflowStep;
+    config: HumanAssistanceConfig | undefined;
+    output: string;
+  }): void {
+    if (!this.isSlackHumanAssistanceEnabled(input.config)) return;
+
+    const pattern = /^[^\r\nA-Za-z0-9_]*HUMAN_QUESTION:\s*(.+)$/gim;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(input.output)) !== null) {
+      const question = match[1]?.trim();
+      if (!question) continue;
+      const key = `${input.step.name}:${input.agentName}`;
+      if (this.hasSeenSimilarHumanQuestion(key, question)) continue;
+      this.rememberHumanQuestion(key, question);
+      this.startSlackHumanQuestion(input.agentName, input.step, input.config!, question);
+    }
+  }
+
+  private rememberHumanQuestion(scope: string, question: string): void {
+    const now = Date.now();
+    const fingerprint = this.humanQuestionFingerprint(question);
+    const existing = this.seenHumanQuestionKeys.get(scope) ?? [];
+    const fresh = existing.filter((entry) => now - entry.at < 10 * 60_000);
+    fresh.push({ fingerprint, at: now });
+    this.seenHumanQuestionKeys.set(scope, fresh);
+  }
+
+  private hasSeenSimilarHumanQuestion(scope: string, question: string): boolean {
+    const fingerprint = this.humanQuestionFingerprint(question);
+    if (!fingerprint) return false;
+    const now = Date.now();
+    const existing = this.seenHumanQuestionKeys.get(scope) ?? [];
+    return existing.some((entry) => {
+      if (now - entry.at > 10 * 60_000) return false;
+      return this.areHumanQuestionFingerprintsSimilar(entry.fingerprint, fingerprint);
+    });
+  }
+
+  private humanQuestionFingerprint(question: string): string {
+    return question.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  }
+
+  private areHumanQuestionFingerprintsSimilar(left: string, right: string): boolean {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    if (left.includes(right) || right.includes(left)) return true;
+    const distance = this.boundedEditDistance(left, right, Math.max(3, Math.floor(Math.max(left.length, right.length) * 0.12)));
+    return distance !== undefined;
+  }
+
+  private boundedEditDistance(left: string, right: string, maxDistance: number): number | undefined {
+    if (Math.abs(left.length - right.length) > maxDistance) return undefined;
+
+    let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= left.length; i++) {
+      const current = [i];
+      let rowMin = current[0]!;
+      for (let j = 1; j <= right.length; j++) {
+        const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+        const value = Math.min(
+          previous[j]! + 1,
+          current[j - 1]! + 1,
+          previous[j - 1]! + cost
+        );
+        current[j] = value;
+        rowMin = Math.min(rowMin, value);
+      }
+      if (rowMin > maxDistance) return undefined;
+      previous = current;
+    }
+
+    const distance = previous[right.length]!;
+    return distance <= maxDistance ? distance : undefined;
+  }
+
+  private startSlackHumanQuestion(
+    agentName: string,
+    step: WorkflowStep,
+    config: HumanAssistanceConfig,
+    question: string
+  ): void {
+    if (this.pendingHumanQuestions.has(agentName)) return;
+
+    const task = this.askSlackAndInjectAnswer(agentName, step, config, question).finally(() => {
+      this.pendingHumanQuestions.delete(agentName);
+    });
+    this.pendingHumanQuestions.set(agentName, task);
+    task.catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[${step.name}] Slack human question failed: ${message}`);
+      this.postToChannel(`**[${step.name}]** Slack human question failed: ${message}`);
+    });
+  }
+
+  private async askSlackAndInjectAnswer(
+    agentName: string,
+    step: WorkflowStep,
+    config: HumanAssistanceConfig,
+    question: string
+  ): Promise<void> {
+    const slackConfig = typeof config.slack === 'object' && config.slack !== null ? config.slack : {};
+    this.log(`[${step.name}] ${agentName} requested human input via Slack`);
+    this.postToChannel(`**[${step.name}]** \`${agentName}\` asked a human question via Slack`);
+
+    const text = `Workflow step "${step.name}" agent "${agentName}" asks:\n\n${question}`;
+    const preferRelayfile =
+      Boolean(this.currentConfig?.integrations?.relayfile) ||
+      (!process.env.SLACK_BOT_TOKEN && !process.env.SLACK_CLOUD_API_TOKEN);
+
+    let result: { answer: { text: string; path?: string; eventId?: string } };
+    if (preferRelayfile) {
+      try {
+        result = await this.askSlackViaRelayfile({
+          channel: slackConfig.channel,
+          text,
+          mentions: slackConfig.mentions,
+          timeoutMs: slackConfig.timeoutMs,
+        });
+      } catch (err) {
+        if (this.currentConfig?.integrations?.relayfile) {
+          throw err;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        this.log(`[${step.name}] Relayfile Slack bridge unavailable, falling back to Slack API: ${message}`);
+        result = await new SlackClient().askQuestion({
+          channel: slackConfig.channel,
+          text,
+          mentions: slackConfig.mentions,
+          timeoutMs: slackConfig.timeoutMs,
+          ignoreUserIds: slackConfig.ignoreUserIds,
+        });
+      }
+    } else {
+      result = await new SlackClient().askQuestion({
+        channel: slackConfig.channel,
+        text,
+        mentions: slackConfig.mentions,
+        timeoutMs: slackConfig.timeoutMs,
+        ignoreUserIds: slackConfig.ignoreUserIds,
+      });
+    }
+
+    this.log(`[${step.name}] Received Slack human answer; injecting into ${agentName}`);
+    await this.injectAnswerToAgent({
+      agentName,
+      stepName: step.name,
+      source: 'slack',
+      text: `HUMAN_ANSWER: ${result.answer.text}`,
+    });
+  }
+
+  private async askSlackViaRelayfile(input: {
+    channel?: string;
+    text: string;
+    mentions?: string[];
+    timeoutMs?: number;
+  }): Promise<{ answer: { text: string; path?: string; eventId?: string } }> {
+    const channel = input.channel ?? process.env.SLACK_DEFAULT_CHANNEL;
+    if (!channel) {
+      throw new Error('Relayfile Slack human assistance requires a channel or SLACK_DEFAULT_CHANNEL');
+    }
+
+    const runtimeConfig = await this.resolveRelayfileRuntimeConfigForUse(this.currentConfig, {
+      ensureMount: Boolean(this.currentConfig?.integrations?.relayfile),
+    });
+    if (!runtimeConfig) {
+      const localRoot = await this.resolveRelayfileLocalRoot();
+      if (localRoot) {
+        return this.askSlackViaLocalRelayfile({ ...input, channel, localRoot });
+      }
+    }
+
+    if (!this.relayfileRuntimeConfig) {
+      throw new Error('Relayfile Slack human assistance requires Relayfile runtime configuration');
+    }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const runtime = this.relayfileRuntimeConfig;
+      if (!runtime) break;
+      try {
+        return await this.askSlackViaRelayfileRuntime({
+          ...input,
+          channel,
+          runtime,
+        });
+      } catch (err) {
+        if (attempt > 0 || !this.isRelayfileAuthExpiredError(err)) throw err;
+        const refreshed = await this.resolveRelayfileRuntimeConfigFromLocalCredentials(this.currentConfig);
+        if (!refreshed || refreshed.token === runtime.token) throw err;
+        this.log('Relayfile credentials expired; refreshed local Pear credentials and retrying Slack question');
+        this.relayfileRuntimeConfig = refreshed;
+        this.relayfileClient = undefined;
+      }
+    }
+
+    throw new Error('Relayfile Slack human assistance requires Relayfile runtime configuration');
+  }
+
+  private async askSlackViaRelayfileRuntime(input: {
+    channel: string;
+    text: string;
+    mentions?: string[];
+    timeoutMs?: number;
+    runtime: RelayfileRuntimeConfig;
+  }): Promise<{ answer: { text: string; path?: string; eventId?: string } }> {
+    const client = this.getRelayfileClient();
+    const runtime = input.runtime;
+    const channel = await this.resolveRelayfileSlackChannelId({
+      channel: input.channel,
+      client,
+      runtime,
+    });
+
+    const startedAt = Date.now();
+    const messagePath = `/slack/channels/${this.sanitizeRelayfilePathSegment(channel)}/messages/wb-relayflows-human-question-${Date.now()}-${this.generateShortId()}.json`;
+    const messageText = `${(input.mentions ?? []).join(' ')}${input.mentions?.length ? ' ' : ''}${input.text}`;
+
+    await client.writeFile({
+      workspaceId: runtime.workspaceId,
+      path: messagePath,
+      baseRevision: '0',
+      contentType: 'application/json',
+      content: JSON.stringify(
+        {
+          text: messageText,
+          idempotencyKey: path.basename(messagePath, '.json'),
+        },
+        null,
+        2
+      ),
+    });
+
+    const timeoutMs = input.timeoutMs ?? 10 * 60_000;
+    const channelPrefix = `/slack/channels/${this.sanitizeRelayfilePathSegment(channel)}`;
+    let answerText: string | undefined;
+    const event = await this.waitForRelayfileEvent(
+      {
+        name: 'slack-human-answer',
+        paths: [`${channelPrefix}/**`, `${channelPrefix}__*/**`],
+        provider: 'slack',
+        source: 'workflow',
+      },
+      timeoutMs,
+      async (event) => {
+        if (event.path === messagePath) return false;
+        if (event.timestamp && Date.parse(event.timestamp) < startedAt) return false;
+        const text = await this.readRelayfileSlackAnswerText(event.path, messageText);
+        if (!text) return false;
+        answerText = text;
+        return true;
+      }
+    );
+
+    return { answer: { text: answerText ?? '', path: event.path, eventId: event.eventId } };
+  }
+
+  private isRelayfileAuthExpiredError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /token has expired|jwt expired|unauthorized|401/i.test(message);
+  }
+
+  private async askSlackViaLocalRelayfile(input: {
+    channel: string;
+    text: string;
+    mentions?: string[];
+    timeoutMs?: number;
+    localRoot: string;
+  }): Promise<{ answer: { text: string; path?: string } }> {
+    const startedAt = Date.now();
+    const channel = await this.resolveLocalSlackChannelId(input.localRoot, input.channel);
+    const messageDir = await this.resolveLocalSlackMessageDir(input.localRoot, channel);
+    await mkdir(messageDir, { recursive: true });
+
+    const messageText = `${(input.mentions ?? []).join(' ')}${input.mentions?.length ? ' ' : ''}${input.text}`;
+    const messagePath = path.join(
+      messageDir,
+      `wb-relayflows-human-question-${Date.now()}-${this.generateShortId()}.json`
+    );
+    await writeFile(
+      messagePath,
+      JSON.stringify(
+        {
+          text: messageText,
+          idempotencyKey: path.basename(messagePath, '.json'),
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const timeoutMs = input.timeoutMs ?? 10 * 60_000;
+    this.log(`Wrote Slack question through local Relayfile mount: ${messagePath}`);
+
+    return await this.waitForLocalSlackAnswer({
+      localRoot: input.localRoot,
+      channel,
+      questionPath: messagePath,
+      questionText: messageText,
+      startedAt,
+      timeoutMs,
+    });
+  }
+
+  private async waitForLocalSlackAnswer(input: {
+    localRoot: string;
+    channel: string;
+    questionPath: string;
+    questionText: string;
+    startedAt: number;
+    timeoutMs: number;
+  }): Promise<{ answer: { text: string; path?: string } }> {
+    const check = async (): Promise<{ answer: { text: string; path?: string } } | undefined> => {
+      for (const candidate of await this.listLocalSlackAnswerFiles(input.localRoot, input.channel)) {
+        if (candidate === input.questionPath) continue;
+        const info = await stat(candidate).catch(() => undefined);
+        if (!info || info.mtimeMs < input.startedAt) continue;
+        const content = await readFile(candidate, 'utf8').catch(() => '');
+        const parsed = this.tryParseJson(content);
+        const answerText = this.extractTextFromSlackRelayfilePayload(parsed ?? content);
+        if (!answerText) continue;
+        if (answerText.trim() === input.questionText.trim()) continue;
+        if (answerText.includes('Workflow step "') && answerText.includes(' asks:')) continue;
+        return { answer: { text: answerText.trim(), path: candidate } };
+      }
+      return undefined;
+    };
+
+    const existing = await check();
+    if (existing) return existing;
+
+    const watchDirs = await this.resolveLocalSlackWatchDirs(input.localRoot, input.channel);
+    return await new Promise((resolve, reject) => {
+      const watchers: Array<ReturnType<typeof watch>> = [];
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
+        for (const watcher of watchers) watcher.close();
+      };
+      try {
+        for (const dir of watchDirs) {
+          watchers.push(watch(dir, { persistent: false }, () => {
+            void check().then((answer) => {
+              if (!answer) return;
+              cleanup();
+              resolve(answer);
+            }).catch((err) => {
+              cleanup();
+              reject(err);
+            });
+          }));
+        }
+      } catch (err) {
+        cleanup();
+        reject(err);
+        return;
+      }
+      timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting ${input.timeoutMs}ms for a Slack answer via local Relayfile mount`));
+      }, input.timeoutMs);
+    });
+  }
+
+  private async resolveRelayfileLocalRoot(config?: RelayYamlConfig): Promise<string | undefined> {
+    const configured =
+      config?.integrations?.relayfile?.localRoot ??
+      this.currentConfig?.integrations?.relayfile?.localRoot ??
+      process.env.RELAYFILE_LOCAL_ROOT ??
+      process.env.RELAYFILE_MOUNT_ROOT;
+    if (configured) return WorkflowRunner.resolveEnvVars(configured);
+
+    const workspaceId =
+      config?.integrations?.relayfile?.workspaceId ??
+      this.currentConfig?.integrations?.relayfile?.workspaceId ??
+      process.env.RELAYFILE_WORKSPACE_ID ??
+      process.env.RELAYFILE_WORKSPACE;
+    const pearRoot = path.join(
+      homedir(),
+      '.agentworkforce',
+      'pear',
+      'relayfile',
+      'workspaces'
+    );
+    if (!pearRoot.trim()) return undefined;
+
+    if (workspaceId) {
+      const candidate = path.join(pearRoot, workspaceId);
+      if (await this.pathExists(candidate)) return candidate;
+    }
+
+    const entries = await readdir(pearRoot, { withFileTypes: true }).catch(() => []);
+    const candidates: Array<{ path: string; mtimeMs: number }> = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(pearRoot, entry.name);
+      if (
+        !(await this.pathExists(path.join(candidate, 'slack'))) &&
+        !(await this.pathExists(path.join(candidate, 'discovery', 'slack')))
+      ) {
+        continue;
+      }
+      const info = await stat(candidate).catch(() => undefined);
+      candidates.push({ path: candidate, mtimeMs: info?.mtimeMs ?? 0 });
+    }
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0]?.path;
+  }
+
+  private async resolveRelayfileSlackChannelId(input: {
+    channel: string;
+    client: RelayFileClient;
+    runtime: RelayfileRuntimeConfig;
+  }): Promise<string> {
+    const normalized = this.normalizeSlackChannelIdentifier(input.channel);
+    if (this.looksLikeSlackChannelId(normalized)) return normalized;
+
+    const index = await input.client
+      .readFile(input.runtime.workspaceId, '/slack/channels/_index.json')
+      .catch(() => undefined);
+    const entries = this.parseSlackChannelIndex(typeof index?.content === 'string' ? index.content : '');
+    const match = this.findSlackChannelIndexMatch(entries, normalized);
+    if (match) return match.id;
+
+    const localRoot = await this.resolveRelayfileLocalRoot(this.currentConfig);
+    if (localRoot) {
+      const localMatch = await this.resolveLocalSlackChannelId(localRoot, normalized).catch(() => undefined);
+      if (localMatch) return localMatch;
+    }
+
+    throw new Error(
+      `Slack channel "${input.channel}" was not found in Relayfile's Slack channel index. ` +
+        'Use a channel name from /slack/channels/_index.json or a Slack channel id.'
+    );
+  }
+
+  private async resolveLocalSlackChannelId(localRoot: string, channel: string): Promise<string> {
+    const normalized = this.normalizeSlackChannelIdentifier(channel);
+    if (this.looksLikeSlackChannelId(normalized)) return normalized;
+
+    for (const indexPath of [
+      path.join(localRoot, 'slack', 'channels', '_index.json'),
+      path.join(localRoot, 'discovery', 'slack', 'channels', '_index.json'),
+    ]) {
+      const raw = await readFile(indexPath, 'utf8').catch(() => undefined);
+      if (!raw) continue;
+      const match = this.findSlackChannelIndexMatch(this.parseSlackChannelIndex(raw), normalized);
+      if (match) return match.id;
+    }
+
+    const directEntries = await readdir(path.join(localRoot, 'slack', 'channels'), { withFileTypes: true }).catch(
+      () => []
+    );
+    for (const entry of directEntries) {
+      if (!entry.isDirectory()) continue;
+      const [id, ...nameParts] = entry.name.split('__');
+      const name = nameParts.join('__');
+      if (!id || !this.looksLikeSlackChannelId(id) || !name) continue;
+      if (this.slackChannelLookupKey(name) === this.slackChannelLookupKey(normalized)) return id;
+    }
+
+    throw new Error(`Slack channel "${channel}" was not found in the local Relayfile Slack channel index`);
+  }
+
+  private parseSlackChannelIndex(raw: string): Array<{ id: string; name?: string; title?: string }> {
+    const parsed = this.tryParseJson(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const record = entry as Record<string, unknown>;
+      const id = typeof record.id === 'string' ? record.id : undefined;
+      if (!id) return [];
+      return [
+        {
+          id,
+          name: typeof record.name === 'string' ? record.name : undefined,
+          title: typeof record.title === 'string' ? record.title : undefined,
+        },
+      ];
+    });
+  }
+
+  private findSlackChannelIndexMatch(
+    entries: Array<{ id: string; name?: string; title?: string }>,
+    normalized: string
+  ): { id: string } | undefined {
+    const matches = entries.filter((entry) => {
+      return [entry.id, entry.name, entry.title]
+        .filter((value): value is string => typeof value === 'string')
+        .some((value) => this.slackChannelLookupKey(value) === this.slackChannelLookupKey(normalized));
+    });
+    if (matches.length > 1) {
+      throw new Error(`Slack channel "${normalized}" is ambiguous in Relayfile's Slack channel index`);
+    }
+    return matches[0];
+  }
+
+  private normalizeSlackChannelIdentifier(channel: string): string {
+    return channel.trim().replace(/^#/, '');
+  }
+
+  private slackChannelLookupKey(channel: string): string {
+    return this.normalizeSlackChannelIdentifier(channel).toLowerCase();
+  }
+
+  private looksLikeSlackChannelId(channel: string): boolean {
+    return /^[cdg][a-z0-9]{8,}$/i.test(channel);
+  }
+
+  private async resolveRelayfileRuntimeConfigFromLocalCredentials(config?: RelayYamlConfig): Promise<RelayfileRuntimeConfig | undefined> {
+    const localRoot = await this.resolveRelayfileLocalRoot(config);
+    if (!localRoot) return undefined;
+
+    const credentialFiles = [
+      path.join(localRoot, 'discovery', 'slack', '.relay', 'creds.json'),
+      path.join(localRoot, 'slack', '.relay', 'creds.json'),
+    ];
+    for (const candidate of credentialFiles) {
+      const raw = await readFile(candidate, 'utf8').catch(() => undefined);
+      if (!raw) continue;
+      const parsed = this.tryParseJson(raw);
+      if (!parsed || typeof parsed !== 'object') continue;
+      const token = (parsed as Record<string, unknown>).token;
+      if (typeof token !== 'string' || !token.trim()) continue;
+      const workspaceId = this.relayfileWorkspaceIdFromJwt(token);
+      if (!workspaceId) continue;
+      return {
+        baseUrl:
+          this.currentConfig?.integrations?.relayfile?.baseUrl ??
+          config?.integrations?.relayfile?.baseUrl ??
+          process.env.RELAYFILE_BASE_URL ??
+          'https://file.agentrelay.com',
+        workspaceId,
+        token,
+        source: 'local-creds',
+      };
+    }
+    return undefined;
+  }
+
+  private async resolveLocalSlackMessageDir(localRoot: string, channel: string): Promise<string> {
+    const channelId = this.sanitizeRelayfilePathSegment(channel);
+    const directChannelRoot = path.join(localRoot, 'slack', 'channels');
+    const directEntries = await readdir(directChannelRoot, { withFileTypes: true }).catch(() => []);
+    const direct = directEntries.find((entry) => entry.isDirectory() && entry.name.startsWith(channelId));
+    if (direct) return path.join(directChannelRoot, direct.name, 'messages');
+
+    return path.join(directChannelRoot, channelId, 'messages');
+  }
+
+  private async resolveLocalSlackWatchDirs(localRoot: string, channel: string): Promise<string[]> {
+    const channelId = this.sanitizeRelayfilePathSegment(channel);
+    const dirs = new Set<string>();
+    dirs.add(path.join(localRoot, 'discovery', 'slack', 'channels', channelId, 'messages'));
+    dirs.add(path.join(localRoot, 'slack', 'channels', channelId, 'messages'));
+
+    const directChannelRoot = path.join(localRoot, 'slack', 'channels');
+    const directEntries = await readdir(directChannelRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of directEntries) {
+      if (entry.isDirectory() && entry.name.startsWith(channelId)) {
+        dirs.add(path.join(directChannelRoot, entry.name, 'messages'));
+      }
+    }
+
+    const existing: string[] = [];
+    for (const dir of dirs) {
+      if (await this.pathExists(dir)) existing.push(dir);
+    }
+    return existing.length > 0 ? existing : [await this.resolveLocalSlackMessageDir(localRoot, channel)];
+  }
+
+  private async listLocalSlackAnswerFiles(localRoot: string, channel: string): Promise<string[]> {
+    const channelId = this.sanitizeRelayfilePathSegment(channel);
+    const dirs = new Set<string>();
+    dirs.add(path.join(localRoot, 'discovery', 'slack', 'channels', channelId, 'messages'));
+    dirs.add(path.join(localRoot, 'slack', 'channels', channelId, 'messages'));
+
+    const directChannelRoot = path.join(localRoot, 'slack', 'channels');
+    const directEntries = await readdir(directChannelRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of directEntries) {
+      if (entry.isDirectory() && entry.name.startsWith(channelId)) {
+        dirs.add(path.join(directChannelRoot, entry.name, 'messages'));
+      }
+    }
+
+    const files: string[] = [];
+    for (const dir of dirs) {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.json')) {
+          files.push(path.join(dir, entry.name));
+        }
+      }
+    }
+    return files;
+  }
+
+  private async pathExists(candidate: string): Promise<boolean> {
+    return stat(candidate)
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  private async readRelayfileSlackAnswerText(path: string, questionText: string): Promise<string | undefined> {
+    const runtime = this.relayfileRuntimeConfig;
+    if (!runtime) return undefined;
+    const file = await this.getRelayfileClient().readFile(runtime.workspaceId, path).catch(() => undefined);
+    const content = typeof file?.content === 'string' ? file.content : '';
+    if (!content.trim()) return undefined;
+
+    const parsed = this.tryParseJson(content);
+    const text = this.extractTextFromSlackRelayfilePayload(parsed ?? content);
+    if (!text) return undefined;
+    if (text.trim() === questionText.trim()) return undefined;
+    if (text.includes('Workflow step "') && text.includes(' asks:')) return undefined;
+    return text.trim();
+  }
+
+  private extractTextFromSlackRelayfilePayload(payload: unknown): string | undefined {
+    if (typeof payload === 'string') return payload;
+    if (!payload || typeof payload !== 'object') return undefined;
+    const record = payload as Record<string, unknown>;
+    for (const key of ['text', 'body', 'message']) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) return value;
+      if (value && typeof value === 'object') {
+        const nested = this.extractTextFromSlackRelayfilePayload(value);
+        if (nested) return nested;
+      }
+    }
+    const data = record.data;
+    if (data && typeof data === 'object') return this.extractTextFromSlackRelayfilePayload(data);
+    return undefined;
+  }
+
+  private tryParseJson(value: string): unknown | undefined {
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private relayfileWorkspaceIdFromJwt(token: string): string | undefined {
+    const parts = token.split('.');
+    if (parts.length < 2) return undefined;
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>;
+      const workspaceId = payload.wks ?? payload.workspaceId ?? payload.workspace_id;
+      return typeof workspaceId === 'string' && workspaceId.trim() ? workspaceId.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private sanitizeRelayfilePathSegment(value: string): string {
+    return value.replace(/^#/, '').replace(/[^A-Za-z0-9_.=-]/g, '_');
+  }
+
+  private async injectAnswerToAgent(input: {
+    agentName: string;
+    text: string;
+    stepName: string;
+    source: 'slack';
+  }): Promise<void> {
+    if (!this.activeAgentHandles.has(input.agentName)) {
+      throw new Error(
+        `Cannot inject ${input.source} answer into "${input.agentName}" because that agent is not active`
+      );
+    }
+    if (!this.relay) {
+      throw new Error('Cannot inject human answer because the workflow broker is not connected');
+    }
+
+    this.log(`[${input.stepName}] Injecting ${input.source} answer into ${input.agentName}`);
+    if (typeof this.relay.sendInput === 'function') {
+      void this.relay.sendInput(input.agentName, `${input.text}\r`).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/aborted due to timeout|operation was aborted|timeout/i.test(message)) return;
+        this.log(`[${input.stepName}] PTY input dispatch reported an error for ${input.agentName}: ${message}`);
+      });
+      // The current broker writes PTY input before replying, but does not ack the
+      // successful write. Give the dispatch a moment to leave this process.
+      await this.delay(500);
+    } else {
+      await Promise.race([
+        this.withBrokerRecovery(`injecting ${input.source} answer into "${input.agentName}"`, (relay) =>
+          relay.sendMessage({
+            from: 'workflow-runner',
+            to: input.agentName,
+            text: input.text,
+          })
+        ),
+        this.delay(20_000).then(() => {
+          throw new Error(`Timed out injecting ${input.source} answer into "${input.agentName}"`);
+        }),
+      ]);
+    }
+    this.log(`[${input.stepName}] Injected ${input.source} answer into ${input.agentName}`);
+    this.postToChannel(`**[${input.stepName}]** Injected ${input.source} answer into \`${input.agentName}\``);
+  }
+
   // ── Idle nudging ────────────────────────────────────────────────────────
 
   /** Patterns where a hub agent coordinates spoke agents. */
@@ -7522,6 +8877,28 @@ export class WorkflowRunner {
     );
   }
 
+  private async releaseAgentIfVerificationPassedAfterHumanInput(
+    agent: WorkflowAgentHandle,
+    step: WorkflowStep,
+    promptTaskText?: string
+  ): Promise<boolean> {
+    if (!step.verification || step.verification.type !== 'output_contains') return false;
+    const ptyOutput = (this.ptyOutputBuffers.get(agent.name) ?? []).join('');
+    const verificationPassed = this.outputContainsVerificationToken(
+      ptyOutput,
+      step.verification.value,
+      promptTaskText
+    );
+    if (!verificationPassed) return false;
+
+    this.log(`[${step.name}] Slack human answer received and verification passed — releasing ${agent.name}`);
+    this.postToChannel(
+      `**[${step.name}]** Slack human answer received and verification passed — releasing \`${agent.name}\``
+    );
+    await agent.release('human answer verification passed').catch(() => undefined);
+    return true;
+  }
+
   /**
    * Wait for agent exit with idle detection and nudging.
    * If no idle nudge config is set, falls through to simple waitForExit.
@@ -7549,6 +8926,18 @@ export class WorkflowRunner {
         const elapsed = Date.now() - idleLoopStart;
         const remaining = timeoutMs != null ? Math.max(0, timeoutMs - elapsed) : undefined;
         if (remaining != null && remaining <= 0) {
+          const pendingQuestion = this.pendingHumanQuestions.get(agent.name);
+          if (pendingQuestion) {
+            this.log(`[${step.name}] Agent "${agent.name}" is blocked on Slack human input`);
+            this.postToChannel(
+              `**[${step.name}]** Agent \`${agent.name}\` is blocked on Slack human input`
+            );
+            await pendingQuestion;
+            if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
+              return 'released';
+            }
+            continue;
+          }
           return 'timeout';
         }
         const result = await Promise.race([
@@ -7556,6 +8945,18 @@ export class WorkflowRunner {
           agent.waitForIdle(remaining).then((r) => ({ kind: 'idle' as const, result: r })),
         ]);
         if (result.kind === 'idle' && result.result === 'idle') {
+          const pendingQuestion = this.pendingHumanQuestions.get(agent.name);
+          if (pendingQuestion) {
+            this.log(`[${step.name}] Agent "${agent.name}" is waiting for a Slack human answer`);
+            this.postToChannel(
+              `**[${step.name}]** Agent \`${agent.name}\` is waiting for a Slack human answer`
+            );
+            await pendingQuestion;
+            if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
+              return 'released';
+            }
+            continue;
+          }
           // Check verification before treating idle as complete.
           if (step.verification && step.verification.type === 'output_contains') {
             const token = step.verification.value;
@@ -7570,7 +8971,7 @@ export class WorkflowRunner {
               this.log(
                 `[${step.name}] Agent "${agent.name}" went idle but verification not yet passed — waiting for more output`
               );
-              const idleGraceSecs = 15;
+              const idleGraceSecs = this.resolveHumanAssistanceConfig(step) ? 90 : 15;
               const graceResult = await Promise.race([
                 agent.waitForExit(idleGraceSecs * 1000).then((r) => ({ kind: 'exit' as const, result: r })),
                 agent.waitForIdle(idleGraceSecs * 1000).then((r) => ({ kind: 'idle' as const, result: r })),
@@ -7579,7 +8980,7 @@ export class WorkflowRunner {
                 // Agent went idle again after producing output — re-check verification
                 continue;
               }
-              if (graceResult.kind === 'exit') {
+              if (graceResult.kind === 'exit' && graceResult.result !== 'timeout') {
                 return graceResult.result as 'exited' | 'timeout' | 'released';
               }
               // Grace period timed out — agent is permanently idle without verification.
@@ -7635,6 +9036,16 @@ export class WorkflowRunner {
       if (exitResult !== 'timeout') {
         // Agent actually exited or was released — done
         return exitResult;
+      }
+
+      const pendingQuestion = this.pendingHumanQuestions.get(agent.name);
+      if (pendingQuestion) {
+        this.log(`[${step.name}] Agent "${agent.name}" is blocked on Slack human input`);
+        this.postToChannel(
+          `**[${step.name}]** Agent \`${agent.name}\` is blocked on Slack human input`
+        );
+        await pendingQuestion;
+        continue;
       }
 
       // Agent is still running after the window expired.

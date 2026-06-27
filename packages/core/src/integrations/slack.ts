@@ -2,12 +2,16 @@ import type { RunnerStepExecutor, WorkflowStep } from '../types.js';
 
 import { SlackClient } from '@relayflows/slack-primitive';
 import {
-  SlackAction,
-  SLACK_ACTIONS,
   type PostMessageParams,
   type SlackActionResult,
   type SlackRuntimeConfig,
 } from '@relayflows/slack-primitive';
+
+interface AskQuestionParams extends PostMessageParams {
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  ignoreUserIds?: string[];
+}
 
 export type SlackStepOutputMode = 'data' | 'result' | 'summary' | 'raw' | 'none';
 export type SlackStepOutputFormat = 'json' | 'text';
@@ -30,8 +34,8 @@ export interface SlackStepConfig {
   name: string;
   /** Dependencies in the Relay workflow DAG. */
   dependsOn?: string[];
-  /** Slack action to execute. Phase A supports postMessage. */
-  action: 'postMessage';
+  /** Slack action to execute. */
+  action: 'postMessage' | 'askQuestion';
   /** Slack channel id or #channel-name reference. Falls back to SLACK_DEFAULT_CHANNEL when omitted. */
   channel?: string;
   /** Message text. Values may include workflow templates such as {{steps.plan.output.title}}. */
@@ -42,6 +46,16 @@ export interface SlackStepConfig {
   mentions?: string[];
   /** Slack unfurl setting for links and media. */
   unfurl?: boolean;
+  /** Blocking ask timeout in milliseconds. Only used by askQuestion. */
+  waitTimeoutMs?: number;
+  /** Poll delay in milliseconds while waiting for an answer. Only used by askQuestion. */
+  pollIntervalMs?: number;
+  /** Slack user IDs to ignore while waiting for an answer. */
+  ignoreUserIds?: string[];
+  /** Active workflow agent name to inject the answer into after askQuestion completes. */
+  injectToAgent?: string;
+  /** Optional text template for injection. Use {{answer.text}} and {{question.text}} placeholders. */
+  injectTemplate?: string;
   /** Runtime settings for the local Slack Web API runtime. */
   config?: SlackRuntimeConfig;
   /** Controls the string captured as {{steps.<name>.output}}. */
@@ -56,6 +70,12 @@ export interface SlackStepExecutionContext {
   workspaceId?: string;
   client?: SlackClient;
   config?: SlackRuntimeConfig;
+  injectAnswerToAgent?: (input: {
+    agentName: string;
+    text: string;
+    stepName: string;
+    source: 'slack';
+  }) => Promise<void>;
 }
 
 export interface SlackStepExecutionResult<TOutput = unknown> {
@@ -73,7 +93,13 @@ export interface SlackIntegrationStepResult {
 type ResolvedParams = Record<string, unknown>;
 
 const SLACK_INTEGRATION = 'slack';
+const SLACK_POST_MESSAGE_ACTION = 'postMessage';
+const SLACK_ASK_QUESTION_ACTION = 'askQuestion';
 const RESERVED_PARAM_KEYS = new Set(['action', 'config', 'slackConfig', 'output', 'params']);
+const SUPPORTED_SLACK_STEP_ACTIONS = new Set<string>([
+  SLACK_POST_MESSAGE_ACTION,
+  SLACK_ASK_QUESTION_ACTION,
+]);
 
 /**
  * Create a Relay integration step for posting a Slack message.
@@ -91,6 +117,11 @@ export function createSlackStep(config: SlackStepConfig): WorkflowStep {
   if (config.threadTs !== undefined) params.threadTs = config.threadTs;
   if (config.mentions !== undefined) params.mentions = JSON.stringify(config.mentions);
   if (config.unfurl !== undefined) params.unfurl = String(config.unfurl);
+  if (config.waitTimeoutMs !== undefined) params.waitTimeoutMs = String(config.waitTimeoutMs);
+  if (config.pollIntervalMs !== undefined) params.pollIntervalMs = String(config.pollIntervalMs);
+  if (config.ignoreUserIds !== undefined) params.ignoreUserIds = JSON.stringify(config.ignoreUserIds);
+  if (config.injectToAgent !== undefined) params.injectToAgent = config.injectToAgent;
+  if (config.injectTemplate !== undefined) params.injectTemplate = config.injectTemplate;
   if (config.config !== undefined) params.config = JSON.stringify(config.config);
   if (config.output !== undefined) params.output = JSON.stringify(config.output);
 
@@ -125,7 +156,23 @@ export class SlackStepExecutor implements RunnerStepExecutor {
     const runtimeConfig = mergeRuntimeConfig(this.options, context.config, config.config);
     const client = context.client ?? new SlackClient(runtimeConfig);
     const params = buildActionParams(config);
-    const result = await client.executeAction<TOutput>(SlackAction.PostMessage, params);
+    const result = (await client.executeAction<TOutput>(
+      config.action as Parameters<SlackClient['executeAction']>[0],
+      params
+    )) as SlackActionResult<TOutput>;
+
+    if (result.success && config.action === SLACK_ASK_QUESTION_ACTION && config.injectToAgent) {
+      if (!context.injectAnswerToAgent) {
+        throw new Error('Slack askQuestion injectToAgent requires a workflow runner injection context');
+      }
+      await context.injectAnswerToAgent({
+        agentName: config.injectToAgent,
+        text: formatAnswerInjection(config, result.data),
+        stepName: config.name,
+        source: 'slack',
+      });
+    }
+
     const output = formatStepOutput(config, result);
 
     return {
@@ -138,7 +185,8 @@ export class SlackStepExecutor implements RunnerStepExecutor {
 
   async executeIntegrationStep(
     step: WorkflowStep,
-    resolvedParams: Record<string, string>
+    resolvedParams: Record<string, string>,
+    context: SlackStepExecutionContext = {}
   ): Promise<SlackIntegrationStepResult> {
     if (step.integration !== SLACK_INTEGRATION) {
       return {
@@ -149,7 +197,7 @@ export class SlackStepExecutor implements RunnerStepExecutor {
 
     try {
       const config = slackStepConfigFromWorkflowStep(step, resolvedParams);
-      const result = await this.execute(config);
+      const result = await this.execute(config, context);
 
       return {
         success: result.success,
@@ -177,8 +225,8 @@ export function slackStepConfigFromWorkflowStep(
   const params = normalizeResolvedParams(resolvedParams);
   const action = step.action;
 
-  if (action !== SlackAction.PostMessage) {
-    throw new Error(`Slack step "${step.name}" requires action "postMessage"`);
+  if (action !== SLACK_POST_MESSAGE_ACTION && action !== SLACK_ASK_QUESTION_ACTION) {
+    throw new Error(`Slack step "${step.name}" requires action "postMessage" or "askQuestion"`);
   }
 
   const config =
@@ -189,12 +237,20 @@ export function slackStepConfigFromWorkflowStep(
   return {
     name: step.name,
     dependsOn: step.dependsOn,
-    action: SlackAction.PostMessage,
+    action,
     channel: readOptionalString(actionParams.channel),
     text: readRequiredString(actionParams.text, 'text'),
     threadTs: readOptionalString(actionParams.threadTs),
     mentions: readStringArray(actionParams.mentions),
     unfurl: readOptionalBoolean(actionParams.unfurl, 'unfurl'),
+    waitTimeoutMs: readOptionalNumber(
+      actionParams.waitTimeoutMs ?? actionParams.timeoutMs,
+      'waitTimeoutMs'
+    ),
+    pollIntervalMs: readOptionalNumber(actionParams.pollIntervalMs, 'pollIntervalMs'),
+    ignoreUserIds: readStringArray(actionParams.ignoreUserIds),
+    injectToAgent: readOptionalString(actionParams.injectToAgent),
+    injectTemplate: readOptionalString(actionParams.injectTemplate),
     config,
     output,
     timeoutMs: step.timeoutMs,
@@ -221,25 +277,54 @@ function validateSlackStepConfig(config: SlackStepConfig): void {
   if (!config.name) {
     throw new Error('Slack step requires a non-empty name');
   }
-  if (!SLACK_ACTIONS.includes(config.action as SlackAction)) {
+  if (!SUPPORTED_SLACK_STEP_ACTIONS.has(config.action)) {
     throw new Error(`Slack step "${config.name}" uses unsupported action "${config.action}"`);
   }
-  if (config.action !== SlackAction.PostMessage) {
-    throw new Error(`Slack step "${config.name}" requires action "postMessage"`);
+  if (config.action !== SLACK_POST_MESSAGE_ACTION && config.action !== SLACK_ASK_QUESTION_ACTION) {
+    throw new Error(`Slack step "${config.name}" requires action "postMessage" or "askQuestion"`);
   }
   if (typeof config.text !== 'string' || config.text.length === 0) {
     throw new Error(`Slack step "${config.name}" requires message text`);
   }
 }
 
-function buildActionParams(config: SlackStepConfig): PostMessageParams {
-  return {
+function buildActionParams(config: SlackStepConfig): PostMessageParams | AskQuestionParams {
+  const params: PostMessageParams | AskQuestionParams = {
     channel: config.channel,
     text: config.text,
     threadTs: config.threadTs,
     mentions: config.mentions,
     unfurl: config.unfurl,
   };
+
+  if (config.action === SLACK_ASK_QUESTION_ACTION) {
+    return {
+      ...params,
+      timeoutMs: config.waitTimeoutMs,
+      pollIntervalMs: config.pollIntervalMs,
+      ignoreUserIds: config.ignoreUserIds,
+    };
+  }
+
+  return params;
+}
+
+function formatAnswerInjection(config: SlackStepConfig, data: unknown): string {
+  const answerText = readNestedString(data, ['answer', 'text']) ?? projectionToText(data);
+  const questionText = readNestedString(data, ['question', 'text']) ?? config.text;
+  const template = config.injectTemplate ?? 'HUMAN_ANSWER: {{answer.text}}';
+  return template
+    .replace(/\{\{\s*answer\.text\s*\}\}/g, () => answerText)
+    .replace(/\{\{\s*question\.text\s*\}\}/g, () => questionText);
+}
+
+function readNestedString(value: unknown, path: string[]): string | undefined {
+  let current = value;
+  for (const segment of path) {
+    if (!isRecord(current)) return undefined;
+    current = current[segment];
+  }
+  return typeof current === 'string' ? current : undefined;
 }
 
 function readActionParams(params: ResolvedParams): Record<string, unknown> {
@@ -462,6 +547,16 @@ function readOptionalBoolean(value: unknown, name: string): boolean | undefined 
   if (value === 'true') return true;
   if (value === 'false') return false;
   throw new Error(`Slack step ${name} must be a boolean`);
+}
+
+function readOptionalNumber(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  throw new Error(`Slack step ${name} must be a number`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

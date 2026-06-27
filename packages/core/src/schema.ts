@@ -80,6 +80,10 @@ export interface AgentDefinition {
   preset?: AgentPreset;
   /** Optional credential proxy settings for this agent. */
   credentials?: AgentCredentialConfig;
+  /** Relayfile-change listeners for this agent, matching Workforce `agent.watch`. */
+  watch?: RelayfileWatchRule[];
+  /** Relayflow integration subscriptions for this agent. Alias-friendly superset of `watch`. */
+  subscriptions?: IntegrationSubscriptionConfig[];
   /** System prompt / skills for API-mode agents (cli: 'api'). */
   skills?: string;
 }
@@ -232,8 +236,97 @@ export interface AgentPermissions {
   exec?: string[];
 }
 
-/** Step type: agent (LLM-powered), deterministic (shell command), worktree (git worktree setup), or integration (external service). */
-export type WorkflowStepType = 'agent' | 'deterministic' | 'worktree' | 'integration';
+/** Step type: agent (LLM-powered), deterministic (shell command), worktree, integration, or event gate. */
+export type WorkflowStepType = 'agent' | 'deterministic' | 'worktree' | 'integration' | 'waitFor';
+
+/** Slack-backed human assistance for interactive workflow agents. */
+export interface SlackHumanAssistanceConfig {
+  /** Slack channel name, #channel-name, or Slack channel id. Falls back to SLACK_DEFAULT_CHANNEL. */
+  channel?: string;
+  /** Blocking timeout in milliseconds. */
+  timeoutMs?: number;
+  /** User mentions to prefix on the Slack question. */
+  mentions?: string[];
+  /** Slack user IDs to ignore when selecting the answer. */
+  ignoreUserIds?: string[];
+}
+
+export interface RelayfileIntegrationConfig {
+  /** Relayfile API base URL. Defaults to RELAYFILE_BASE_URL. */
+  baseUrl?: string;
+  /** Relayfile workspace id. Optional; defaults to env or an existing local Pear Relayfile connection. */
+  workspaceId?: string;
+  /** Bearer token. Optional; defaults to env or an existing local Pear Relayfile connection. */
+  token?: string;
+  /** Start/ensure a Relayfile mount for this integration. Defaults to true. */
+  mount?: boolean;
+  /** Local Relayfile mount root for fallback writebacks or the auto-started mount. Defaults to RELAYFILE_LOCAL_ROOT or Pear's local mount. */
+  localRoot?: string;
+}
+
+export type RelayfileWatchEvent = 'created' | 'updated' | 'deleted' | 'file.created' | 'file.updated' | 'file.deleted';
+
+/** Workforce-style Relayfile watch rule declared by an agent. */
+export interface RelayfileWatchRule {
+  /** Absolute Relayfile path globs, e.g. /github/repos/acme/web/pulls/42/**. */
+  paths: string[];
+  /** Events to watch. Short names map to file.* events. */
+  events: RelayfileWatchEvent[];
+  /** Optional debounce interval reserved for future batching. */
+  debounceMs?: number;
+  /** Optional provider/runtime match expression reserved for future filtering. */
+  match?: string;
+}
+
+export interface IntegrationSubscriptionConfig {
+  /** Subscription name for logs and prompt context. */
+  name: string;
+  /** Relayfile path glob, for example a GitHub PR subtree under /github/repos. */
+  path?: string;
+  /** Relayfile path globs. Prefer this for new configs and agent-level subscriptions. */
+  paths?: string[];
+  /** Optional provider label, e.g. github or slack. */
+  provider?: string;
+  /** Optional event type filter, e.g. file.created or file.updated. */
+  event?: string;
+  /** Optional event filters. Short names map to file.* events. */
+  events?: string[];
+  /** Optional target agent name for global subscriptions. */
+  agent?: string;
+  /** Optional target agent names for global subscriptions. Omit to broadcast to active agents. */
+  agents?: string[];
+  /** Optional debounce interval reserved for future batching. */
+  debounceMs?: number;
+  /** Optional provider/runtime match expression reserved for future filtering. */
+  match?: string;
+}
+
+export interface RelayfileEventGateConfig {
+  /** Optional provider label, e.g. github, linear, or slack. */
+  provider?: string;
+  /** Relayfile path glob, for example a GitHub PR review subtree. */
+  path?: string;
+  /** Relayfile path globs. */
+  paths?: string[];
+  /** Optional event type filter. `created`/`updated`/`deleted` map to file.* filters. */
+  event?: string;
+  /** Optional event filters. */
+  events?: string[];
+  /** Blocking timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Optional provider/runtime match expression reserved for future filtering. */
+  match?: string;
+}
+
+export interface WorkflowIntegrationsConfig {
+  relayfile?: RelayfileIntegrationConfig;
+  subscriptions?: IntegrationSubscriptionConfig[];
+}
+
+export interface HumanAssistanceConfig {
+  /** Enable marker-driven Slack questions for interactive agents. */
+  slack?: SlackHumanAssistanceConfig | boolean;
+}
 
 /**
  * A single step within a workflow.
@@ -267,6 +360,12 @@ export interface WorkflowStep {
   maxIterations?: number;
   /** Explicit working directory for this step. */
   cwd?: string;
+  /** Step-level human assistance override. Set false to disable swarm defaults. */
+  humanAssistance?: HumanAssistanceConfig | false;
+
+  // ── Event gate fields ─────────────────────────────────────────────────────
+  /** Relayfile event selector for type: waitFor steps. */
+  waitFor?: RelayfileEventGateConfig;
 
   // ── Deterministic step fields ──────────────────────────────────────────────
   /** Shell command to execute (required for deterministic steps). */
@@ -314,6 +413,11 @@ export function isIntegrationStep(step: WorkflowStep): boolean {
   return step.type === 'integration';
 }
 
+/** Type guard: Check if a step is a waitFor event gate step. */
+export function isWaitForStep(step: WorkflowStep): boolean {
+  return step.type === 'waitFor';
+}
+
 /** Type guard: Check if a step uses a custom step definition. */
 export function isCustomStep(step: WorkflowStep): boolean {
   return step.use !== undefined;
@@ -321,7 +425,7 @@ export function isCustomStep(step: WorkflowStep): boolean {
 
 /** Type guard: Check if a step is an agent (LLM-powered) step. */
 export function isAgentStep(step: WorkflowStep): boolean {
-  return step.type !== 'deterministic' && step.type !== 'worktree' && step.type !== 'integration';
+  return step.type !== 'deterministic' && step.type !== 'worktree' && step.type !== 'integration' && step.type !== 'waitFor';
 }
 
 // Legacy type aliases for backward compatibility
@@ -372,6 +476,14 @@ export interface RunnerStepExecutor {
   executeIntegrationStep?(
     step: WorkflowStep,
     resolvedParams: Record<string, string>,
-    context: { workspaceId?: string }
+    context: {
+      workspaceId?: string;
+      injectAnswerToAgent?: (input: {
+        agentName: string;
+        text: string;
+        stepName: string;
+        source: 'slack';
+      }) => Promise<void>;
+    }
   ): Promise<{ output: string; success: boolean }>;
 }

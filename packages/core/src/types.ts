@@ -12,8 +12,13 @@ export type {
   AgentDefinition,
   AgentPermissions,
   AgentPreset,
+  HumanAssistanceConfig,
+  IntegrationSubscriptionConfig,
+  WorkflowIntegrationsConfig,
   NetworkPermission,
   PermissionProfileDefinition,
+  RelayfileEventGateConfig,
+  RelayfileWatchRule,
   RunnerStepExecutor,
   SwarmPattern,
   VerificationCheck,
@@ -25,8 +30,13 @@ import type {
   AccessPreset,
   AgentDefinition,
   AgentPermissions,
+  HumanAssistanceConfig,
+  IntegrationSubscriptionConfig,
+  WorkflowIntegrationsConfig,
   NetworkPermission,
   PermissionProfileDefinition,
+  RelayfileEventGateConfig,
+  RelayfileWatchRule,
   SwarmPattern,
   WorkflowStep,
   WorkflowStepType,
@@ -52,6 +62,7 @@ export interface RelayYamlConfig {
   coordination?: CoordinationConfig;
   state?: StateConfig;
   errorHandling?: ErrorHandlingConfig;
+  integrations?: WorkflowIntegrationsConfig;
   trajectories?: TrajectoryConfig | false;
 }
 
@@ -129,6 +140,8 @@ export interface SwarmConfig {
   credentialProxy?: CredentialProxyConfig;
   /** Idle agent detection and nudging configuration for interactive agents. */
   idleNudge?: IdleNudgeConfig;
+  /** Human-in-the-loop assistance available to interactive agents. */
+  humanAssistance?: HumanAssistanceConfig;
   /**
    * Grace period (ms) after an agent exits with code 0 but without posting
    * the expected coordination signal. During this window the runner checks

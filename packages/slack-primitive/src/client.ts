@@ -1,5 +1,7 @@
 import { SlackAdapterFactory } from './adapter.js';
 import type {
+  AskQuestionOutput,
+  AskQuestionParams,
   PostMessageOutput,
   PostMessageParams,
   ResolveChannelParams,
@@ -108,6 +110,15 @@ export class SlackClient {
    */
   async postMessage(params: PostMessageParams): Promise<PostMessageOutput> {
     return (await this.getAdapter()).postMessage(params);
+  }
+
+  /**
+   * Post a Slack question and wait for a threaded reply.
+   * @param params - Question and wait parameters.
+   * @returns Posted question metadata and reply.
+   */
+  async askQuestion(params: AskQuestionParams): Promise<AskQuestionOutput> {
+    return (await this.getAdapter()).askQuestion(params);
   }
 
   /**

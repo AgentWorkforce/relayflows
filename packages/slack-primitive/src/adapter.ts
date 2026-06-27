@@ -1,9 +1,12 @@
+import { askQuestion as askQuestionAction } from './actions/ask-question.js';
 import { postMessage as postMessageAction } from './actions/post-message.js';
 import { resolveChannel as resolveChannelAction } from './actions/resolve-channel.js';
 import { resolveUser as resolveUserAction } from './actions/resolve-user.js';
 import {
   SlackAction,
   SlackClientInterface,
+  type AskQuestionOutput,
+  type AskQuestionParams,
   type PostMessageOutput,
   type PostMessageParams,
   type RequiredSlackRuntimeConfig,
@@ -116,6 +119,13 @@ export abstract class BaseSlackAdapter extends SlackClientInterface {
     });
   }
 
+  async askQuestion(params: AskQuestionParams): Promise<AskQuestionOutput> {
+    return askQuestionAction(this.slack, {
+      ...params,
+      channel: params.channel ?? this.config.env.SLACK_DEFAULT_CHANNEL,
+    });
+  }
+
   async resolveUser(params: ResolveUserParams): Promise<SlackResolvedMention> {
     return resolveUserAction(this.slack, params.mention);
   }
@@ -128,6 +138,8 @@ export abstract class BaseSlackAdapter extends SlackClientInterface {
     switch (action) {
       case SlackAction.PostMessage:
         return this.postMessage(params as PostMessageParams);
+      case SlackAction.AskQuestion:
+        return this.askQuestion(params as AskQuestionParams);
       case SlackAction.ResolveUser:
         return this.resolveUser(params as ResolveUserParams);
       case SlackAction.ResolveChannel:
