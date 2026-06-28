@@ -251,6 +251,8 @@ session. If `integrations.relayfile` is present, Relayflows automatically uses
 the existing Relayfile/Pear Slack connection; no Slack bot token, Relayfile
 workspace id, or Relayfile token is required in the workflow.
 
+Runnable TypeScript proof: `examples/typescript/slack-human-assistance-e2e.ts`.
+
 ```yaml
 swarm:
   pattern: dag

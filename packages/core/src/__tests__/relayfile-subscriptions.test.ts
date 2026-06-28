@@ -1,10 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import * as cloud from '@agent-relay/cloud';
+
+vi.mock('@agent-relay/cloud', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/cloud')>();
+  return {
+    ...actual,
+    authorizedApiFetch: vi.fn(),
+    readStoredAuth: vi.fn(),
+  };
+});
 
 import { WorkflowRunner } from '../runner.js';
 import type { RelayYamlConfig } from '../types.js';
+
+function makeJwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.`;
+}
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -16,6 +31,12 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<vo
 }
 
 describe('Relayfile integration subscriptions', () => {
+  afterEach(() => {
+    vi.mocked(cloud.authorizedApiFetch).mockReset();
+    vi.mocked(cloud.readStoredAuth).mockReset();
+    vi.useRealTimers();
+  });
+
   it('collects workflow and agent subscriptions with normalized events', () => {
     const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
     const config: RelayYamlConfig = {
@@ -269,5 +290,249 @@ describe('Relayfile integration subscriptions', () => {
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('resolves Slack channel names from local by-name aliases', async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), 'relayflows-slack-by-name-'));
+    try {
+      const byNameDir = path.join(tmp, 'slack', 'channels', 'by-name');
+      await mkdir(byNameDir, { recursive: true });
+      await writeFile(
+        path.join(byNameDir, 'watchdog-test.json'),
+        JSON.stringify({
+          id: 'C0WATCHDOG',
+          name: 'watchdog-test',
+          path: '/slack/channels/C0WATCHDOG__watchdog-test/meta.json',
+        }),
+        'utf8'
+      );
+
+      const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+
+      await expect((runner as any).resolveLocalSlackChannelId(tmp, '#watchdog-test')).resolves.toBe('C0WATCHDOG');
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves Slack channel names from cloud integration options when Relayfile metadata is stale', async () => {
+    const auth = {
+      apiUrl: 'https://agentrelay.test/cloud',
+      accessToken: 'access-token',
+      refreshToken: 'refresh-token',
+      accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    vi.mocked(cloud.readStoredAuth).mockResolvedValue(auth);
+    vi.mocked(cloud.authorizedApiFetch).mockImplementation(async (activeAuth, requestPath) => {
+      if (requestPath === '/api/v1/auth/whoami') {
+        return {
+          auth: activeAuth,
+          response: new Response(
+            JSON.stringify({
+              authenticated: true,
+              currentWorkspace: { id: 'account-workspace-id' },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          ),
+        };
+      }
+      if (requestPath === '/api/v1/workspaces/account-workspace-id/integrations/slack/options/channels') {
+        return {
+          auth: activeAuth,
+          response: new Response(JSON.stringify({ error: 'not found' }), { status: 404 }),
+        };
+      }
+      if (requestPath === '/api/v1/workspaces/account-workspace-id/integrations/slack/channels/available') {
+        return {
+          auth: activeAuth,
+          response: new Response(
+            JSON.stringify({
+              channels: [{ id: 'C0WATCHDOG', name: 'watchdog-test' }],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          ),
+        };
+      }
+      throw new Error(`unexpected request path: ${requestPath}`);
+    });
+
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    vi.spyOn(runner as any, 'resolveRelayfileLocalRoot').mockResolvedValue(undefined);
+    const client = {
+      readFile: vi.fn().mockRejectedValue(new Error('not found')),
+    };
+
+    await expect(
+      (runner as any).resolveRelayfileSlackChannelId({
+        channel: 'watchdog-test',
+        client,
+        runtime: { workspaceId: 'relayfile-workspace-id', token: 'token', baseUrl: 'https://file.agentrelay.test' },
+      })
+    ).resolves.toBe('C0WATCHDOG');
+
+    expect(vi.mocked(cloud.authorizedApiFetch).mock.calls.map(([, requestPath]) => requestPath)).toContain(
+      '/api/v1/workspaces/account-workspace-id/integrations/slack/channels/available'
+    );
+  });
+
+  it('propagates ambiguous local Slack channel aliases instead of falling through to cloud lookup', async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), 'relayflows-slack-ambiguous-'));
+    try {
+      const byNameDir = path.join(tmp, 'slack', 'channels', 'by-name');
+      await mkdir(byNameDir, { recursive: true });
+      await writeFile(
+        path.join(byNameDir, 'watchdog-test-a.json'),
+        JSON.stringify({ id: 'C0WATCHDOGA', name: 'watchdog-test' }),
+        'utf8'
+      );
+      await writeFile(
+        path.join(byNameDir, 'watchdog-test-b.json'),
+        JSON.stringify({ id: 'C0WATCHDOGB', name: 'watchdog-test' }),
+        'utf8'
+      );
+
+      const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+      vi.spyOn(runner as any, 'resolveRelayfileLocalRoot').mockResolvedValue(tmp);
+      vi.spyOn(runner as any, 'resolveSlackChannelIdFromCloudOptions').mockResolvedValue('C0CLOUD');
+      const client = {
+        readFile: vi.fn().mockRejectedValue(new Error('not found')),
+      };
+
+      await expect(
+        (runner as any).resolveRelayfileSlackChannelId({
+          channel: 'watchdog-test',
+          client,
+          runtime: { workspaceId: 'relayfile-workspace-id', token: 'token', baseUrl: 'https://file.agentrelay.test' },
+        })
+      ).rejects.toThrow(/ambiguous/i);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers readable human-question candidates over malformed PTY renders', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const output = [
+      'HUMAN_QUESTION: WhatapprovalcodeshouldIusefortheRelayflowsTypeScript',
+      'HUMAN_QUESTION: What approval code should I use for the Relayflows TypeScript Slack assistance check?',
+    ].join('\n');
+
+    const candidates = (runner as any).extractHumanQuestionCandidates(output);
+
+    expect((runner as any).selectBestHumanQuestion(candidates)).toBe(
+      'What approval code should I use for the Relayflows TypeScript Slack assistance check?'
+    );
+  });
+
+  it('uses the declared exact human question instead of compacted PTY output', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const declared =
+      'What approval code should I use for the Relayflows TypeScript Slack assistance check?';
+    const task = [
+      'Ask the operator by printing exactly one line with the literal prefix HUMAN_QUESTION:',
+      'followed by this exact question:',
+      declared,
+      '',
+      'After the runner provides the reply, print ANSWER_RECEIVED.',
+    ].join('\n');
+    const rendered = 'WhatapprovalcodeshouldIusefortheRelayflowsTypeScript';
+
+    expect((runner as any).extractDeclaredHumanQuestionFromTask(task)).toBe(declared);
+    expect((runner as any).shouldPreferDeclaredHumanQuestion(declared, rendered)).toBe(true);
+  });
+
+  it('suppresses repeated human questions after an answer was injected', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const question = 'What approval code should I use for the Relayflows TypeScript Slack assistance check?';
+
+    (runner as any).rememberAnsweredHumanQuestion('ask-human:owner', question);
+
+    expect(
+      (runner as any).hasAnsweredSimilarHumanQuestion(
+        'ask-human:owner',
+        'WhatapprovalcodeshouldIusefortheRelayflowsTypeScript'
+      )
+    ).toBe(true);
+  });
+
+  it('treats debounced Slack question drafts as pending human assistance', async () => {
+    vi.useFakeTimers();
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const timer = setTimeout(() => undefined, 10_000);
+    (runner as any).pendingHumanQuestionDrafts.set('owner', {
+      agentName: 'owner',
+      step: { name: 'ask-human', task: 'ask' },
+      config: { slack: { channel: 'watchdog-test' } },
+      question: 'Approve?',
+      timer,
+    });
+
+    const pending = (runner as any).waitForPendingHumanQuestion('owner');
+    await vi.advanceTimersByTimeAsync(1500);
+
+    await expect(pending).resolves.toBe(true);
+    clearTimeout(timer);
+    vi.useRealTimers();
+  });
+
+  it('matches Slack answers under canonical thread reply paths', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const path =
+      '/slack/channels/C0B9Z4CLG1J__watchdog-test/threads/1782623489_965309/replies/1782623749_441929/meta.json';
+    const payload = {
+      text: 'Approved',
+      thread_ts: '1782623489.965309',
+      ts: '1782623749.441929',
+    };
+
+    expect((runner as any).slackAnswerMatchesQuestionThread(payload, path, '1782623489.965309')).toBe(true);
+    expect((runner as any).slackAnswerMatchesQuestionThread(payload, path, '1782623000.000000')).toBe(false);
+  });
+
+  it('uses Relayfile-supported exact-prefix Slack answer subscription paths', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+
+    expect((runner as any).slackHumanAnswerSubscriptionPaths('/slack/channels/C0B9Z4CLG1J', 'watchdog-test')).toEqual([
+      '/slack/channels/C0B9Z4CLG1J/**',
+      '/slack/channels/C0B9Z4CLG1J__watchdog-test/**',
+    ]);
+  });
+
+  it('derives Relayfile token refresh scopes from the current token without broadening scoped grants', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const token = makeJwt({
+      scopes: [
+        'ops:read',
+        'workspace:relayflows-probe:read:/slack/channels/**',
+        'workspace:relayflows-probe:write:/slack/channels/C0WATCHDOG/**',
+      ],
+    });
+
+    expect((runner as any).relayfileRefreshScopes({ workspaceId: 'w', token, baseUrl: 'https://file.test' })).toEqual([
+      'workspace:relayflows-probe:read:/slack/channels/**',
+      'workspace:relayflows-probe:write:/slack/channels/C0WATCHDOG/**',
+    ]);
+  });
+
+  it('preserves full Relayfile fs grants when the current token is already workspace-wide', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const token = makeJwt({ scopes: ['fs:read', 'fs:write', 'ops:read'] });
+
+    expect((runner as any).relayfileRefreshScopes({ workspaceId: 'w', token, baseUrl: 'https://file.test' })).toEqual([
+      'relayfile:fs:read:/**',
+      'relayfile:fs:write:/**',
+    ]);
+  });
+
+  it('preserves path-scoped Relayfile fs grants during token refresh', () => {
+    const runner = new WorkflowRunner({ cwd: '/tmp/relayflows-test' });
+    const token = makeJwt({
+      scopes: ['relayfile:fs:read:/slack/channels/**', 'relayfile:fs:write:/slack/channels/C0WATCHDOG/**'],
+    });
+
+    expect((runner as any).relayfileRefreshScopes({ workspaceId: 'w', token, baseUrl: 'https://file.test' })).toEqual([
+      'relayfile:fs:read:/slack/channels/**',
+      'relayfile:fs:write:/slack/channels/C0WATCHDOG/**',
+    ]);
   });
 });

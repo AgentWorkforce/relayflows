@@ -7,7 +7,7 @@ swarm:
   timeoutMs: 600000
   humanAssistance:
     slack:
-      channel: C0B9Z4CLG1J
+      channel: watchdog-test
       timeoutMs: 300000
 
 integrations:
