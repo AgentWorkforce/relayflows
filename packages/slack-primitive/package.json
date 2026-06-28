@@ -1,6 +1,6 @@
 {
   "name": "@relayflows/slack-primitive",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Slack workflow primitive for Agent Relay",
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +28,7 @@
     "@slack/web-api": "^7.16.0"
   },
   "devDependencies": {
-    "@relayflows/github-primitive": "1.0.3",
+    "@relayflows/github-primitive": "1.0.4",
     "@types/node": "^22.19.3",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
