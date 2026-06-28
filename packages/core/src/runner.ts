@@ -50,12 +50,15 @@ import {
 } from './custom-steps.js';
 import { provisionWorkflowAgents } from './provisioner.js';
 import {
+  authorizedApiFetch,
   createLocalJwksKeyPair,
   importPrivateKeyPem,
+  readStoredAuth,
   RELAYAUTH_JWT_KID_ENV,
   RELAYAUTH_JWT_PRIVATE_KEY_PEM_ENV,
   resolveAgentPermissions,
   type LocalJwksSigningKey,
+  type StoredAuth,
 } from '@agent-relay/cloud';
 import { ensureRelayfileMount, type MountHandle } from '@relayfile/sdk/workspace-mount';
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
@@ -132,7 +135,7 @@ import type { RuntimeSpawnOptions, SpawnPtyInput } from '@agent-relay/harness-dr
 import { WorkflowAgentHandle } from './agent-handle.js';
 import { RelayCast, RelayError, type AgentClient } from '@relaycast/sdk';
 import { SlackClient } from '@relayflows/slack-primitive';
-import { RelayFileClient, type ChangeEvent, type FilesystemEvent, type Subscription } from '@relayfile/sdk';
+import { RelayfileSetup, RelayFileClient, type ChangeEvent, type FilesystemEvent, type Subscription } from '@relayfile/sdk';
 
 // ── Environment filtering ──────────────────────────────────────────────────
 
@@ -619,8 +622,21 @@ export class WorkflowRunner {
   private readonly activeAgentHandles = new Map<string, WorkflowAgentHandle>();
   /** Pending Slack-backed human questions keyed by runtime agent name. */
   private readonly pendingHumanQuestions = new Map<string, Promise<void>>();
+  /** Debounced Slack human-question drafts keyed by runtime agent name. */
+  private readonly pendingHumanQuestionDrafts = new Map<
+    string,
+    {
+      timer: ReturnType<typeof setTimeout>;
+      agentName: string;
+      step: WorkflowStep;
+      config: HumanAssistanceConfig;
+      question: string;
+    }
+  >();
   /** Dedupes repeated PTY renders of the same human question marker. */
   private readonly seenHumanQuestionKeys = new Map<string, Array<{ fingerprint: string; at: number }>>();
+  /** Suppresses stale PTY re-renders of questions that already received a human answer. */
+  private readonly answeredHumanQuestionKeys = new Map<string, Array<{ fingerprint: string; at: number }>>();
   private relayfileClient?: RelayFileClient;
   private relayfileRuntimeConfig?: RelayfileRuntimeConfig;
   private relayfileEventStream?: { ready: Promise<void>; unsubscribe: () => Promise<void> };
@@ -3924,6 +3940,10 @@ export class WorkflowRunner {
       this.clearRelayListeners();
       this.lastIdleLog.clear();
       this.lastActivity.clear();
+      this.clearPendingHumanQuestionDrafts();
+      this.pendingHumanQuestions.clear();
+      this.seenHumanQuestionKeys.clear();
+      this.answeredHumanQuestionKeys.clear();
       this.supervisedRuntimeAgents.clear();
       this.runtimeStepAgents.clear();
       this.activeReviewers.clear();
@@ -7656,6 +7676,9 @@ export class WorkflowRunner {
       runtime = await this.resolveRelayfileRuntimeConfigFromLocalCredentials(config);
     }
     if (!runtime) return undefined;
+    if (this.relayfileRuntimeTokenNeedsRefresh(runtime)) {
+      runtime = (await this.issueFreshRelayfileRuntimeToken(runtime).catch(() => undefined)) ?? runtime;
+    }
 
     const changed =
       !this.relayfileRuntimeConfig ||
@@ -8127,32 +8150,174 @@ export class WorkflowRunner {
   }): void {
     if (!this.isSlackHumanAssistanceEnabled(input.config)) return;
 
-    const pattern = /^[^\r\nA-Za-z0-9_]*HUMAN_QUESTION:\s*(.+)$/gim;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(input.output)) !== null) {
-      const question = match[1]?.trim();
-      if (!question) continue;
-      const key = `${input.step.name}:${input.agentName}`;
-      if (this.hasSeenSimilarHumanQuestion(key, question)) continue;
-      this.rememberHumanQuestion(key, question);
-      this.startSlackHumanQuestion(input.agentName, input.step, input.config!, question);
+    const renderedQuestion = this.selectBestHumanQuestion(this.extractHumanQuestionCandidates(input.output));
+    const declaredQuestion = this.extractDeclaredHumanQuestionFromTask(input.step.task);
+    const question =
+      declaredQuestion && this.shouldPreferDeclaredHumanQuestion(declaredQuestion, renderedQuestion)
+        ? declaredQuestion
+        : renderedQuestion;
+    if (!question) return;
+    const key = `${input.step.name}:${input.agentName}`;
+    if (this.hasAnsweredSimilarHumanQuestion(key, question)) return;
+    this.scheduleSlackHumanQuestion(input.agentName, input.step, input.config!, question);
+  }
+
+  private extractDeclaredHumanQuestionFromTask(task: string | undefined): string | undefined {
+    if (!task) return undefined;
+    const marker = /(?:followed by|with)\s+this\s+exact\s+question\s*:/i.exec(task);
+    if (!marker) return undefined;
+    const afterMarker = task.slice(marker.index + marker[0].length);
+    const lines = afterMarker.split(/\r?\n/).map((line) => line.trim());
+    const questionLines: string[] = [];
+    for (const line of lines) {
+      if (!line) {
+        if (questionLines.length > 0) break;
+        continue;
+      }
+      if (/^(after|then|when|finally)\b/i.test(line) && questionLines.length > 0) break;
+      questionLines.push(line.replace(/^`|`$/g, ''));
+      if (/[?!.]$/.test(line)) break;
     }
+    const question = questionLines.join(' ').replace(/\s+/g, ' ').trim();
+    return question || undefined;
+  }
+
+  private shouldPreferDeclaredHumanQuestion(declaredQuestion: string, renderedQuestion: string | undefined): boolean {
+    if (!renderedQuestion) return true;
+    if (this.humanQuestionLooksCompacted(renderedQuestion)) return true;
+    const declaredFingerprint = this.humanQuestionFingerprint(declaredQuestion);
+    const renderedFingerprint = this.humanQuestionFingerprint(renderedQuestion);
+    return Boolean(
+      declaredFingerprint &&
+        renderedFingerprint &&
+        (declaredFingerprint.includes(renderedFingerprint) ||
+          renderedFingerprint.includes(declaredFingerprint) ||
+          this.areHumanQuestionFingerprintsSimilar(declaredFingerprint, renderedFingerprint))
+    );
+  }
+
+  private humanQuestionLooksCompacted(question: string): boolean {
+    const words = question.trim().split(/\s+/).filter(Boolean);
+    const longestWord = words.reduce((max, word) => Math.max(max, word.length), 0);
+    return words.length <= 4 || longestWord >= 28;
+  }
+
+  private extractHumanQuestionCandidates(output: string): string[] {
+    const pattern = /^[^\r\nA-Za-z0-9_]*HUMAN_QUESTION:\s*(.+)$/gim;
+    const candidates: string[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(output)) !== null) {
+      const question = match[1]?.trim().replace(/\s+/g, ' ');
+      if (question) candidates.push(question);
+    }
+    return candidates;
+  }
+
+  private selectBestHumanQuestion(candidates: string[]): string | undefined {
+    let best: { question: string; score: number } | undefined;
+    for (const question of candidates) {
+      const score = this.humanQuestionReadabilityScore(question);
+      if (!best || score > best.score || (score === best.score && question.length > best.question.length)) {
+        best = { question, score };
+      }
+    }
+    return best?.question;
+  }
+
+  private humanQuestionReadabilityScore(question: string): number {
+    const words = question.trim().split(/\s+/).filter(Boolean);
+    const spaces = (question.match(/\s/g) ?? []).length;
+    const longestWord = words.reduce((max, word) => Math.max(max, word.length), 0);
+    const punctuation = (question.match(/[?.,:;]/g) ?? []).length;
+    return question.length + spaces * 12 + words.length * 3 + punctuation * 2 - Math.max(0, longestWord - 24) * 8;
+  }
+
+  private scheduleSlackHumanQuestion(
+    agentName: string,
+    step: WorkflowStep,
+    config: HumanAssistanceConfig,
+    question: string
+  ): void {
+    if (this.pendingHumanQuestions.has(agentName)) return;
+    const key = `${step.name}:${agentName}`;
+    if (this.hasAnsweredSimilarHumanQuestion(key, question)) return;
+
+    const existing = this.pendingHumanQuestionDrafts.get(agentName);
+    if (existing) {
+      existing.question = this.selectBestHumanQuestion([existing.question, question]) ?? question;
+      existing.step = step;
+      existing.config = config;
+      return;
+    }
+
+    const draft = {
+      agentName,
+      step,
+      config,
+      question,
+      timer: setTimeout(() => {
+        this.pendingHumanQuestionDrafts.delete(agentName);
+        const key = `${draft.step.name}:${draft.agentName}`;
+        const selected = this.selectBestHumanQuestion([draft.question]);
+        if (
+          !selected ||
+          this.hasSeenSimilarHumanQuestion(key, selected) ||
+          this.hasAnsweredSimilarHumanQuestion(key, selected)
+        ) {
+          return;
+        }
+        this.rememberHumanQuestion(key, selected);
+        this.startSlackHumanQuestion(draft.agentName, draft.step, draft.config, selected);
+      }, 1200),
+    };
+    this.pendingHumanQuestionDrafts.set(agentName, draft);
+  }
+
+  private clearPendingHumanQuestionDrafts(): void {
+    for (const draft of this.pendingHumanQuestionDrafts.values()) {
+      clearTimeout(draft.timer);
+    }
+    this.pendingHumanQuestionDrafts.clear();
   }
 
   private rememberHumanQuestion(scope: string, question: string): void {
+    this.rememberHumanQuestionInMap(this.seenHumanQuestionKeys, scope, question);
+  }
+
+  private rememberAnsweredHumanQuestion(scope: string, question: string): void {
+    this.rememberHumanQuestionInMap(this.answeredHumanQuestionKeys, scope, question);
+  }
+
+  private rememberHumanQuestionInMap(
+    map: Map<string, Array<{ fingerprint: string; at: number }>>,
+    scope: string,
+    question: string
+  ): void {
     const now = Date.now();
     const fingerprint = this.humanQuestionFingerprint(question);
-    const existing = this.seenHumanQuestionKeys.get(scope) ?? [];
+    const existing = map.get(scope) ?? [];
     const fresh = existing.filter((entry) => now - entry.at < 10 * 60_000);
     fresh.push({ fingerprint, at: now });
-    this.seenHumanQuestionKeys.set(scope, fresh);
+    map.set(scope, fresh);
   }
 
   private hasSeenSimilarHumanQuestion(scope: string, question: string): boolean {
+    return this.hasSimilarHumanQuestionInMap(this.seenHumanQuestionKeys, scope, question);
+  }
+
+  private hasAnsweredSimilarHumanQuestion(scope: string, question: string): boolean {
+    return this.hasSimilarHumanQuestionInMap(this.answeredHumanQuestionKeys, scope, question);
+  }
+
+  private hasSimilarHumanQuestionInMap(
+    map: Map<string, Array<{ fingerprint: string; at: number }>>,
+    scope: string,
+    question: string
+  ): boolean {
     const fingerprint = this.humanQuestionFingerprint(question);
     if (!fingerprint) return false;
     const now = Date.now();
-    const existing = this.seenHumanQuestionKeys.get(scope) ?? [];
+    const existing = map.get(scope) ?? [];
     return existing.some((entry) => {
       if (now - entry.at > 10 * 60_000) return false;
       return this.areHumanQuestionFingerprintsSimilar(entry.fingerprint, fingerprint);
@@ -8215,6 +8380,22 @@ export class WorkflowRunner {
     });
   }
 
+  private async waitForPendingHumanQuestion(agentName: string): Promise<boolean> {
+    const pendingQuestion = this.pendingHumanQuestions.get(agentName);
+    if (pendingQuestion) {
+      await pendingQuestion;
+      return true;
+    }
+
+    const draft = this.pendingHumanQuestionDrafts.get(agentName);
+    if (!draft) return false;
+
+    await this.delay(1500);
+    const started = this.pendingHumanQuestions.get(agentName);
+    if (started) await started;
+    return true;
+  }
+
   private async askSlackAndInjectAnswer(
     agentName: string,
     step: WorkflowStep,
@@ -8264,6 +8445,7 @@ export class WorkflowRunner {
     }
 
     this.log(`[${step.name}] Received Slack human answer; injecting into ${agentName}`);
+    this.rememberAnsweredHumanQuestion(`${step.name}:${agentName}`, question);
     await this.injectAnswerToAgent({
       agentName,
       stepName: step.name,
@@ -8298,7 +8480,7 @@ export class WorkflowRunner {
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const runtime = this.relayfileRuntimeConfig;
+      const runtime: RelayfileRuntimeConfig | undefined = this.relayfileRuntimeConfig;
       if (!runtime) break;
       try {
         return await this.askSlackViaRelayfileRuntime({
@@ -8308,9 +8490,11 @@ export class WorkflowRunner {
         });
       } catch (err) {
         if (attempt > 0 || !this.isRelayfileAuthExpiredError(err)) throw err;
-        const refreshed = await this.resolveRelayfileRuntimeConfigFromLocalCredentials(this.currentConfig);
+        const refreshed: RelayfileRuntimeConfig | undefined =
+          (await this.issueFreshRelayfileRuntimeToken(runtime).catch(() => undefined)) ??
+          (await this.resolveRelayfileRuntimeConfigFromLocalCredentials(this.currentConfig));
         if (!refreshed || refreshed.token === runtime.token) throw err;
-        this.log('Relayfile credentials expired; refreshed local Pear credentials and retrying Slack question');
+        this.log('Relayfile credentials expired; refreshed Relayfile workspace token and retrying Slack question');
         this.relayfileRuntimeConfig = refreshed;
         this.relayfileClient = undefined;
       }
@@ -8354,12 +8538,13 @@ export class WorkflowRunner {
     });
 
     const timeoutMs = input.timeoutMs ?? 10 * 60_000;
+    let questionThreadTs: string | undefined;
     const channelPrefix = `/slack/channels/${this.sanitizeRelayfilePathSegment(channel)}`;
     let answerText: string | undefined;
     const event = await this.waitForRelayfileEvent(
       {
         name: 'slack-human-answer',
-        paths: [`${channelPrefix}/**`, `${channelPrefix}__*/**`],
+        paths: this.slackHumanAnswerSubscriptionPaths(channelPrefix, input.channel),
         provider: 'slack',
         source: 'workflow',
       },
@@ -8367,14 +8552,26 @@ export class WorkflowRunner {
       async (event) => {
         if (event.path === messagePath) return false;
         if (event.timestamp && Date.parse(event.timestamp) < startedAt) return false;
-        const text = await this.readRelayfileSlackAnswerText(event.path, messageText);
-        if (!text) return false;
-        answerText = text;
+        questionThreadTs ??= await this.readRelayfileSlackMessageThreadTs(messagePath);
+        if (!questionThreadTs) return false;
+        const answer = await this.readRelayfileSlackAnswer(event.path, messageText);
+        if (!answer) return false;
+        if (!this.slackAnswerMatchesQuestionThread(answer.payload, event.path, questionThreadTs)) {
+          return false;
+        }
+        answerText = answer.text;
         return true;
       }
     );
 
     return { answer: { text: answerText ?? '', path: event.path, eventId: event.eventId } };
+  }
+
+  private slackHumanAnswerSubscriptionPaths(channelPrefix: string, requestedChannel: string): string[] {
+    const paths = new Set<string>([`${channelPrefix}/**`]);
+    const slug = this.slackChannelAliasSlug(requestedChannel);
+    if (slug) paths.add(`${channelPrefix}__${slug}/**`);
+    return [...paths];
   }
 
   private isRelayfileAuthExpiredError(err: unknown): boolean {
@@ -8538,23 +8735,50 @@ export class WorkflowRunner {
     const normalized = this.normalizeSlackChannelIdentifier(input.channel);
     if (this.looksLikeSlackChannelId(normalized)) return normalized;
 
-    const index = await input.client
-      .readFile(input.runtime.workspaceId, '/slack/channels/_index.json')
-      .catch(() => undefined);
-    const entries = this.parseSlackChannelIndex(typeof index?.content === 'string' ? index.content : '');
-    const match = this.findSlackChannelIndexMatch(entries, normalized);
-    if (match) return match.id;
+    for (const indexPath of ['/slack/channels/_index.json', '/discovery/slack/channels/_index.json']) {
+      const content = await this.readRelayfileSlackLookupFile(input.client, input.runtime.workspaceId, indexPath);
+      const match = this.findSlackChannelIndexMatch(this.parseSlackChannelIndex(content ?? ''), normalized);
+      if (match) return match.id;
+    }
+
+    for (const aliasPath of this.slackChannelByNameAliasPaths(normalized)) {
+      const content = await this.readRelayfileSlackLookupFile(input.client, input.runtime.workspaceId, aliasPath);
+      const alias = this.parseSlackChannelAlias(content ?? '');
+      if (alias?.id) return alias.id;
+    }
 
     const localRoot = await this.resolveRelayfileLocalRoot(this.currentConfig);
     if (localRoot) {
-      const localMatch = await this.resolveLocalSlackChannelId(localRoot, normalized).catch(() => undefined);
+      let localMatch: string | undefined;
+      try {
+        localMatch = await this.resolveLocalSlackChannelId(localRoot, normalized);
+      } catch (err) {
+        if (!this.isSlackChannelNotFoundError(err)) throw err;
+      }
       if (localMatch) return localMatch;
     }
 
+    const cloudMatch = await this.resolveSlackChannelIdFromCloudOptions(normalized);
+    if (cloudMatch) return cloudMatch;
+
     throw new Error(
-      `Slack channel "${input.channel}" was not found in Relayfile's Slack channel index. ` +
-        'Use a channel name from /slack/channels/_index.json or a Slack channel id.'
+      `Slack channel "${input.channel}" was not found in Relayfile's synced Slack metadata or Slack integration options. ` +
+        'Use a Slack channel name that the connected Slack integration can see, or pass a Slack channel id.'
     );
+  }
+
+  private async readRelayfileSlackLookupFile(
+    client: RelayFileClient,
+    workspaceId: string,
+    path: string
+  ): Promise<string | undefined> {
+    try {
+      const file = await client.readFile(workspaceId, path);
+      return typeof file?.content === 'string' ? file.content : undefined;
+    } catch (err) {
+      if (this.isRelayfileAuthExpiredError(err)) throw err;
+      return undefined;
+    }
   }
 
   private async resolveLocalSlackChannelId(localRoot: string, channel: string): Promise<string> {
@@ -8571,6 +8795,14 @@ export class WorkflowRunner {
       if (match) return match.id;
     }
 
+    for (const byNameDir of [
+      path.join(localRoot, 'slack', 'channels', 'by-name'),
+      path.join(localRoot, 'discovery', 'slack', 'channels', 'by-name'),
+    ]) {
+      const match = await this.resolveLocalSlackByNameAlias(byNameDir, normalized);
+      if (match) return match;
+    }
+
     const directEntries = await readdir(path.join(localRoot, 'slack', 'channels'), { withFileTypes: true }).catch(
       () => []
     );
@@ -8583,6 +8815,35 @@ export class WorkflowRunner {
     }
 
     throw new Error(`Slack channel "${channel}" was not found in the local Relayfile Slack channel index`);
+  }
+
+  private isSlackChannelNotFoundError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /not found/i.test(message);
+  }
+
+  private async resolveLocalSlackByNameAlias(byNameDir: string, normalized: string): Promise<string | undefined> {
+    const entries = await readdir(byNameDir, { withFileTypes: true }).catch(() => []);
+    const matches: string[] = [];
+    const targetKey = this.slackChannelLookupKey(normalized);
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const filenameKey = this.slackChannelLookupKey(entry.name.slice(0, -'.json'.length));
+      if (filenameKey !== targetKey && !filenameKey.startsWith(`${targetKey}-`)) continue;
+
+      const raw = await readFile(path.join(byNameDir, entry.name), 'utf8').catch(() => undefined);
+      const alias = this.parseSlackChannelAlias(raw ?? '');
+      if (!alias?.id) continue;
+      if (alias.name && this.slackChannelLookupKey(alias.name) !== targetKey && filenameKey !== targetKey) continue;
+      matches.push(alias.id);
+    }
+
+    const uniqueMatches = Array.from(new Set(matches));
+    if (uniqueMatches.length > 1) {
+      throw new Error(`Slack channel "${normalized}" is ambiguous in Relayfile's Slack channel by-name aliases`);
+    }
+    return uniqueMatches[0];
   }
 
   private parseSlackChannelIndex(raw: string): Array<{ id: string; name?: string; title?: string }> {
@@ -8603,6 +8864,19 @@ export class WorkflowRunner {
     });
   }
 
+  private parseSlackChannelAlias(raw: string): { id: string; name?: string; title?: string } | undefined {
+    const parsed = this.tryParseJson(raw);
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    const record = parsed as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id : undefined;
+    if (!id) return undefined;
+    return {
+      id,
+      name: typeof record.name === 'string' ? record.name : undefined,
+      title: typeof record.title === 'string' ? record.title : undefined,
+    };
+  }
+
   private findSlackChannelIndexMatch(
     entries: Array<{ id: string; name?: string; title?: string }>,
     normalized: string
@@ -8616,6 +8890,127 @@ export class WorkflowRunner {
       throw new Error(`Slack channel "${normalized}" is ambiguous in Relayfile's Slack channel index`);
     }
     return matches[0];
+  }
+
+  private async resolveSlackChannelIdFromCloudOptions(normalized: string): Promise<string | undefined> {
+    const storedAuth = await readStoredAuth().catch(() => null);
+    if (!storedAuth) return undefined;
+
+    let activeAuth: StoredAuth = storedAuth;
+    const fetchCloud = async (requestPath: string): Promise<Response> => {
+      const result = await authorizedApiFetch(activeAuth, requestPath, { method: 'GET' });
+      activeAuth = result.auth;
+      return result.response;
+    };
+
+    try {
+      const whoamiResponse = await fetchCloud('/api/v1/auth/whoami');
+      if (!whoamiResponse.ok) return undefined;
+      const workspaceId = this.accountWorkspaceIdFromWhoami(await whoamiResponse.json().catch(() => null));
+      if (!workspaceId) return undefined;
+
+      const entries = await this.fetchSlackChannelOptions(workspaceId, fetchCloud);
+      const match = this.findSlackChannelIndexMatch(entries, normalized);
+      return match?.id;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async fetchSlackChannelOptions(
+    workspaceId: string,
+    fetchCloud: (requestPath: string) => Promise<Response>
+  ): Promise<Array<{ id: string; name?: string; title?: string }>> {
+    const optionsPath = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/options/channels`;
+    const optionsResponse = await fetchCloud(optionsPath);
+    if (optionsResponse.ok) {
+      return this.parseSlackChannelOptionsPayload(await optionsResponse.json().catch(() => null));
+    }
+
+    const entries: Array<{ id: string; name?: string; title?: string }> = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+      const legacyResponse = await fetchCloud(
+        `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/channels/available${query}`
+      );
+      if (!legacyResponse.ok) return entries;
+      const parsed = this.parseLegacySlackChannelOptionsPayload(await legacyResponse.json().catch(() => null));
+      entries.push(...parsed.entries);
+      cursor = parsed.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 50);
+
+    return entries;
+  }
+
+  private parseSlackChannelOptionsPayload(payload: unknown): Array<{ id: string; name?: string; title?: string }> {
+    if (!payload || typeof payload !== 'object') return [];
+    const options = (payload as Record<string, unknown>).options;
+    if (!Array.isArray(options)) return [];
+
+    return options.flatMap((option) => {
+      if (!option || typeof option !== 'object') return [];
+      const record = option as Record<string, unknown>;
+      const id = typeof record.value === 'string' ? record.value : undefined;
+      if (!id) return [];
+      const label = typeof record.label === 'string' ? record.label : undefined;
+      return [
+        {
+          id,
+          name: label ? this.normalizeSlackChannelIdentifier(label) : undefined,
+          title: label,
+        },
+      ];
+    });
+  }
+
+  private parseLegacySlackChannelOptionsPayload(payload: unknown): {
+    entries: Array<{ id: string; name?: string; title?: string }>;
+    nextCursor?: string;
+  } {
+    if (!payload || typeof payload !== 'object') return { entries: [] };
+    const record = payload as Record<string, unknown>;
+    const channels = Array.isArray(record.channels) ? record.channels : [];
+    const entries = channels.flatMap((channel) => {
+      if (!channel || typeof channel !== 'object') return [];
+      const channelRecord = channel as Record<string, unknown>;
+      const id = typeof channelRecord.id === 'string' ? channelRecord.id : undefined;
+      if (!id) return [];
+      const name = typeof channelRecord.name === 'string' ? channelRecord.name : undefined;
+      return [{ id, name, title: name ? `#${name}` : undefined }];
+    });
+    const nextCursor = typeof record.nextCursor === 'string' && record.nextCursor.trim() ? record.nextCursor : undefined;
+    return { entries, nextCursor };
+  }
+
+  private accountWorkspaceIdFromWhoami(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== 'object') return undefined;
+    const record = payload as Record<string, unknown>;
+    const currentWorkspace = record.currentWorkspace;
+    if (currentWorkspace && typeof currentWorkspace === 'object') {
+      const id = (currentWorkspace as Record<string, unknown>).id;
+      if (typeof id === 'string' && id.trim()) return id;
+    }
+    for (const key of ['workspaceId', 'workspace_id', 'currentWorkspaceId']) {
+      const value = record[key];
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+    return undefined;
+  }
+
+  private slackChannelByNameAliasPaths(normalized: string): string[] {
+    const slug = this.slackChannelAliasSlug(normalized);
+    if (!slug) return [];
+    return [`/slack/channels/by-name/${slug}.json`, `/discovery/slack/channels/by-name/${slug}.json`];
+  }
+
+  private slackChannelAliasSlug(channel: string): string {
+    return this.normalizeSlackChannelIdentifier(channel)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
   }
 
   private normalizeSlackChannelIdentifier(channel: string): string {
@@ -8659,6 +9054,80 @@ export class WorkflowRunner {
       };
     }
     return undefined;
+  }
+
+  private relayfileRuntimeTokenNeedsRefresh(runtime: RelayfileRuntimeConfig): boolean {
+    const expiresAt = this.relayfileJwtExpiresAtMs(runtime.token);
+    if (!expiresAt) return false;
+    return expiresAt - Date.now() <= 5 * 60_000;
+  }
+
+  private relayfileJwtExpiresAtMs(token: string): number | undefined {
+    const payload = this.relayfileJwtPayload(token);
+    const exp = payload?.exp;
+    if (typeof exp !== 'number' || !Number.isFinite(exp)) return undefined;
+    return exp * 1000;
+  }
+
+  private relayfileJwtPayload(token: string): Record<string, unknown> | undefined {
+    const parts = token.split('.');
+    if (parts.length < 2 || !parts[1]) return undefined;
+    try {
+      return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private relayfileJwtScopes(token: string): string[] {
+    const payload = this.relayfileJwtPayload(token);
+    const scopes = payload?.scopes;
+    if (!Array.isArray(scopes)) return [];
+    return scopes.filter((scope): scope is string => typeof scope === 'string' && scope.trim().length > 0);
+  }
+
+  private relayfileRefreshScopes(runtime: RelayfileRuntimeConfig): string[] {
+    const scopes = this.relayfileJwtScopes(runtime.token);
+    const workspaceScopes = scopes.filter((scope) => /^workspace:[^:]+:(read|write):\//.test(scope));
+    if (workspaceScopes.length > 0) return workspaceScopes;
+    const relayfilePathScopes = scopes.filter((scope) => /^relayfile:fs:(read|write):\//.test(scope));
+    if (relayfilePathScopes.length > 0) return relayfilePathScopes;
+
+    const hasFullRead = scopes.includes('fs:read') || scopes.includes('relayfile:fs:read:/**');
+    const hasFullWrite = scopes.includes('fs:write') || scopes.includes('relayfile:fs:write:/**');
+    const next: string[] = [];
+    if (hasFullRead) next.push('relayfile:fs:read:/**');
+    if (hasFullWrite) next.push('relayfile:fs:write:/**');
+    if (next.length > 0) return next;
+
+    return [
+      'relayfile:fs:read:/slack/channels/**',
+      'relayfile:fs:write:/slack/channels/**',
+      'relayfile:fs:read:/discovery/slack/**',
+    ];
+  }
+
+  private async issueFreshRelayfileRuntimeToken(runtime: RelayfileRuntimeConfig): Promise<RelayfileRuntimeConfig | undefined> {
+    if (!runtime.workspaceId.trim()) return undefined;
+    const storedAuth = await readStoredAuth().catch(() => null);
+    if (!storedAuth) return undefined;
+
+    const setup = RelayfileSetup.fromCloudTokens(storedAuth, {
+      cloudApiUrl: storedAuth.apiUrl,
+      requestTimeoutMs: 15_000,
+    });
+    const handle = await setup.joinWorkspace(runtime.workspaceId, {
+      agentName: 'relayflows',
+      scopes: this.relayfileRefreshScopes(runtime),
+    });
+    const token = handle.getToken();
+    if (!token.trim()) return undefined;
+    return {
+      ...runtime,
+      baseUrl: handle.info.relayfileUrl || runtime.baseUrl,
+      workspaceId: handle.workspaceId || runtime.workspaceId,
+      token,
+    };
   }
 
   private async resolveLocalSlackMessageDir(localRoot: string, channel: string): Promise<string> {
@@ -8724,7 +9193,26 @@ export class WorkflowRunner {
       .catch(() => false);
   }
 
-  private async readRelayfileSlackAnswerText(path: string, questionText: string): Promise<string | undefined> {
+  private async readRelayfileSlackMessageThreadTs(path: string): Promise<string | undefined> {
+    const runtime = this.relayfileRuntimeConfig;
+    if (!runtime) return undefined;
+    const file = await this.getRelayfileClient().readFile(runtime.workspaceId, path).catch(() => undefined);
+    const content = typeof file?.content === 'string' ? file.content : '';
+    if (!content.trim()) return undefined;
+    const parsed = this.tryParseJson(content);
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    const record = parsed as Record<string, unknown>;
+    for (const key of ['externalId', 'thread_ts', 'ts', 'id']) {
+      const value = record[key];
+      if (typeof value === 'string' && /^\d+\.\d+$/.test(value.trim())) return value.trim();
+    }
+    return undefined;
+  }
+
+  private async readRelayfileSlackAnswer(
+    path: string,
+    questionText: string
+  ): Promise<{ text: string; payload: unknown } | undefined> {
     const runtime = this.relayfileRuntimeConfig;
     if (!runtime) return undefined;
     const file = await this.getRelayfileClient().readFile(runtime.workspaceId, path).catch(() => undefined);
@@ -8732,11 +9220,42 @@ export class WorkflowRunner {
     if (!content.trim()) return undefined;
 
     const parsed = this.tryParseJson(content);
-    const text = this.extractTextFromSlackRelayfilePayload(parsed ?? content);
+    const payload = parsed ?? content;
+    const text = this.extractTextFromSlackRelayfilePayload(payload);
     if (!text) return undefined;
     if (text.trim() === questionText.trim()) return undefined;
     if (text.includes('Workflow step "') && text.includes(' asks:')) return undefined;
-    return text.trim();
+    return { text: text.trim(), payload };
+  }
+
+  private async readRelayfileSlackAnswerText(path: string, questionText: string): Promise<string | undefined> {
+    return (await this.readRelayfileSlackAnswer(path, questionText))?.text;
+  }
+
+  private slackAnswerMatchesQuestionThread(payload: unknown, eventPath: string, questionThreadTs: string): boolean {
+    const normalizedThread = questionThreadTs.replace('.', '_');
+    if (eventPath.includes(`/threads/${normalizedThread}/`) || eventPath.includes(`/messages/${normalizedThread}/`)) {
+      return true;
+    }
+    const threadTs = this.extractSlackThreadTs(payload);
+    return threadTs === questionThreadTs;
+  }
+
+  private extractSlackThreadTs(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== 'object') return undefined;
+    const record = payload as Record<string, unknown>;
+    for (const key of ['thread_ts', 'ts']) {
+      const value = record[key];
+      if (typeof value === 'string' && /^\d+\.\d+$/.test(value.trim())) return value.trim();
+    }
+    const rawEvent = record.raw_event;
+    if (rawEvent && typeof rawEvent === 'object') {
+      const nested = this.extractSlackThreadTs(rawEvent);
+      if (nested) return nested;
+    }
+    const data = record.data;
+    if (data && typeof data === 'object') return this.extractSlackThreadTs(data);
+    return undefined;
   }
 
   private extractTextFromSlackRelayfilePayload(payload: unknown): string | undefined {
@@ -8926,13 +9445,12 @@ export class WorkflowRunner {
         const elapsed = Date.now() - idleLoopStart;
         const remaining = timeoutMs != null ? Math.max(0, timeoutMs - elapsed) : undefined;
         if (remaining != null && remaining <= 0) {
-          const pendingQuestion = this.pendingHumanQuestions.get(agent.name);
-          if (pendingQuestion) {
+          if (this.pendingHumanQuestions.has(agent.name) || this.pendingHumanQuestionDrafts.has(agent.name)) {
             this.log(`[${step.name}] Agent "${agent.name}" is blocked on Slack human input`);
             this.postToChannel(
               `**[${step.name}]** Agent \`${agent.name}\` is blocked on Slack human input`
             );
-            await pendingQuestion;
+            await this.waitForPendingHumanQuestion(agent.name);
             if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
               return 'released';
             }
@@ -8945,13 +9463,12 @@ export class WorkflowRunner {
           agent.waitForIdle(remaining).then((r) => ({ kind: 'idle' as const, result: r })),
         ]);
         if (result.kind === 'idle' && result.result === 'idle') {
-          const pendingQuestion = this.pendingHumanQuestions.get(agent.name);
-          if (pendingQuestion) {
+          if (this.pendingHumanQuestions.has(agent.name) || this.pendingHumanQuestionDrafts.has(agent.name)) {
             this.log(`[${step.name}] Agent "${agent.name}" is waiting for a Slack human answer`);
             this.postToChannel(
               `**[${step.name}]** Agent \`${agent.name}\` is waiting for a Slack human answer`
             );
-            await pendingQuestion;
+            await this.waitForPendingHumanQuestion(agent.name);
             if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
               return 'released';
             }
@@ -9038,13 +9555,12 @@ export class WorkflowRunner {
         return exitResult;
       }
 
-      const pendingQuestion = this.pendingHumanQuestions.get(agent.name);
-      if (pendingQuestion) {
+      if (this.pendingHumanQuestions.has(agent.name) || this.pendingHumanQuestionDrafts.has(agent.name)) {
         this.log(`[${step.name}] Agent "${agent.name}" is blocked on Slack human input`);
         this.postToChannel(
           `**[${step.name}]** Agent \`${agent.name}\` is blocked on Slack human input`
         );
-        await pendingQuestion;
+        await this.waitForPendingHumanQuestion(agent.name);
         continue;
       }
 
