@@ -72,12 +72,19 @@ export interface AgentOptions {
   preset?: AgentPreset;
   /** Skills to make available to the agent (for API-mode agents). */
   skills?: string;
+  /** Permission configuration controlling file access, network, and exec restrictions. */
   permissions?: AgentPermissions;
+  /** Working directory for this agent, resolved relative to the YAML file. Mutually exclusive with `workdir`. */
   cwd?: string;
+  /** Sets this agent's working directory to a named entry from the top-level `paths` array. Mutually exclusive with `cwd`. */
   workdir?: string;
+  /** Additional paths the agent needs read/write access to. */
   additionalPaths?: string[];
+  /** Optional credential proxy settings for this agent. */
   credentials?: AgentCredentialConfig;
+  /** Relayfile-change listeners for this agent, matching Workforce `agent.watch`. */
   watch?: RelayfileWatchRule[];
+  /** Relayflow integration subscriptions for this agent. Alias-friendly superset of `watch`. */
   subscriptions?: IntegrationSubscriptionConfig[];
 }
 
@@ -325,6 +332,9 @@ export class WorkflowBuilder {
     if (options.interactive !== undefined) def.interactive = options.interactive;
     if (options.skills !== undefined) def.skills = options.skills;
     if (options.permissions !== undefined) def.permissions = options.permissions;
+    if (options.cwd !== undefined && options.workdir !== undefined) {
+      throw new Error(`Agent "${name}" cannot define both "cwd" and "workdir"; they are mutually exclusive`);
+    }
     if (options.cwd !== undefined) def.cwd = options.cwd;
     if (options.workdir !== undefined) def.workdir = options.workdir;
     if (options.additionalPaths !== undefined) def.additionalPaths = options.additionalPaths;

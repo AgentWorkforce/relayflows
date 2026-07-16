@@ -4,7 +4,7 @@ import { workflow } from '../builder.js';
 import type { AgentDefinition } from '../types.js';
 
 describe('WorkflowBuilder.agent()', () => {
-  it('preserves every AgentDefinition field in toConfig()', () => {
+  it('preserves every compatible AgentDefinition field in toConfig()', () => {
     const input = {
       name: 'reviewer',
       cli: 'codex',
@@ -20,7 +20,6 @@ describe('WorkflowBuilder.agent()', () => {
       },
       permissions: { access: 'readonly', network: false, exec: ['git diff'] },
       interactive: false,
-      cwd: './packages/core',
       workdir: 'core',
       additionalPaths: ['docs', 'fixtures'],
       preset: 'reviewer',
@@ -44,7 +43,7 @@ describe('WorkflowBuilder.agent()', () => {
         },
       ],
       skills: 'Review TypeScript changes for correctness.',
-    } satisfies Required<AgentDefinition>;
+    } satisfies Omit<Required<AgentDefinition>, 'cwd'>;
     const { name, constraints, ...options } = input;
 
     const config = workflow('agent-round-trip')
@@ -53,5 +52,25 @@ describe('WorkflowBuilder.agent()', () => {
       .toConfig();
 
     expect(config.agents[0]).toEqual(input);
+  });
+
+  it('preserves cwd when workdir is omitted', () => {
+    const config = workflow('agent-cwd')
+      .agent('worker', { cli: 'claude', cwd: './packages/core' })
+      .step('noop', { type: 'deterministic', command: 'true' })
+      .toConfig();
+
+    expect(config.agents[0]).toMatchObject({ cwd: './packages/core' });
+    expect(config.agents[0]?.workdir).toBeUndefined();
+  });
+
+  it('rejects mutually exclusive cwd and workdir options', () => {
+    expect(() =>
+      workflow('invalid-agent').agent('worker', {
+        cli: 'claude',
+        cwd: './packages/core',
+        workdir: 'core',
+      })
+    ).toThrow('Agent "worker" cannot define both "cwd" and "workdir"; they are mutually exclusive');
   });
 });
