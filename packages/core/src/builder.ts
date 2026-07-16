@@ -4,15 +4,19 @@ import { stringify as stringifyYaml } from 'yaml';
 import type { RuntimeSpawnOptions } from '@agent-relay/harness-driver';
 import type {
   AgentCli,
+  AgentCredentialConfig,
   AgentDefinition,
+  AgentPermissions,
   AgentPreset,
   Barrier,
   CoordinationConfig,
   DryRunReport,
   ErrorHandlingConfig,
   IdleNudgeConfig,
+  IntegrationSubscriptionConfig,
   PathDefinition,
   RelayYamlConfig,
+  RelayfileWatchRule,
   StateConfig,
   SwarmPattern,
   TrajectoryConfig,
@@ -68,6 +72,13 @@ export interface AgentOptions {
   preset?: AgentPreset;
   /** Skills to make available to the agent (for API-mode agents). */
   skills?: string;
+  permissions?: AgentPermissions;
+  cwd?: string;
+  workdir?: string;
+  additionalPaths?: string[];
+  credentials?: AgentCredentialConfig;
+  watch?: RelayfileWatchRule[];
+  subscriptions?: IntegrationSubscriptionConfig[];
 }
 
 /** Options for agent steps (default). */
@@ -313,6 +324,13 @@ export class WorkflowBuilder {
     if (options.preset !== undefined) def.preset = options.preset;
     if (options.interactive !== undefined) def.interactive = options.interactive;
     if (options.skills !== undefined) def.skills = options.skills;
+    if (options.permissions !== undefined) def.permissions = options.permissions;
+    if (options.cwd !== undefined) def.cwd = options.cwd;
+    if (options.workdir !== undefined) def.workdir = options.workdir;
+    if (options.additionalPaths !== undefined) def.additionalPaths = options.additionalPaths;
+    if (options.credentials !== undefined) def.credentials = options.credentials;
+    if (options.watch !== undefined) def.watch = options.watch;
+    if (options.subscriptions !== undefined) def.subscriptions = options.subscriptions;
 
     if (
       options.model !== undefined ||
