@@ -52,6 +52,48 @@ const result = await workflow("ship-feature")
 console.log(result.status); // "completed" | "failed" | "cancelled" | "needs_human"
 ```
 
+## Reusable feature-catalog and guardian audit
+
+`workflows/feature-catalog-guardian-audit.ts` packages the complete Relay-style
+feature inventory, executable runbook, manifest validator/contract, proactive
+guardian, review, and verification process. It derives features from each
+target's real CLI/config/exports/source rather than copying Relay's product
+catalog.
+
+Run it from the repository you want to audit:
+
+```bash
+relayflows run ../relayflows/workflows/feature-catalog-guardian-audit.ts
+```
+
+Or name one or several repositories explicitly:
+
+```bash
+FEATURE_AUDIT_TARGET=/absolute/path/to/project \
+  relayflows run workflows/feature-catalog-guardian-audit.ts
+
+FEATURE_AUDIT_TARGETS=/absolute/path/to/project-a,/absolute/path/to/project-b \
+  relayflows run workflows/feature-catalog-guardian-audit.ts
+```
+
+Optional controls:
+
+```bash
+FEATURE_AUDIT_REFERENCE_REPO=/absolute/path/to/relay
+FEATURE_AUDIT_REFERENCE_REF=origin/chore/audit-feature-manifest
+FEATURE_AUDIT_VERIFY_COMMAND='npm run build && npm test && npm run verify:e2e'
+FEATURE_AUDIT_GUARDIAN=0 # only when the target should not ship a proactive persona
+```
+
+Each target runs an isolated inventory → catalog/runbook repair → guardian
+parity → project gates → test/fix → fresh review → review fix → strict gate
+pipeline. Evidence and the final report are written under
+`.workflow-artifacts/feature-catalog-guardian-audit/` in that target. The
+workflow preserves existing changes and never resets, cleans, commits, pushes,
+opens a PR, or merges. Live provider/fleet/destructive tiers require the
+target's explicit opt-in and must be reported as `SKIP` or `MANUAL` when their
+prerequisites are unavailable.
+
 ### Python
 
 ```python

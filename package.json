@@ -15,7 +15,8 @@
     "build:primitives": "npm run build --workspace=packages/github-primitive --workspace=packages/slack-primitive --workspace=packages/browser-primitive",
     "build": "npm run build:primitives && npm run build --workspace=packages/core && npm run build --workspace=packages/cli",
     "typecheck": "npm run build:primitives && npm run typecheck --workspace=packages/core && npm run typecheck --workspace=packages/cli",
-    "test": "npm run test --workspace=packages/core"
+    "test": "npm run test --workspace=packages/core && npm run test:workflows",
+    "test:workflows": "vitest run workflows"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
