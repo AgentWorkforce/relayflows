@@ -4036,9 +4036,10 @@ export class WorkflowRunner {
       }
     }
 
-    // Reset failed steps to pending for retry
+    // Reset failed and stale running steps to pending for retry. No process owns
+    // a running step after a run is resumed.
     for (const [, state] of stepStates) {
-      if (state.row.status === 'failed') {
+      if (state.row.status === 'failed' || state.row.status === 'running') {
         state.row.status = 'pending';
         state.row.error = undefined;
         state.row.completionReason = undefined;

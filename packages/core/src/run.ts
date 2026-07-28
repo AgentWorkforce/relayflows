@@ -1,5 +1,7 @@
+import path from 'node:path';
 import type { RuntimeSpawnOptions } from '@agent-relay/harness-driver';
 import type { DryRunReport, TrajectoryConfig, WorkflowRunRow } from './types.js';
+import { JsonFileWorkflowDb } from './file-db.js';
 import { WorkflowRunner, type WorkflowEventListener } from './runner.js';
 import { createDefaultEventLogger } from './default-logger.js';
 import { formatDryRunReport } from './dry-run-format.js';
@@ -51,9 +53,12 @@ export async function runWorkflow(
   yamlPath: string,
   options: RunWorkflowOptions = {}
 ): Promise<WorkflowRunRow | DryRunReport> {
+  const dbPath = path.join(options.cwd ?? process.cwd(), '.agent-relay', 'workflow-runs.jsonl');
+  const db = new JsonFileWorkflowDb(dbPath);
   const runner = new WorkflowRunner({
     cwd: options.cwd,
     relay: options.relay,
+    db,
   });
 
   const config = await runner.parseYamlFile(yamlPath);
