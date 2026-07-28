@@ -3080,6 +3080,14 @@ export class WorkflowRunner {
 
     const permissions = resolved.agents.map((agent) => {
       const compiled = resolveAgentPermissions(agent.name, agent.permissions, this.cwd, this.workspaceId);
+      if (compiled.readwritePatterns.length > 0 && compiled.summary.readwrite === 0) {
+        const patterns = compiled.readwritePatterns.map((pattern) => `"${pattern}"`).join(', ');
+        warnings.push(
+          `Agent "${agent.name}" write pattern(s) ${patterns} resolved to no existing writable paths. ` +
+            'The installed @agent-relay/cloud resolver only grants writes to existing paths; ' +
+            'files created under these patterns may be denied.'
+        );
+      }
       const source: NonNullable<DryRunReport['permissions']>[number]['source'] = compiled.sources.some(
         (entry) => entry.type === 'yaml'
       )
