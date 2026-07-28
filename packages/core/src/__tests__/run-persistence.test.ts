@@ -33,7 +33,10 @@ describe('workflow run persistence', () => {
         'agents: []',
         'workflows:',
         '  - name: default',
-        '    steps: []',
+        '    steps:',
+        '      - name: noop',
+        '        type: deterministic',
+        '        command: "true"',
       ].join('\n')
     );
     const dryRunSpy = vi.spyOn(WorkflowRunner.prototype, 'dryRun');
@@ -62,7 +65,14 @@ describe('workflow run persistence', () => {
       .run({ cwd: tmpDir, renderer: false, resume: 'resume-id' });
 
     expect(result).toBe(resumedRun);
-    expect(resumeSpy).toHaveBeenCalledWith('resume-id', undefined);
+    // The third arg is the parsed config: resume() feeds it to
+    // reconstructRunFromCache() when workflow-runs.jsonl is absent, so dropping
+    // it silently disables the cached-step-output fallback.
+    expect(resumeSpy).toHaveBeenCalledWith(
+      'resume-id',
+      undefined,
+      expect.objectContaining({ name: 'builder-resume-test' })
+    );
     expect(executeSpy).not.toHaveBeenCalled();
   });
 });
