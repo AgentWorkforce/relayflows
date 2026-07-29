@@ -71,7 +71,10 @@ describe('workflow run persistence', () => {
     expect(resumeSpy).toHaveBeenCalledWith(
       'resume-id',
       undefined,
-      expect.objectContaining({ name: 'builder-resume-test' })
+      expect.objectContaining({ name: 'builder-resume-test' }),
+      // User-facing resume means "the previous process is gone", so the builder
+      // opts in to requeueing steps left running. The library default is off.
+      expect.objectContaining({ resetRunningSteps: true })
     );
     expect(executeSpy).not.toHaveBeenCalled();
   });

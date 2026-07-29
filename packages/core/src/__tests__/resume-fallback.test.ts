@@ -278,7 +278,7 @@ describe('resume fallback to step-output cache', () => {
       }
     });
 
-    const run = await runner.resume(runId);
+    const run = await runner.resume(runId, undefined, undefined, { resetRunningSteps: true });
     expect(run.status, run.error).toBe('completed');
 
     expect(db.updateStep).toHaveBeenCalledWith(

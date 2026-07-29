@@ -88,7 +88,7 @@ export async function runWorkflow(
   // Resume a previous run if requested
   const resumeRunId = options.resume ?? process.env.RESUME_RUN_ID;
   if (resumeRunId) {
-    return runner.resume(resumeRunId, options.vars);
+    return runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true });
   }
 
   const startFrom = options.startFrom ?? process.env.START_FROM;

@@ -634,7 +634,7 @@ export class WorkflowBuilder {
       runner.on(renderer.onEvent);
 
       const runPromise = resumeRunId
-        ? runner.resume(resumeRunId, options.vars, config)
+        ? runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true })
         : runner.execute(config, options.workflow, options.vars, executeOptions);
 
       try {
@@ -646,7 +646,7 @@ export class WorkflowBuilder {
     }
 
     if (resumeRunId) {
-      return runner.resume(resumeRunId, options.vars, config);
+      return runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true });
     }
 
     return runner.execute(config, options.workflow, options.vars, executeOptions);
