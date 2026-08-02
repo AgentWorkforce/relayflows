@@ -64,7 +64,11 @@ import { ensureRelayfileMount, type MountHandle } from '@relayfile/sdk/workspace
 import { collectCliSession, type CliSessionReport } from './cli-session-collector.js';
 import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';
-import { ChannelMessenger, scrubForChannel as scrubWorkflowOutputForChannel } from './channel-messenger.js';
+import {
+  ChannelMessenger,
+  formatObserverUrl,
+  scrubForChannel as scrubWorkflowOutputForChannel,
+} from './channel-messenger.js';
 import { InMemoryWorkflowDb } from './memory-db.js';
 import { buildCommand as buildProcessCommand, spawnProcess } from './process-spawner.js';
 import { createProcessBackendExecutor } from './process-backend-executor.js';
@@ -3782,7 +3786,7 @@ export class WorkflowRunner {
           this.log('API key resolved');
           if (this.relayApiKeyAutoCreated && this.relayApiKey) {
             this.log(`Workspace created — follow this run in Relaycast:`);
-            this.log(`  Observer: https://agentrelay.com/observer?key=${this.relayApiKey}`);
+            this.log(`  Observer: ${formatObserverUrl(this.relayApiKey)}`);
             this.log(`  Channel: ${channel}`);
           }
         }

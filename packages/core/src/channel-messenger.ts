@@ -47,6 +47,7 @@ export function formatError(stepName: string, error: unknown): string {
 // Common secret patterns to redact from channel output.
 const SECRET_PATTERNS = [
   /(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer)\s*[:=]\s*\S+/gi,
+  /(?:rk_live_|at_live_|nt_live_|ot_live_|cld_at_|rth_at_|ocl_node_enr_|br_)[a-zA-Z0-9_%-]+(?:\.[a-zA-Z0-9_%-]+)*/g,
   /(?:sk|pk|rk|ak)[-_][a-zA-Z0-9]{20,}/g,
   /ghp_[a-zA-Z0-9]{36,}/g,
   /gho_[a-zA-Z0-9]{36,}/g,
@@ -95,6 +96,10 @@ export function scrubSecrets(text: string): string {
     result = result.replace(pattern, '[REDACTED]');
   }
   return result;
+}
+
+export function formatObserverUrl(workspaceKey: string): string {
+  return scrubSecrets(`https://agentrelay.com/observer?key=${workspaceKey}`);
 }
 
 function stripMalformedPtyFrameGarbage(line: string): string {
