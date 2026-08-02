@@ -98,8 +98,12 @@ export function scrubSecrets(text: string): string {
   return result;
 }
 
-export function formatObserverUrl(workspaceKey: string): string {
-  return scrubSecrets(`https://agentrelay.com/observer?key=${workspaceKey}`);
+export function formatObserverGuidance(channel: string): string[] {
+  return [
+    'Workspace created for this workflow.',
+    '  Observation: requires a separately provisioned, read-only observer token',
+    `  Channel: ${channel}`,
+  ];
 }
 
 function stripMalformedPtyFrameGarbage(line: string): string {

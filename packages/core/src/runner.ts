@@ -66,7 +66,7 @@ import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';
 import {
   ChannelMessenger,
-  formatObserverUrl,
+  formatObserverGuidance,
   scrubForChannel as scrubWorkflowOutputForChannel,
 } from './channel-messenger.js';
 import { InMemoryWorkflowDb } from './memory-db.js';
@@ -3784,10 +3784,10 @@ export class WorkflowRunner {
           this.log('Resolving Relaycast API key...');
           await this.ensureRelaycastApiKey(channel);
           this.log('API key resolved');
-          if (this.relayApiKeyAutoCreated && this.relayApiKey) {
-            this.log(`Workspace created — follow this run in Relaycast:`);
-            this.log(`  Observer: ${formatObserverUrl(this.relayApiKey)}`);
-            this.log(`  Channel: ${channel}`);
+          if (this.relayApiKeyAutoCreated) {
+            for (const line of formatObserverGuidance(channel)) {
+              this.log(line);
+            }
           }
         }
 

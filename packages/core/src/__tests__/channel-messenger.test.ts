@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ChannelMessenger,
   formatError,
-  formatObserverUrl,
+  formatObserverGuidance,
   formatStepOutput,
   scrubSecrets,
   sendToChannel,
@@ -59,12 +59,25 @@ describe('channel messenger helpers', () => {
     expect(scrubbed).not.toContain(credential);
   });
 
-  it('redacts the auto-created workspace key in observer output', () => {
-    const workspaceKey = 'rk_live_0123456789abcdef';
-    const observerUrl = formatObserverUrl(workspaceKey);
+  it.each([
+    'broker started on port 3888',
+    'the library is at ./br',
+    'abbreviation',
+    'number_of_brokers=4',
+    'https://agentrelay.com/observer',
+  ])('scrubSecrets preserves non-secret output %s', (text) => {
+    expect(scrubSecrets(text)).toBe(text);
+  });
 
-    expect(observerUrl).toBe('https://agentrelay.com/observer?key=[REDACTED]');
-    expect(observerUrl).not.toContain(workspaceKey);
+  it('omits credential-bearing observer links from auto-created workspace guidance', () => {
+    const guidance = formatObserverGuidance('workflow-room');
+
+    expect(guidance).toEqual([
+      'Workspace created for this workflow.',
+      '  Observation: requires a separately provisioned, read-only observer token',
+      '  Channel: workflow-room',
+    ]);
+    expect(guidance.join('\n')).not.toMatch(/observer\?key=|\[REDACTED\]/);
   });
 
   it('formatError normalizes unknown errors', () => {
