@@ -47,7 +47,10 @@ export interface AgentCredentialConfig {
 /** Definition of an agent participating in a workflow. */
 export interface AgentDefinition {
   name: string;
-  cli: AgentCli;
+  /** Raw harness launch. Mutually exclusive with `persona` in workflow YAML. */
+  cli?: AgentCli;
+  /** AgentWorkforce persona id or JSON path. Mutually exclusive with `cli`. */
+  persona?: string;
   role?: string;
   task?: string;
   channels?: string[];
@@ -94,6 +97,7 @@ export type AgentCli =
   | 'gemini'
   | 'aider'
   | 'goose'
+  | 'grok'
   | 'opencode'
   | 'droid'
   | 'cursor'

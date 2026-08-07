@@ -107,6 +107,9 @@ function emitMockEvent(event: string, payload: any = {}): void {
     case 'agentSpawned':
       broker = { kind: 'agent_spawned', name: payload.name, runtime: payload.runtime ?? 'pty' };
       break;
+    case 'workerReady':
+      broker = { kind: 'worker_ready', name: payload.name, runtime: payload.runtime ?? 'pty' };
+      break;
     case 'agentReleased':
       broker = { kind: 'agent_released', name: payload.name };
       break;
@@ -167,6 +170,25 @@ vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
     },
   };
 });
+
+const personaRuntimeMocks = vi.hoisted(() => ({
+  dispose: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../persona-runtime.js', () => ({
+  resolveWorkflowPersona: vi.fn((reference: string) => ({
+    resolved: { spec: { id: reference } },
+    plan: {},
+    cli: 'codex',
+    model: 'openai-codex/persona-model',
+    args: ['--persona-runtime'],
+    env: { PERSONA_ENV: 'enabled' },
+  })),
+  activateWorkflowPersona: vi.fn(async (persona: Record<string, unknown>) => ({
+    ...persona,
+    cwd: '/tmp/relayflow-persona-runtime',
+    dispose: personaRuntimeMocks.dispose,
+  })),
+}));
 
 // Import after mocking
 const { WorkflowRunner } = await import('../runner.js');
@@ -365,7 +387,7 @@ agents:
       ).not.toThrow();
     });
 
-    it('should reject agent without cli', () => {
+    it('should reject agent without cli or persona', () => {
       expect(() =>
         runner.validateConfig({
           version: '1',
@@ -373,7 +395,29 @@ agents:
           swarm: { pattern: 'dag' },
           agents: [{ name: 'a' }],
         })
-      ).toThrow('each agent must have a string "cli"');
+      ).toThrow('each agent must have exactly one of string "cli" or "persona"');
+    });
+
+    it('should accept persona in place of cli and role', () => {
+      expect(() =>
+        runner.validateConfig({
+          version: '1',
+          name: 'x',
+          swarm: { pattern: 'dag' },
+          agents: [{ name: 'a', persona: 'nango-integrations' }],
+        })
+      ).not.toThrow();
+    });
+
+    it('should reject agents that set both cli and persona', () => {
+      expect(() =>
+        runner.validateConfig({
+          version: '1',
+          name: 'x',
+          swarm: { pattern: 'dag' },
+          agents: [{ name: 'a', cli: 'codex', persona: 'nango-integrations' }],
+        })
+      ).toThrow('each agent must have exactly one of string "cli" or "persona"');
     });
 
     it('should detect unknown dependencies in workflows', () => {
@@ -441,6 +485,48 @@ agents:
   // ── Execution ──────────────────────────────────────────────────────────
 
   describe('execute', () => {
+    it('spawns a persona with its declared runtime and verifies readiness plus registration', async () => {
+      mockRelayInstance.spawnPty.mockImplementation(async (input: { name: string; task?: string }) => {
+        mockRelayInstance.listAgents.mockResolvedValueOnce([{ name: input.name }]);
+        queueMicrotask(() => {
+          emitMockEvent('workerReady', { name: input.name });
+          emitMockEvent('workerOutput', { name: input.name, chunk: 'STEP_COMPLETE:persona-step\n' });
+        });
+        return makeMockHandle(input.name);
+      });
+
+      const config = {
+        version: '1',
+        name: 'persona-workflow',
+        swarm: { pattern: 'dag' },
+        agents: [{ name: 'integration-expert', persona: 'nango-integrations' }],
+        workflows: [
+          {
+            name: 'default',
+            steps: [
+              { name: 'persona-step', agent: 'integration-expert', task: 'Fix the failed sync' },
+            ],
+          },
+        ],
+        trajectories: false,
+      } satisfies RelayYamlConfig;
+
+      const run = await runner.execute(config, 'default');
+
+      expect(run.status).toBe('completed');
+      expect(mockRelayInstance.spawnPty).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cli: 'codex',
+          model: 'openai-codex/persona-model',
+          args: ['--persona-runtime'],
+          cwd: '/tmp/relayflow-persona-runtime',
+          env: expect.objectContaining({ PERSONA_ENV: 'enabled' }),
+          task: expect.stringContaining('Fix the failed sync'),
+        })
+      );
+      expect(personaRuntimeMocks.dispose).toHaveBeenCalledOnce();
+    });
+
     it('should create run and steps in DB', async () => {
       const config = makeConfig();
       const run = await runner.execute(config, 'default');

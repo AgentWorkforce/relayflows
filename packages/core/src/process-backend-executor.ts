@@ -47,6 +47,11 @@ export function createProcessBackendExecutor(
             `Route agent "${agentDef.name}" through a subprocess CLI (claude, codex, etc.) or omit processBackend.`
         );
       }
+      if (!agentDef.cli) {
+        throw new Error(
+          `processBackend cannot execute persona agent "${agentDef.name}"; personas require the interactive Relayflow runtime.`
+        );
+      }
 
       const extraArgs = agentDef.constraints?.model ? ['--model', agentDef.constraints.model] : [];
       const argv = buildCommand(agentDef.cli, extraArgs, resolvedTask);

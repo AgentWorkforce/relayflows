@@ -152,6 +152,11 @@ agents:
     role: "Test engineer"
     interactive: false     # Non-interactive: runs as subprocess, no PTY/messaging
 
+  # A persona replaces cli + role. Its harness, model, standing instructions,
+  # installed skills, MCP servers, and harness settings come from the spec.
+  - name: integrations
+    persona: nango-integrations
+
 workflows:
   - name: build-and-test
     onError: retry         # fail | skip | retry

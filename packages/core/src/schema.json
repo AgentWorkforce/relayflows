@@ -371,7 +371,7 @@
     },
     "AgentDefinition": {
       "type": "object",
-      "required": ["name", "cli"],
+      "required": ["name"],
       "additionalProperties": false,
       "properties": {
         "name": {
@@ -380,6 +380,10 @@
         },
         "cli": {
           "$ref": "#/definitions/AgentCli"
+        },
+        "persona": {
+          "type": "string",
+          "description": "AgentWorkforce persona id or JSON path; mutually exclusive with cli"
         },
         "role": {
           "type": "string",
@@ -441,7 +445,11 @@
           },
           "description": "Relayflow integration subscriptions for this agent."
         }
-      }
+      },
+      "oneOf": [
+        { "required": ["cli"] },
+        { "required": ["persona"] }
+      ]
     },
     "AgentCli": {
       "type": "string",
@@ -451,6 +459,7 @@
         "gemini",
         "aider",
         "goose",
+        "grok",
         "opencode",
         "droid",
         "cursor",

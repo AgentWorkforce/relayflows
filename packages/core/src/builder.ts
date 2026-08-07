@@ -36,8 +36,7 @@ import type { VariableContext } from './template-resolver.js';
 
 // ── Option types for the builder API ────────────────────────────────────────
 
-export interface AgentOptions {
-  cli: AgentCli;
+export interface AgentOptionsBase {
   role?: string;
   task?: string;
   channels?: string[];
@@ -87,6 +86,9 @@ export interface AgentOptions {
   /** Relayflow integration subscriptions for this agent. Alias-friendly superset of `watch`. */
   subscriptions?: IntegrationSubscriptionConfig[];
 }
+
+export type AgentOptions = AgentOptionsBase &
+  ({ cli: AgentCli; persona?: never } | { persona: string; cli?: never; role?: never; model?: never });
 
 /** Options for agent steps (default). */
 export interface AgentStepOptions {
@@ -322,7 +324,8 @@ export class WorkflowBuilder {
   agent(name: string, options: AgentOptions): this {
     const def: AgentDefinition = {
       name,
-      cli: options.cli,
+      ...(options.cli ? { cli: options.cli } : {}),
+      ...(options.persona ? { persona: options.persona } : {}),
     };
 
     if (options.role !== undefined) def.role = options.role;

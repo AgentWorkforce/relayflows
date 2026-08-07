@@ -43,7 +43,7 @@ describe('WorkflowBuilder.agent()', () => {
         },
       ],
       skills: 'Review TypeScript changes for correctness.',
-    } satisfies Omit<Required<AgentDefinition>, 'cwd'>;
+    } satisfies Omit<Required<AgentDefinition>, 'cwd' | 'persona'>;
     const { name, constraints, ...options } = input;
 
     const config = workflow('agent-round-trip')
@@ -62,6 +62,18 @@ describe('WorkflowBuilder.agent()', () => {
 
     expect(config.agents[0]).toMatchObject({ cwd: './packages/core' });
     expect(config.agents[0]?.workdir).toBeUndefined();
+  });
+
+  it('accepts a persona in place of cli and role', () => {
+    const config = workflow('persona-agent')
+      .agent('integrations', { persona: 'nango-integrations' })
+      .step('sync', { agent: 'integrations', task: 'Fix the failed sync' })
+      .toConfig();
+
+    expect(config.agents[0]).toEqual({
+      name: 'integrations',
+      persona: 'nango-integrations',
+    });
   });
 
   it('rejects mutually exclusive cwd and workdir options', () => {
