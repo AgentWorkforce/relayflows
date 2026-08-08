@@ -399,6 +399,9 @@ export class TemplateRegistry {
       }
       const hasCli = typeof agent.cli === 'string' && agent.cli.trim().length > 0;
       const hasPersona = typeof agent.persona === 'string' && agent.persona.trim().length > 0;
+      if ((agent.cli !== undefined && !hasCli) || (agent.persona !== undefined && !hasPersona)) {
+        throw new Error(`Template at ${source} contains an invalid agent definition`);
+      }
       if (hasCli === hasPersona) {
         throw new Error(`Template at ${source} contains an invalid agent definition`);
       }

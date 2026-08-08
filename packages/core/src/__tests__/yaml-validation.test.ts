@@ -349,6 +349,27 @@ agents:
       expect(() => (registry as any).validateRelayConfig(parsed, 'test')).toThrow(/invalid agent/i);
     });
 
+    for (const { name, launchFields } of [
+      { name: 'numeric cli', launchFields: 'persona: nango-integrations\n    cli: 42' },
+      { name: 'boolean persona', launchFields: 'cli: relay\n    persona: false' },
+      { name: 'empty cli', launchFields: 'persona: nango-integrations\n    cli: ""' },
+      { name: 'blank persona', launchFields: 'cli: relay\n    persona: "  "' },
+    ]) {
+      it(`should reject a malformed ${name} field`, () => {
+        const invalidYaml = `
+version: "1.0"
+name: test
+swarm:
+  pattern: fan-out
+agents:
+  - name: test
+    ${launchFields}
+`;
+        const parsed = parseYaml(invalidYaml);
+        expect(() => (registry as any).validateRelayConfig(parsed, 'test')).toThrow(/invalid agent/i);
+      });
+    }
+
     it('should reject non-existent template', async () => {
       await expect(registry.loadTemplate('non-existent-template')).rejects.toThrow(/not found/i);
     });
