@@ -76,6 +76,13 @@ describe('WorkflowBuilder.agent()', () => {
     });
   });
 
+  it('keeps persona-only options unrepresentable in the builder API', () => {
+    // @ts-expect-error Persona agents cannot use non-interactive CLI presets.
+    workflow('invalid-persona-preset').agent('integrations', { persona: 'nango-integrations', preset: 'worker' });
+    // @ts-expect-error Persona agents are always interactive.
+    workflow('invalid-persona-interactive').agent('integrations', { persona: 'nango-integrations', interactive: false });
+  });
+
   it('rejects mutually exclusive cwd and workdir options', () => {
     expect(() =>
       workflow('invalid-agent').agent('worker', {

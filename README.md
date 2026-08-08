@@ -154,6 +154,8 @@ agents:
 
   # A persona replaces cli + role. Its harness, model, standing instructions,
   # installed skills, MCP servers, and harness settings come from the spec.
+  # Persona agents are interactive-only: do not set cli, preset, or
+  # constraints.model, and do not use interactive: false.
   - name: integrations
     persona: nango-integrations
 

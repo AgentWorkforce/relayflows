@@ -308,6 +308,10 @@ interface SpawnResult {
   exitCode?: number;
   exitSignal?: string;
   promptTaskText?: string;
+  /** Actual harness runtime location, which may be a persona's isolated mount. */
+  runtimeCwd?: string;
+  /** Resolved CLI used for this launch. */
+  cli?: AgentCli;
 }
 
 /** Error carrying exit code/signal from a failed subprocess spawn. */
@@ -2854,6 +2858,12 @@ export class WorkflowRunner {
       }
       const hasCli = typeof a.cli === 'string' && a.cli.trim().length > 0;
       const hasPersona = typeof a.persona === 'string' && a.persona.trim().length > 0;
+      if (a.cli !== undefined && !hasCli) {
+        throw new Error(`${source}: "cli" must be a non-empty string when provided`);
+      }
+      if (a.persona !== undefined && !hasPersona) {
+        throw new Error(`${source}: "persona" must be a non-empty string when provided`);
+      }
       if (hasCli === hasPersona) {
         throw new Error(`${source}: each agent must have exactly one of string "cli" or "persona"`);
       }
@@ -4505,23 +4515,30 @@ export class WorkflowRunner {
     const explicitName = errorHandling?.repairAgent?.trim();
     if (explicitName) {
       const explicitAgent = agentMap.get(explicitName);
-      if (explicitAgent) return WorkflowRunner.resolveAgentDef(explicitAgent);
+      if (explicitAgent) {
+        if (!explicitAgent.cli) {
+          throw new Error(`repairAgent "${explicitName}" must be a raw CLI agent; personas are interactive-only`);
+        }
+        return WorkflowRunner.resolveAgentDef(explicitAgent);
+      }
       this.log(`[${step.name}] repairAgent "${explicitName}" not found; falling back to workflow agents`);
     }
 
     if (step.agent) {
       const stepAgent = agentMap.get(step.agent);
-      if (stepAgent) return WorkflowRunner.resolveAgentDef(stepAgent);
+      if (stepAgent?.cli) return WorkflowRunner.resolveAgentDef(stepAgent);
     }
 
     for (const dependency of [...(step.dependsOn ?? [])].reverse()) {
       const dependencyAgent = stepStates.get(dependency)?.row.agentName;
       if (!dependencyAgent) continue;
       const agent = agentMap.get(dependencyAgent);
-      if (agent) return WorkflowRunner.resolveAgentDef(agent);
+      if (agent?.cli) return WorkflowRunner.resolveAgentDef(agent);
     }
 
-    const candidates = [...agentMap.values()].map((agent) => WorkflowRunner.resolveAgentDef(agent));
+    const candidates = [...agentMap.values()]
+      .filter((agent): agent is Extract<AgentDefinition, { cli: AgentCli }> => Boolean(agent.cli))
+      .map((agent) => WorkflowRunner.resolveAgentDef(agent));
     candidates.sort((a, b) => this.scoreRepairAgent(b) - this.scoreRepairAgent(a));
     return candidates[0];
   }
@@ -5113,6 +5130,7 @@ export class WorkflowRunner {
     let lastAttemptStartedAt: number | undefined;
     let lastEffectiveAgentDef: AgentDefinition | undefined;
     let lastEffectiveCwd: string | undefined;
+    let lastEffectiveCli: AgentCli | undefined;
     let lastAttemptReportCaptured = false;
     let lastDiagnosticResult: DiagnosticResult | null = null;
 
@@ -5137,6 +5155,7 @@ export class WorkflowRunner {
       lastAttemptStartedAt = undefined;
       lastEffectiveAgentDef = undefined;
       lastEffectiveCwd = undefined;
+      lastEffectiveCli = undefined;
       lastAttemptReportCaptured = false;
       let stepOutputForDiagnostic = '';
 
@@ -5365,6 +5384,10 @@ export class WorkflowRunner {
                     : undefined,
                 });
           const output = typeof spawnResult === 'string' ? spawnResult : spawnResult.output;
+          if (typeof spawnResult !== 'string') {
+            lastEffectiveCwd = spawnResult.runtimeCwd ?? lastEffectiveCwd;
+            lastEffectiveCli = spawnResult.cli;
+          }
           promptTaskText =
             typeof spawnResult === 'string'
               ? effectiveOwner.interactive === false
@@ -5482,6 +5505,7 @@ export class WorkflowRunner {
           step.name,
           lastEffectiveAgentDef,
           lastEffectiveCwd,
+          lastEffectiveCli,
           lastAttemptStartedAt,
           Date.now()
         );
@@ -5564,6 +5588,7 @@ export class WorkflowRunner {
             step.name,
             lastEffectiveAgentDef,
             lastEffectiveCwd,
+            lastEffectiveCli,
             lastAttemptStartedAt,
             Date.now()
           );
@@ -5601,6 +5626,7 @@ export class WorkflowRunner {
         step.name,
         lastEffectiveAgentDef,
         lastEffectiveCwd,
+        lastEffectiveCli,
         lastAttemptStartedAt,
         Date.now()
       );
@@ -5646,11 +5672,18 @@ export class WorkflowRunner {
       );
       return null;
     }
+    if (!rawDiagnosticDef.cli) {
+      this.log(
+        `[${step.name}] Diagnostic agent "${diagnosticAgentName}" is persona-based and cannot run non-interactively`
+      );
+      return null;
+    }
 
-    const diagnosticAgentDef: AgentDefinition = {
+    const diagnosticAgentDef = {
       ...WorkflowRunner.resolveAgentDef(rawDiagnosticDef),
+      cli: rawDiagnosticDef.cli,
       interactive: false,
-    };
+    } as AgentDefinition;
     const verificationCommand =
       verification.type === 'custom' ? verification.value : `${verification.type}: ${verification.value}`;
     const diagnosticTimeout = verification.diagnosticTimeout ?? 60_000;
@@ -5686,6 +5719,7 @@ export class WorkflowRunner {
         step.name,
         diagnosticAgentDef,
         diagnosticCwd,
+        diagnosticAgentDef.cli,
         startedAt,
         Date.now()
       );
@@ -5713,6 +5747,7 @@ export class WorkflowRunner {
         step.name,
         diagnosticAgentDef,
         diagnosticCwd,
+        diagnosticAgentDef.cli,
         startedAt,
         Date.now()
       );
@@ -7303,17 +7338,7 @@ export class WorkflowRunner {
     const personaResolution = agentDef.persona
       ? resolveWorkflowPersona(agentDef.persona, this.resolveExecutionCwd(step, agentDef))
       : undefined;
-    if (personaResolution) {
-      agentDef = {
-        ...agentDef,
-        cli: personaResolution.cli as AgentCli,
-        constraints: {
-          ...(agentDef.constraints ?? {}),
-          model: personaResolution.model,
-        },
-      };
-    }
-    const agentCli = agentDef.cli;
+    const agentCli = personaResolution?.cli ?? agentDef.cli;
     if (!agentCli) {
       throw new Error(`Agent "${agentDef.name}" did not resolve to a launchable CLI`);
     }
@@ -7413,6 +7438,7 @@ export class WorkflowRunner {
     let agentReleased = false;
     let completedWithoutSpawnError = false;
     let activePersona: ActiveWorkflowPersona | undefined;
+    const stepDeadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
 
     try {
       const agentCwd = this.resolveExecutionCwd(step, agentDef);
@@ -7459,9 +7485,11 @@ export class WorkflowRunner {
       );
 
       if (personaResolution) {
+        const remainingForReadiness =
+          stepDeadline === undefined ? 90_000 : Math.max(0, Math.min(stepDeadline - Date.now(), 90_000));
         const ready = await this.waitForRuntimeAgentReady(
           agent,
-          Math.min(timeoutMs ?? 90_000, 90_000)
+          remainingForReadiness
         );
         if (ready !== 'ready') {
           throw new Error(
@@ -7595,7 +7623,7 @@ export class WorkflowRunner {
         agent,
         agentDef,
         step,
-        timeoutMs,
+        stepDeadline === undefined ? timeoutMs : Math.max(0, stepDeadline - Date.now()),
         preparedTask.promptTaskText,
         options.preserveOnIdle ?? this.shouldPreserveIdleSupervisor(agentDef, step, options.evidenceRole)
       );
@@ -7688,7 +7716,11 @@ export class WorkflowRunner {
       if (preparedTask.taskTmpFile) {
         await unlink(preparedTask.taskTmpFile).catch(() => undefined);
       }
-      await activePersona?.dispose();
+      await activePersona?.dispose().catch((error: unknown) => {
+        this.log(
+          `[${step.name}] Persona runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      });
     }
 
     let output: string;
@@ -7724,19 +7756,23 @@ export class WorkflowRunner {
       exitCode: agent?.exitCode,
       exitSignal: agent?.exitSignal,
       promptTaskText: preparedTask.promptTaskText,
+      ...(activePersona ? { runtimeCwd: activePersona.cwd } : {}),
+      cli: agentCli,
     };
   }
 
   private async waitForRuntimeAgentReady(
     agent: WorkflowAgentHandle,
     timeoutMs: number
-  ): Promise<'ready' | 'exited' | 'timeout'> {
+  ): Promise<'ready' | 'exited' | 'timeout' | 'aborted'> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (this.readyRuntimeAgents.has(agent.name)) return 'ready';
       if (agent.exitCode !== undefined || agent.exitSignal !== undefined) return 'exited';
+      if (this.abortController?.signal.aborted) return 'aborted';
       await sleepMs(25);
     }
+    if (this.abortController?.signal.aborted) return 'aborted';
     return this.readyRuntimeAgents.has(agent.name) ? 'ready' : 'timeout';
   }
 
@@ -9938,14 +9974,15 @@ export class WorkflowRunner {
     stepName: string,
     agentDef: AgentDefinition | undefined,
     cwd: string | undefined,
+    cliOverride: AgentCli | undefined,
     startedAt: number | undefined,
     completedAt: number
   ): Promise<void> {
     if (!agentDef || !cwd || !startedAt) return;
 
     try {
-      const cli = agentDef.cli ??
-        (agentDef.persona ? (resolveWorkflowPersona(agentDef.persona, cwd).cli as AgentCli) : undefined);
+      const cli = cliOverride ?? agentDef.cli ??
+        (agentDef.persona ? resolveWorkflowPersona(agentDef.persona, cwd).cli : undefined);
       if (!cli) return;
       const report = await collectCliSession({
         cli,

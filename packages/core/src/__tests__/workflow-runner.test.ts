@@ -420,6 +420,17 @@ agents:
       ).toThrow('each agent must have exactly one of string "cli" or "persona"');
     });
 
+    it('rejects malformed launch fields instead of treating them as absent', () => {
+      expect(() =>
+        runner.validateConfig({
+          version: '1',
+          name: 'x',
+          swarm: { pattern: 'dag' },
+          agents: [{ name: 'a', persona: 'nango-integrations', cli: 42 }],
+        })
+      ).toThrow('"cli" must be a non-empty string when provided');
+    });
+
     it('should detect unknown dependencies in workflows', () => {
       const config = makeConfig({
         workflows: [
@@ -524,6 +535,37 @@ agents:
           task: expect.stringContaining('Fix the failed sync'),
         })
       );
+      expect(personaRuntimeMocks.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('releases and disposes a persona runtime when readiness never arrives', async () => {
+      const handle = makeMockHandle('persona-step-failure');
+      mockRelayInstance.spawnPty.mockResolvedValue(handle);
+      const config = {
+        version: '1',
+        name: 'persona-readiness-failure',
+        swarm: { pattern: 'dag' },
+        agents: [{ name: 'integration-expert', persona: 'nango-integrations' }],
+        workflows: [
+          {
+            name: 'default',
+            steps: [
+              {
+                name: 'persona-step-failure',
+                agent: 'integration-expert',
+                task: 'Fix the failed sync',
+                timeoutMs: 1,
+              },
+            ],
+          },
+        ],
+        trajectories: false,
+      } satisfies RelayYamlConfig;
+
+      const run = await runner.execute(config, 'default');
+
+      expect(run.status).toBe('failed');
+      expect(handle.release).toHaveBeenCalledOnce();
       expect(personaRuntimeMocks.dispose).toHaveBeenCalledOnce();
     });
 

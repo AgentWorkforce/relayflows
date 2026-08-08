@@ -10,11 +10,14 @@ import {
 } from '@agentworkforce/persona-kit';
 import { resolvePersonaReference, type ResolvedPersonaReference } from '@agentworkforce/persona-registry';
 
+import { getCliDefinition } from './cli-registry.js';
+import type { AgentCli } from './types.js';
+
 export interface ResolvedWorkflowPersona {
   readonly resolved: ResolvedPersonaReference;
   readonly plan: PersonaSpawnPlan;
   readonly args: string[];
-  readonly cli: string;
+  readonly cli: AgentCli;
   readonly model: string;
   readonly env: Record<string, string>;
 }
@@ -35,11 +38,16 @@ export function resolveWorkflowPersona(reference: string, cwd: string): Resolved
     ? built
     : { ...built, mount: { ignoredPatterns: [], readonlyPatterns: [] } };
   const args = plan.initialPrompt ? [...plan.args, plan.initialPrompt] : [...plan.args];
+  if (plan.cli === 'api' || !getCliDefinition(plan.cli)) {
+    throw new Error(
+      `Persona "${resolved.spec.id}" resolves to unsupported interactive CLI "${plan.cli}"`
+    );
+  }
   return {
     resolved,
     plan,
     args,
-    cli: plan.cli,
+    cli: plan.cli as AgentCli,
     model: resolved.selection.model,
     env: { ...plan.env },
   };
@@ -64,13 +72,19 @@ export async function activateWorkflowPersona(
       async dispose(): Promise<void> {
         if (disposed) return;
         disposed = true;
-        await execution?.dispose();
-        await rm(scratchDir, { recursive: true, force: true });
+        try {
+          await execution?.dispose();
+        } finally {
+          await rm(scratchDir, { recursive: true, force: true });
+        }
       },
     };
   } catch (error) {
-    await execution?.dispose();
-    await rm(scratchDir, { recursive: true, force: true });
+    try {
+      await execution?.dispose();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
     throw error;
   }
 }

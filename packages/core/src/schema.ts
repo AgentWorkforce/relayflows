@@ -44,13 +44,9 @@ export interface AgentCredentialConfig {
   provider?: string;
 }
 
-/** Definition of an agent participating in a workflow. */
-export interface AgentDefinition {
+/** Fields shared by raw-CLI and persona-backed workflow agents. */
+interface AgentDefinitionBase {
   name: string;
-  /** Raw harness launch. Mutually exclusive with `persona` in workflow YAML. */
-  cli?: AgentCli;
-  /** AgentWorkforce persona id or JSON path. Mutually exclusive with `cli`. */
-  persona?: string;
   role?: string;
   task?: string;
   channels?: string[];
@@ -91,13 +87,29 @@ export interface AgentDefinition {
   skills?: string;
 }
 
+/** Definition of an agent participating in a workflow. */
+export type AgentDefinition =
+  | (AgentDefinitionBase & {
+      /** Raw harness launch. Mutually exclusive with `persona` in workflow YAML. */
+      cli: AgentCli;
+      persona?: never;
+    })
+  | (Omit<AgentDefinitionBase, 'role' | 'interactive' | 'preset' | 'constraints'> & {
+      /** AgentWorkforce persona id or JSON path. Mutually exclusive with `cli`. */
+      persona: string;
+      cli?: never;
+      role?: never;
+      preset?: never;
+      interactive?: true;
+      constraints?: Omit<AgentConstraints, 'model'>;
+    });
+
 export type AgentCli =
   | 'claude'
   | 'codex'
   | 'gemini'
   | 'aider'
   | 'goose'
-  | 'grok'
   | 'opencode'
   | 'droid'
   | 'cursor'

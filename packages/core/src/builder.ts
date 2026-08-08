@@ -88,7 +88,17 @@ export interface AgentOptionsBase {
 }
 
 export type AgentOptions = AgentOptionsBase &
-  ({ cli: AgentCli; persona?: never } | { persona: string; cli?: never; role?: never; model?: never });
+  (
+    | { cli: AgentCli; persona?: never }
+    | {
+        persona: string;
+        cli?: never;
+        role?: never;
+        model?: never;
+        preset?: never;
+        interactive?: true;
+      }
+  );
 
 /** Options for agent steps (default). */
 export interface AgentStepOptions {
