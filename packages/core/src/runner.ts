@@ -119,6 +119,11 @@ import type {
 } from './types.js';
 import { WorkflowTrajectory, type StepOutcome } from './trajectory.js';
 import {
+  activateWorkflowPersona,
+  resolveWorkflowPersona,
+  type ActiveWorkflowPersona,
+} from './persona-runtime.js';
+import {
   runVerification,
   stripInjectedTaskEcho,
   type VerificationOptions,
@@ -303,6 +308,10 @@ interface SpawnResult {
   exitCode?: number;
   exitSignal?: string;
   promptTaskText?: string;
+  /** Actual harness runtime location, which may be a persona's isolated mount. */
+  runtimeCwd?: string;
+  /** Resolved CLI used for this launch. */
+  cli?: AgentCli;
 }
 
 /** Error carrying exit code/signal from a failed subprocess spawn. */
@@ -684,6 +693,8 @@ export class WorkflowRunner {
   private readonly supervisedRuntimeAgents = new Map<string, SupervisedRuntimeAgent>();
   /** Runtime-name lookup for active step agents so channel messages can be attributed to a step. */
   private readonly runtimeStepAgents = new Map<string, RuntimeStepAgent>();
+  /** Harnesses that have completed the broker worker_ready handshake. */
+  private readonly readyRuntimeAgents = new Set<string>();
   /** Per-step completion evidence collected across output, channel, files, and tool side-effects. */
   private readonly stepCompletionEvidence = new Map<string, StepEvidenceRecord>();
   /** Expected owner/worker identities per step so coordination signals can be validated by sender. */
@@ -1876,7 +1887,13 @@ export class WorkflowRunner {
           break;
         }
 
+        case 'worker_ready': {
+          this.readyRuntimeAgents.add(event.name);
+          break;
+        }
+
         case 'agent_exited': {
+          this.readyRuntimeAgents.delete(event.name);
           this.lastActivity.delete(event.name);
           this.lastIdleLog.delete(event.name);
           if (!this.activeAgentHandles.has(event.name)) {
@@ -2839,8 +2856,26 @@ export class WorkflowRunner {
       if (typeof a.name !== 'string') {
         throw new Error(`${source}: each agent must have a string "name"`);
       }
-      if (typeof a.cli !== 'string') {
-        throw new Error(`${source}: each agent must have a string "cli"`);
+      const hasCli = typeof a.cli === 'string' && a.cli.trim().length > 0;
+      const hasPersona = typeof a.persona === 'string' && a.persona.trim().length > 0;
+      if (a.cli !== undefined && !hasCli) {
+        throw new Error(`${source}: "cli" must be a non-empty string when provided`);
+      }
+      if (a.persona !== undefined && !hasPersona) {
+        throw new Error(`${source}: "persona" must be a non-empty string when provided`);
+      }
+      if (hasCli === hasPersona) {
+        throw new Error(`${source}: each agent must have exactly one of string "cli" or "persona"`);
+      }
+      if (hasPersona && (typeof a.role === 'string' || a.preset !== undefined)) {
+        throw new Error(`${source}: persona agents replace "cli", "role", and "preset"`);
+      }
+      const constraints = a.constraints as Record<string, unknown> | undefined;
+      if (hasPersona && constraints?.model !== undefined) {
+        throw new Error(`${source}: persona harness and model come from the persona spec`);
+      }
+      if (hasPersona && a.interactive === false) {
+        throw new Error(`${source}: persona agents must run in interactive mode`);
       }
     }
 
@@ -3104,7 +3139,7 @@ export class WorkflowRunner {
     // 4. Build agent summary
     const agents = resolved.agents.map((a) => ({
       name: a.name,
-      cli: a.cli,
+      cli: a.cli ?? `persona:${a.persona ?? 'unknown'}`,
       role: a.role,
       cwd: a.workdir ? dryRunPaths.get(a.workdir) : a.cwd,
       stepCount: stepAgentCounts.get(a.name) ?? 0,
@@ -4480,23 +4515,30 @@ export class WorkflowRunner {
     const explicitName = errorHandling?.repairAgent?.trim();
     if (explicitName) {
       const explicitAgent = agentMap.get(explicitName);
-      if (explicitAgent) return WorkflowRunner.resolveAgentDef(explicitAgent);
+      if (explicitAgent) {
+        if (!explicitAgent.cli) {
+          throw new Error(`repairAgent "${explicitName}" must be a raw CLI agent; personas are interactive-only`);
+        }
+        return WorkflowRunner.resolveAgentDef(explicitAgent);
+      }
       this.log(`[${step.name}] repairAgent "${explicitName}" not found; falling back to workflow agents`);
     }
 
     if (step.agent) {
       const stepAgent = agentMap.get(step.agent);
-      if (stepAgent) return WorkflowRunner.resolveAgentDef(stepAgent);
+      if (stepAgent?.cli) return WorkflowRunner.resolveAgentDef(stepAgent);
     }
 
     for (const dependency of [...(step.dependsOn ?? [])].reverse()) {
       const dependencyAgent = stepStates.get(dependency)?.row.agentName;
       if (!dependencyAgent) continue;
       const agent = agentMap.get(dependencyAgent);
-      if (agent) return WorkflowRunner.resolveAgentDef(agent);
+      if (agent?.cli) return WorkflowRunner.resolveAgentDef(agent);
     }
 
-    const candidates = [...agentMap.values()].map((agent) => WorkflowRunner.resolveAgentDef(agent));
+    const candidates = [...agentMap.values()]
+      .filter((agent): agent is Extract<AgentDefinition, { cli: AgentCli }> => Boolean(agent.cli))
+      .map((agent) => WorkflowRunner.resolveAgentDef(agent));
     candidates.sort((a, b) => this.scoreRepairAgent(b) - this.scoreRepairAgent(a));
     return candidates[0];
   }
@@ -5088,6 +5130,7 @@ export class WorkflowRunner {
     let lastAttemptStartedAt: number | undefined;
     let lastEffectiveAgentDef: AgentDefinition | undefined;
     let lastEffectiveCwd: string | undefined;
+    let lastEffectiveCli: AgentCli | undefined;
     let lastAttemptReportCaptured = false;
     let lastDiagnosticResult: DiagnosticResult | null = null;
 
@@ -5112,6 +5155,7 @@ export class WorkflowRunner {
       lastAttemptStartedAt = undefined;
       lastEffectiveAgentDef = undefined;
       lastEffectiveCwd = undefined;
+      lastEffectiveCli = undefined;
       lastAttemptReportCaptured = false;
       let stepOutputForDiagnostic = '';
 
@@ -5340,6 +5384,10 @@ export class WorkflowRunner {
                     : undefined,
                 });
           const output = typeof spawnResult === 'string' ? spawnResult : spawnResult.output;
+          if (typeof spawnResult !== 'string') {
+            lastEffectiveCwd = spawnResult.runtimeCwd ?? lastEffectiveCwd;
+            lastEffectiveCli = spawnResult.cli;
+          }
           promptTaskText =
             typeof spawnResult === 'string'
               ? effectiveOwner.interactive === false
@@ -5457,6 +5505,7 @@ export class WorkflowRunner {
           step.name,
           lastEffectiveAgentDef,
           lastEffectiveCwd,
+          lastEffectiveCli,
           lastAttemptStartedAt,
           Date.now()
         );
@@ -5539,6 +5588,7 @@ export class WorkflowRunner {
             step.name,
             lastEffectiveAgentDef,
             lastEffectiveCwd,
+            lastEffectiveCli,
             lastAttemptStartedAt,
             Date.now()
           );
@@ -5576,6 +5626,7 @@ export class WorkflowRunner {
         step.name,
         lastEffectiveAgentDef,
         lastEffectiveCwd,
+        lastEffectiveCli,
         lastAttemptStartedAt,
         Date.now()
       );
@@ -5621,11 +5672,18 @@ export class WorkflowRunner {
       );
       return null;
     }
+    if (!rawDiagnosticDef.cli) {
+      this.log(
+        `[${step.name}] Diagnostic agent "${diagnosticAgentName}" is persona-based and cannot run non-interactively`
+      );
+      return null;
+    }
 
-    const diagnosticAgentDef: AgentDefinition = {
+    const diagnosticAgentDef = {
       ...WorkflowRunner.resolveAgentDef(rawDiagnosticDef),
+      cli: rawDiagnosticDef.cli,
       interactive: false,
-    };
+    } as AgentDefinition;
     const verificationCommand =
       verification.type === 'custom' ? verification.value : `${verification.type}: ${verification.value}`;
     const diagnosticTimeout = verification.diagnosticTimeout ?? 60_000;
@@ -5661,6 +5719,7 @@ export class WorkflowRunner {
         step.name,
         diagnosticAgentDef,
         diagnosticCwd,
+        diagnosticAgentDef.cli,
         startedAt,
         Date.now()
       );
@@ -5688,6 +5747,7 @@ export class WorkflowRunner {
         step.name,
         diagnosticAgentDef,
         diagnosticCwd,
+        diagnosticAgentDef.cli,
         startedAt,
         Date.now()
       );
@@ -6983,6 +7043,7 @@ export class WorkflowRunner {
    * Explicit fields on the definition always win over preset-inferred defaults.
    */
   private static resolveAgentDef(def: AgentDefinition): AgentDefinition {
+    if (!def.cli) return def;
     // Resolve "cursor" alias to whichever cursor agent binary is in PATH
     const resolvedCli: AgentCli = def.cli === 'cursor' ? resolveCursorCli() : def.cli;
 
@@ -7037,6 +7098,10 @@ export class WorkflowRunner {
     step: WorkflowStep,
     timeoutMs?: number
   ): Promise<SpawnResult> {
+    const agentCli = agentDef.cli;
+    if (!agentCli) {
+      throw new Error(`Persona agent "${agentDef.name}" cannot run non-interactively`);
+    }
     const agentName = `${step.name}-${this.generateShortId()}`;
     const modelArgs = agentDef.constraints?.model ? ['--model', agentDef.constraints.model] : [];
 
@@ -7064,7 +7129,7 @@ export class WorkflowRunner {
       '- Output only status messages without the actual deliverable content';
 
     const { cmd, args } = WorkflowRunner.buildNonInteractiveCommand(
-      agentDef.cli,
+      agentCli,
       taskWithDeliverable,
       modelArgs
     );
@@ -7075,14 +7140,14 @@ export class WorkflowRunner {
     const logStream = createWriteStream(logPath, { flags: 'a' });
 
     // Register in workers.json with interactive: false metadata
-    this.registerWorker(agentName, agentDef.cli, step.task ?? '', undefined, false);
+    this.registerWorker(agentName, agentCli, step.task ?? '', undefined, false);
 
     // Register agent in Relaycast for observability
     let stopHeartbeat: (() => void) | undefined;
     if (this.relayApiKey) {
       const agentClient = await this.registerRelaycastExternalAgent(
         agentName,
-        `Non-interactive workflow agent for step "${step.name}" (${agentDef.cli})`
+        `Non-interactive workflow agent for step "${step.name}" (${agentCli})`
       ).catch((err) => {
         console.warn(`[WorkflowRunner] Failed to register ${agentName} in Relaycast:`, err?.message ?? err);
         return null;
@@ -7100,7 +7165,7 @@ export class WorkflowRunner {
     const proxyMode = await this.resolveAgentProxyMode(agentDef, this.currentConfig);
     const env = { ...(this.getRelayEnv(proxyMode) ?? filteredEnv()) };
     if (proxyMode?.url && proxyMode.token) {
-      Object.assign(env, resolveProxyEnv(agentDef.cli, proxyMode.url, proxyMode.token));
+      Object.assign(env, resolveProxyEnv(agentCli, proxyMode.url, proxyMode.token));
     }
     const agentToken = this.agentTokens.get(agentDef.name);
     const mount = this.agentMounts.get(agentDef.name);
@@ -7128,7 +7193,7 @@ export class WorkflowRunner {
         exitSignal,
       } = await new Promise<{ stdout: string; exitCode?: number; exitSignal?: string }>((resolve, reject) => {
         const spawnEnv =
-          agentDef.cli === 'opencode'
+          agentCli === 'opencode'
             ? {
                 ...env,
                 OPENCODE_PERMISSION: JSON.stringify({ '*': 'allow', external_directory: { '*': 'allow' } }),
@@ -7141,7 +7206,7 @@ export class WorkflowRunner {
         });
 
         // Update workers.json with PID now that we have it
-        this.registerWorker(agentName, agentDef.cli, step.task ?? '', child.pid, false);
+        this.registerWorker(agentName, agentCli, step.task ?? '', child.pid, false);
 
         // Wire abort signal so runner.abort() kills the child process
         const abortSignal = this.abortController?.signal;
@@ -7216,7 +7281,7 @@ export class WorkflowRunner {
             return;
           }
 
-          const cliDef = getCliDefinition(agentDef.cli);
+          const cliDef = getCliDefinition(agentCli);
           if (code !== 0 && code !== null && !cliDef?.ignoreExitCode) {
             const stderr = stderrChunks.join('');
             reject(
@@ -7270,6 +7335,14 @@ export class WorkflowRunner {
     timeoutMs?: number,
     options: SpawnAndWaitOptions = {}
   ): Promise<SpawnResult> {
+    const personaResolution = agentDef.persona
+      ? resolveWorkflowPersona(agentDef.persona, this.resolveExecutionCwd(step, agentDef))
+      : undefined;
+    const agentCli = personaResolution?.cli ?? agentDef.cli;
+    if (!agentCli) {
+      throw new Error(`Agent "${agentDef.name}" did not resolve to a launchable CLI`);
+    }
+
     // Branch: non-interactive agents run as simple subprocesses
     if (agentDef.interactive === false) {
       return this.execNonInteractive(agentDef, step, timeoutMs);
@@ -7297,21 +7370,21 @@ export class WorkflowRunner {
       [...WorkflowRunner.HUB_ROLES].some((r) => new RegExp(`\\b${r}\\b`).test(role));
     const pattern = this.currentConfig?.swarm.pattern;
     const isHubPattern = pattern && WorkflowRunner.HUB_PATTERNS.has(pattern);
-    const usesHeadlessWorkflowSpawner = agentDef.cli === 'opencode';
+    const usesHeadlessWorkflowSpawner = agentCli === 'opencode';
     const humanAssistanceConfig = this.resolveHumanAssistanceConfig(step);
     const humanAssistanceGuidance = this.buildHumanAssistanceGuidance(humanAssistanceConfig);
     const integrationSubscriptionGuidance = this.buildIntegrationSubscriptionGuidance(agentDef);
     const delegationGuidance =
       usesHeadlessWorkflowSpawner || (!isHub && isHubPattern)
         ? ''
-        : this.buildDelegationGuidance(agentDef.cli, timeoutMs);
+        : this.buildDelegationGuidance(agentCli, timeoutMs);
 
     // Non-claude CLIs (codex, gemini, etc.) don't auto-register with Relaycast
     // via the MCP system prompt the way claude does. Inject an explicit preamble
     // so they call register_agent() before any other relay tool.
     const relayRegistrationNote = usesHeadlessWorkflowSpawner
       ? ''
-      : this.buildRelayRegistrationNote(agentDef.cli, agentName);
+      : this.buildRelayRegistrationNote(agentCli, agentName);
 
     const interactiveTaskBase = step.task ?? '';
     const taskWithExit = usesHeadlessWorkflowSpawner
@@ -7330,6 +7403,7 @@ export class WorkflowRunner {
     const preparedTask = this.prepareInteractiveSpawnTask(agentName, taskWithExit);
 
     // Register PTY output listener before spawning so we capture everything
+    this.readyRuntimeAgents.delete(agentName);
     this.ptyOutputBuffers.set(agentName, []);
 
     // Open a log file so `agents:logs <name>` works for workflow-spawned agents
@@ -7363,12 +7437,17 @@ export class WorkflowRunner {
     let ptyChunks: string[] = [];
     let agentReleased = false;
     let completedWithoutSpawnError = false;
+    let activePersona: ActiveWorkflowPersona | undefined;
+    const stepDeadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
 
     try {
       const agentCwd = this.resolveExecutionCwd(step, agentDef);
+      activePersona = personaResolution
+        ? await activateWorkflowPersona(personaResolution, agentCwd)
+        : undefined;
       const interactiveSpawnPolicy = resolveSpawnPolicy({
         AGENT_NAME: agentName,
-        AGENT_CLI: agentDef.cli,
+        AGENT_CLI: agentCli,
         RELAY_API_KEY: this.relayApiKey ?? 'workflow-runner',
         AGENT_CHANNELS: (agentChannels ?? []).join(','),
       });
@@ -7376,28 +7455,57 @@ export class WorkflowRunner {
       const baseEnv = this.getRelayEnv(proxyMode);
       const proxyEnvOverrides =
         proxyMode?.url && proxyMode.token
-          ? resolveProxyEnv(agentDef.cli, proxyMode.url, proxyMode.token)
+          ? resolveProxyEnv(agentCli, proxyMode.url, proxyMode.token)
           : undefined;
       const spawnOptions = {
         name: agentName,
-        model: agentDef.constraints?.model,
-        args: interactiveSpawnPolicy.args,
+        model: personaResolution?.model ?? agentDef.constraints?.model,
+        args: personaResolution?.args ?? interactiveSpawnPolicy.args,
         channels: agentChannels,
         task: preparedTask.spawnTaskText,
         idleThresholdSecs: agentDef.constraints?.idleThresholdSecs,
-        cwd: agentCwd,
+        cwd: activePersona?.cwd ?? agentCwd,
         agentToken: this.agentTokens.get(agentDef.name),
-        env: proxyEnvOverrides ? { ...baseEnv, ...proxyEnvOverrides } : baseEnv,
+        env: {
+          ...baseEnv,
+          ...(personaResolution?.env ?? {}),
+          ...(proxyEnvOverrides ?? {}),
+        },
       };
-      this.log(`[${step.name}] Spawning ${agentDef.cli} (pty)`);
+      this.log(
+        `[${step.name}] Spawning ${personaResolution ? `persona ${personaResolution.resolved.spec.id}` : agentCli} (pty)`
+      );
       agent = new WorkflowAgentHandle(
         await this.withBrokerRecovery(`spawning agent for step "${step.name}"`, (relay) =>
           relay.spawnPty({
             ...(spawnOptions as Record<string, unknown>),
-            cli: agentDef.cli,
+            cli: agentCli,
           } as SpawnPtyInput)
         )
       );
+
+      if (personaResolution) {
+        const remainingForReadiness =
+          stepDeadline === undefined ? 90_000 : Math.max(0, Math.min(stepDeadline - Date.now(), 90_000));
+        const ready = await this.waitForRuntimeAgentReady(
+          agent,
+          remainingForReadiness
+        );
+        if (ready !== 'ready') {
+          throw new Error(
+            `Persona "${personaResolution.resolved.spec.id}" failed harness readiness (${ready})`
+          );
+        }
+        const registered = await this.withBrokerRecovery(
+          `verifying broker registration for persona step "${step.name}"`,
+          (relay) => relay.listAgents()
+        );
+        if (!registered.some((candidate) => candidate.name === agent?.name)) {
+          throw new Error(
+            `Persona "${personaResolution.resolved.spec.id}" did not register with the broker`
+          );
+        }
+      }
 
       // Re-key PTY maps if broker assigned a different name than requested
       if (agent.name !== agentName) {
@@ -7477,13 +7585,13 @@ export class WorkflowRunner {
       } catch {
         // Best-effort PID lookup
       }
-      this.registerWorker(agentName, agentDef.cli, step.task ?? '', workerPid);
+      this.registerWorker(agentName, agentCli, step.task ?? '', workerPid);
 
       // Register the spawned agent in Relaycast for observability + start heartbeat
       if (this.relayApiKey) {
         const agentClient = await this.registerRelaycastExternalAgent(
           liveAgent.name,
-          `Workflow agent for step "${step.name}" (${agentDef.cli})`
+          `Workflow agent for step "${step.name}" (${agentCli})`
         ).catch((err) => {
           console.warn(
             `[WorkflowRunner] Failed to register ${liveAgent.name} in Relaycast:`,
@@ -7515,7 +7623,7 @@ export class WorkflowRunner {
         agent,
         agentDef,
         step,
-        timeoutMs,
+        stepDeadline === undefined ? timeoutMs : Math.max(0, stepDeadline - Date.now()),
         preparedTask.promptTaskText,
         options.preserveOnIdle ?? this.shouldPreserveIdleSupervisor(agentDef, step, options.evidenceRole)
       );
@@ -7604,9 +7712,15 @@ export class WorkflowRunner {
       this.unregisterWorker(agentName);
       this.supervisedRuntimeAgents.delete(agentName);
       this.runtimeStepAgents.delete(agentName);
+      this.readyRuntimeAgents.delete(agentName);
       if (preparedTask.taskTmpFile) {
         await unlink(preparedTask.taskTmpFile).catch(() => undefined);
       }
+      await activePersona?.dispose().catch((error: unknown) => {
+        this.log(
+          `[${step.name}] Persona runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      });
     }
 
     let output: string;
@@ -7642,7 +7756,24 @@ export class WorkflowRunner {
       exitCode: agent?.exitCode,
       exitSignal: agent?.exitSignal,
       promptTaskText: preparedTask.promptTaskText,
+      ...(activePersona ? { runtimeCwd: activePersona.cwd } : {}),
+      cli: agentCli,
     };
+  }
+
+  private async waitForRuntimeAgentReady(
+    agent: WorkflowAgentHandle,
+    timeoutMs: number
+  ): Promise<'ready' | 'exited' | 'timeout' | 'aborted'> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.readyRuntimeAgents.has(agent.name)) return 'ready';
+      if (agent.exitCode !== undefined || agent.exitSignal !== undefined) return 'exited';
+      if (this.abortController?.signal.aborted) return 'aborted';
+      await sleepMs(25);
+    }
+    if (this.abortController?.signal.aborted) return 'aborted';
+    return this.readyRuntimeAgents.has(agent.name) ? 'ready' : 'timeout';
   }
 
   private resolveRelayfileRuntimeConfig(config: RelayYamlConfig | undefined): RelayfileRuntimeConfig | undefined {
@@ -9843,14 +9974,18 @@ export class WorkflowRunner {
     stepName: string,
     agentDef: AgentDefinition | undefined,
     cwd: string | undefined,
+    cliOverride: AgentCli | undefined,
     startedAt: number | undefined,
     completedAt: number
   ): Promise<void> {
     if (!agentDef || !cwd || !startedAt) return;
 
     try {
+      const cli = cliOverride ?? agentDef.cli ??
+        (agentDef.persona ? resolveWorkflowPersona(agentDef.persona, cwd).cli : undefined);
+      if (!cli) return;
       const report = await collectCliSession({
-        cli: agentDef.cli,
+        cli,
         cwd,
         startedAt,
         completedAt,

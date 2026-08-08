@@ -57,6 +57,8 @@
     "@agent-relay/harness-driver": "^8.2.0",
     "@agent-relay/harnesses": "^8.2.0",
     "@agent-relay/sdk": "^8.2.0",
+    "@agentworkforce/persona-kit": "^4.1.38",
+    "@agentworkforce/persona-registry": "^4.1.38",
     "@relaycast/sdk": "^1.1.0",
     "@relayfile/sdk": "^0.8.0",
     "@relayflows/browser-primitive": "1.0.5",

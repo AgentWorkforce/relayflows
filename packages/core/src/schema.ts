@@ -44,10 +44,9 @@ export interface AgentCredentialConfig {
   provider?: string;
 }
 
-/** Definition of an agent participating in a workflow. */
-export interface AgentDefinition {
+/** Fields shared by raw-CLI and persona-backed workflow agents. */
+interface AgentDefinitionBase {
   name: string;
-  cli: AgentCli;
   role?: string;
   task?: string;
   channels?: string[];
@@ -87,6 +86,23 @@ export interface AgentDefinition {
   /** System prompt / skills for API-mode agents (cli: 'api'). */
   skills?: string;
 }
+
+/** Definition of an agent participating in a workflow. */
+export type AgentDefinition =
+  | (AgentDefinitionBase & {
+      /** Raw harness launch. Mutually exclusive with `persona` in workflow YAML. */
+      cli: AgentCli;
+      persona?: never;
+    })
+  | (Omit<AgentDefinitionBase, 'role' | 'interactive' | 'preset' | 'constraints'> & {
+      /** AgentWorkforce persona id or JSON path. Mutually exclusive with `cli`. */
+      persona: string;
+      cli?: never;
+      role?: never;
+      preset?: never;
+      interactive?: true;
+      constraints?: Omit<AgentConstraints, 'model'>;
+    });
 
 export type AgentCli =
   | 'claude'

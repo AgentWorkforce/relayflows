@@ -43,7 +43,7 @@ describe('WorkflowBuilder.agent()', () => {
         },
       ],
       skills: 'Review TypeScript changes for correctness.',
-    } satisfies Omit<Required<AgentDefinition>, 'cwd'>;
+    } satisfies Omit<Required<AgentDefinition>, 'cwd' | 'persona'>;
     const { name, constraints, ...options } = input;
 
     const config = workflow('agent-round-trip')
@@ -62,6 +62,25 @@ describe('WorkflowBuilder.agent()', () => {
 
     expect(config.agents[0]).toMatchObject({ cwd: './packages/core' });
     expect(config.agents[0]?.workdir).toBeUndefined();
+  });
+
+  it('accepts a persona in place of cli and role', () => {
+    const config = workflow('persona-agent')
+      .agent('integrations', { persona: 'nango-integrations' })
+      .step('sync', { agent: 'integrations', task: 'Fix the failed sync' })
+      .toConfig();
+
+    expect(config.agents[0]).toEqual({
+      name: 'integrations',
+      persona: 'nango-integrations',
+    });
+  });
+
+  it('keeps persona-only options unrepresentable in the builder API', () => {
+    // @ts-expect-error Persona agents cannot use non-interactive CLI presets.
+    workflow('invalid-persona-preset').agent('integrations', { persona: 'nango-integrations', preset: 'worker' });
+    // @ts-expect-error Persona agents are always interactive.
+    workflow('invalid-persona-interactive').agent('integrations', { persona: 'nango-integrations', interactive: false });
   });
 
   it('rejects mutually exclusive cwd and workdir options', () => {

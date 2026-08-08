@@ -394,8 +394,23 @@ export class TemplateRegistry {
     }
 
     for (const agent of rawConfig.agents) {
-      if (!isRecord(agent) || typeof agent.name !== 'string' || typeof agent.cli !== 'string') {
+      if (!isRecord(agent) || typeof agent.name !== 'string') {
         throw new Error(`Template at ${source} contains an invalid agent definition`);
+      }
+      const hasCli = typeof agent.cli === 'string' && agent.cli.trim().length > 0;
+      const hasPersona = typeof agent.persona === 'string' && agent.persona.trim().length > 0;
+      if ((agent.cli !== undefined && !hasCli) || (agent.persona !== undefined && !hasPersona)) {
+        throw new Error(`Template at ${source} contains an invalid agent definition`);
+      }
+      if (hasCli === hasPersona) {
+        throw new Error(`Template at ${source} contains an invalid agent definition`);
+      }
+      if (hasPersona && (agent.role !== undefined || agent.preset !== undefined || agent.interactive === false)) {
+        throw new Error(`Template at ${source} contains an invalid persona agent definition`);
+      }
+      const constraints = isRecord(agent.constraints) ? agent.constraints : undefined;
+      if (hasPersona && constraints?.model !== undefined) {
+        throw new Error(`Template at ${source} contains an invalid persona agent definition`);
       }
     }
 

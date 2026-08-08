@@ -217,6 +217,11 @@ async function runCommand(command: SpawnCommand, opts: ShellOpts): Promise<Spawn
 
 export function createProcessSpawner(deps: ProcessSpawnerDeps): ProcessSpawner {
   const buildAgentCommand = (agent: AgentDefinition, task: string): SpawnCommand => {
+    if (!agent.cli) {
+      throw new Error(
+        `ProcessSpawner cannot execute persona agent "${agent.name}" without an activated persona runtime.`
+      );
+    }
     const extraArgs = agent.constraints?.model ? ['--model', agent.constraints.model] : [];
     const [bin, ...args] = buildCommand(agent.cli, extraArgs, task);
     return { bin, args };
