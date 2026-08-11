@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ChannelMessenger,
   formatError,
+  formatObserverGuidance,
   formatStepOutput,
+  scrubSecrets,
   sendToChannel,
   truncateMessage,
 } from '../channel-messenger.js';
@@ -40,6 +42,42 @@ describe('channel messenger helpers', () => {
     const formatted = formatStepOutput('deploy', output);
     expect(formatted).toContain('[REDACTED]');
     expect(formatted).not.toContain('ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ');
+  });
+
+  it.each([
+    'rk_live_0123456789abcdef',
+    'at_live_0123456789abcdef',
+    'nt_live_0123456789abcdef',
+    'ot_live_0123456789abcdef',
+    'cld_at_0123456789abcdef',
+    'rth_at_0123456789abcdef',
+    'ocl_node_enr_0123456789abcdef',
+    'br_0123456789abcdef',
+  ])('scrubSecrets redacts Relay credential value %s', (credential) => {
+    const scrubbed = scrubSecrets(`request denied for ${credential}`);
+    expect(scrubbed).toBe('request denied for [REDACTED]');
+    expect(scrubbed).not.toContain(credential);
+  });
+
+  it.each([
+    'broker started on port 3888',
+    'the library is at ./br',
+    'abbreviation',
+    'number_of_brokers=4',
+    'https://agentrelay.com/observer',
+  ])('scrubSecrets preserves non-secret output %s', (text) => {
+    expect(scrubSecrets(text)).toBe(text);
+  });
+
+  it('omits credential-bearing observer links from auto-created workspace guidance', () => {
+    const guidance = formatObserverGuidance('workflow-room');
+
+    expect(guidance).toEqual([
+      'Workspace created for this workflow.',
+      '  Observation: requires a separately provisioned, read-only observer token',
+      '  Channel: workflow-room',
+    ]);
+    expect(guidance.join('\n')).not.toMatch(/observer\?key=|\[REDACTED\]/);
   });
 
   it('formatError normalizes unknown errors', () => {
