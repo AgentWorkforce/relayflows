@@ -1,6 +1,6 @@
 {
   "name": "relayflows",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "Agent Relay workflow engine and CLI",
   "type": "module",
