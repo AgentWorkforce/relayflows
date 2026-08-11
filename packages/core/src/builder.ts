@@ -343,6 +343,15 @@ export class WorkflowBuilder {
       throw new Error(`Agent "${name}" must define exactly one of "cli" or "persona"`);
     }
 
+    const sharedConstraints: Omit<AgentConstraints, 'model'> = {};
+    if (runtimeOptions.maxTokens !== undefined)
+      sharedConstraints.maxTokens = runtimeOptions.maxTokens;
+    if (runtimeOptions.timeoutMs !== undefined)
+      sharedConstraints.timeoutMs = runtimeOptions.timeoutMs;
+    if (runtimeOptions.retries !== undefined) sharedConstraints.retries = runtimeOptions.retries;
+    if (runtimeOptions.idleThresholdSecs !== undefined)
+      sharedConstraints.idleThresholdSecs = runtimeOptions.idleThresholdSecs;
+
     let def: AgentDefinition;
     if (runtimeOptions.persona !== undefined) {
       if (
@@ -355,26 +364,19 @@ export class WorkflowBuilder {
           `Persona agent "${name}" cannot define "role", "model", "preset", or "interactive: false"`
         );
       }
-      const constraints: Omit<AgentConstraints, 'model'> = {};
-      if (runtimeOptions.maxTokens !== undefined) constraints.maxTokens = runtimeOptions.maxTokens;
-      if (runtimeOptions.timeoutMs !== undefined) constraints.timeoutMs = runtimeOptions.timeoutMs;
-      if (runtimeOptions.retries !== undefined) constraints.retries = runtimeOptions.retries;
-      if (runtimeOptions.idleThresholdSecs !== undefined)
-        constraints.idleThresholdSecs = runtimeOptions.idleThresholdSecs;
       def = {
         name,
         persona: runtimeOptions.persona,
         ...(runtimeOptions.interactive === true ? { interactive: true } : {}),
-        ...(Object.keys(constraints).length > 0 ? { constraints } : {}),
+        ...(Object.keys(sharedConstraints).length > 0
+          ? { constraints: sharedConstraints }
+          : {}),
       };
     } else {
-      const constraints: AgentConstraints = {};
-      if (runtimeOptions.model !== undefined) constraints.model = runtimeOptions.model;
-      if (runtimeOptions.maxTokens !== undefined) constraints.maxTokens = runtimeOptions.maxTokens;
-      if (runtimeOptions.timeoutMs !== undefined) constraints.timeoutMs = runtimeOptions.timeoutMs;
-      if (runtimeOptions.retries !== undefined) constraints.retries = runtimeOptions.retries;
-      if (runtimeOptions.idleThresholdSecs !== undefined)
-        constraints.idleThresholdSecs = runtimeOptions.idleThresholdSecs;
+      const constraints: AgentConstraints = {
+        ...sharedConstraints,
+        ...(runtimeOptions.model !== undefined ? { model: runtimeOptions.model } : {}),
+      };
       def = {
         name,
         cli: runtimeOptions.cli!,
