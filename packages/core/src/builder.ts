@@ -333,17 +333,64 @@ export class WorkflowBuilder {
 
   /** Add an agent definition. */
   agent(name: string, options: AgentOptions): this {
-    const def = {
-      name,
-      ...(options.cli ? { cli: options.cli } : {}),
-      ...(options.persona ? { persona: options.persona } : {}),
-    } as AgentDefinition;
+    const runtimeOptions = options as AgentOptionsBase & {
+      cli?: AgentCli;
+      persona?: string;
+    };
+    const hasCli = runtimeOptions.cli !== undefined;
+    const hasPersona = runtimeOptions.persona !== undefined;
+    if (hasCli === hasPersona) {
+      throw new Error(`Agent "${name}" must define exactly one of "cli" or "persona"`);
+    }
 
-    if (options.role !== undefined) def.role = options.role;
+    const sharedConstraints: Omit<AgentConstraints, 'model'> = {};
+    if (runtimeOptions.maxTokens !== undefined)
+      sharedConstraints.maxTokens = runtimeOptions.maxTokens;
+    if (runtimeOptions.timeoutMs !== undefined)
+      sharedConstraints.timeoutMs = runtimeOptions.timeoutMs;
+    if (runtimeOptions.retries !== undefined) sharedConstraints.retries = runtimeOptions.retries;
+    if (runtimeOptions.idleThresholdSecs !== undefined)
+      sharedConstraints.idleThresholdSecs = runtimeOptions.idleThresholdSecs;
+
+    let def: AgentDefinition;
+    if (runtimeOptions.persona !== undefined) {
+      if (
+        runtimeOptions.role !== undefined ||
+        runtimeOptions.model !== undefined ||
+        runtimeOptions.preset !== undefined ||
+        runtimeOptions.interactive === false
+      ) {
+        throw new Error(
+          `Persona agent "${name}" cannot define "role", "model", "preset", or "interactive: false"`
+        );
+      }
+      def = {
+        name,
+        persona: runtimeOptions.persona,
+        ...(runtimeOptions.interactive === true ? { interactive: true } : {}),
+        ...(Object.keys(sharedConstraints).length > 0
+          ? { constraints: sharedConstraints }
+          : {}),
+      };
+    } else {
+      const constraints: AgentConstraints = {
+        ...sharedConstraints,
+        ...(runtimeOptions.model !== undefined ? { model: runtimeOptions.model } : {}),
+      };
+      def = {
+        name,
+        cli: runtimeOptions.cli!,
+        ...(runtimeOptions.role !== undefined ? { role: runtimeOptions.role } : {}),
+        ...(runtimeOptions.preset !== undefined ? { preset: runtimeOptions.preset } : {}),
+        ...(runtimeOptions.interactive !== undefined
+          ? { interactive: runtimeOptions.interactive }
+          : {}),
+        ...(Object.keys(constraints).length > 0 ? { constraints } : {}),
+      };
+    }
+
     if (options.task !== undefined) def.task = options.task;
     if (options.channels !== undefined) def.channels = options.channels;
-    if (options.preset !== undefined) def.preset = options.preset;
-    if (options.interactive !== undefined) def.interactive = options.interactive;
     if (options.skills !== undefined) def.skills = options.skills;
     if (options.permissions !== undefined) def.permissions = options.permissions;
     if (options.cwd !== undefined && options.workdir !== undefined) {
@@ -355,23 +402,6 @@ export class WorkflowBuilder {
     if (options.credentials !== undefined) def.credentials = options.credentials;
     if (options.watch !== undefined) def.watch = options.watch;
     if (options.subscriptions !== undefined) def.subscriptions = options.subscriptions;
-
-    if (
-      options.model !== undefined ||
-      options.maxTokens !== undefined ||
-      options.timeoutMs !== undefined ||
-      options.retries !== undefined ||
-      options.idleThresholdSecs !== undefined
-    ) {
-      const constraints: AgentConstraints = {};
-      if (options.model !== undefined) constraints.model = options.model;
-      if (options.maxTokens !== undefined) constraints.maxTokens = options.maxTokens;
-      if (options.timeoutMs !== undefined) constraints.timeoutMs = options.timeoutMs;
-      if (options.retries !== undefined) constraints.retries = options.retries;
-      if (options.idleThresholdSecs !== undefined)
-        constraints.idleThresholdSecs = options.idleThresholdSecs;
-      def.constraints = constraints;
-    }
 
     this._agents.push(def);
     return this;

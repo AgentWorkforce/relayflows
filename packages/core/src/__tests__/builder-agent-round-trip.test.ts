@@ -76,11 +76,33 @@ describe('WorkflowBuilder.agent()', () => {
     });
   });
 
-  it('keeps persona-only options unrepresentable in the builder API', () => {
-    // @ts-expect-error Persona agents cannot use non-interactive CLI presets.
-    workflow('invalid-persona-preset').agent('integrations', { persona: 'nango-integrations', preset: 'worker' });
-    // @ts-expect-error Persona agents are always interactive.
-    workflow('invalid-persona-interactive').agent('integrations', { persona: 'nango-integrations', interactive: false });
+  it('rejects persona-only options at runtime as well as in the builder API', () => {
+    expect(() =>
+      // @ts-expect-error Persona agents cannot use non-interactive CLI presets.
+      workflow('invalid-persona-preset').agent('integrations', {
+        persona: 'nango-integrations',
+        preset: 'worker',
+      })
+    ).toThrow('Persona agent "integrations" cannot define');
+    expect(() =>
+      // @ts-expect-error Persona agents are always interactive.
+      workflow('invalid-persona-interactive').agent('integrations', {
+        persona: 'nango-integrations',
+        interactive: false,
+      })
+    ).toThrow('Persona agent "integrations" cannot define');
+  });
+
+  it('rejects ambiguous untyped agent definitions at runtime', () => {
+    expect(() =>
+      workflow('invalid-both').agent('integrations', {
+        cli: 'codex',
+        persona: 'nango-integrations',
+      } as never)
+    ).toThrow('Agent "integrations" must define exactly one of "cli" or "persona"');
+    expect(() => workflow('invalid-neither').agent('integrations', {} as never)).toThrow(
+      'Agent "integrations" must define exactly one of "cli" or "persona"'
+    );
   });
 
   it('rejects mutually exclusive cwd and workdir options', () => {
