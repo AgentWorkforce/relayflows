@@ -5,6 +5,7 @@ import type { RuntimeSpawnOptions } from '@agent-relay/harness-driver';
 import type {
   AgentCli,
   AgentCredentialConfig,
+  AgentConstraints,
   AgentDefinition,
   AgentPermissions,
   AgentPreset,
@@ -332,11 +333,11 @@ export class WorkflowBuilder {
 
   /** Add an agent definition. */
   agent(name: string, options: AgentOptions): this {
-    const def: AgentDefinition = {
+    const def = {
       name,
       ...(options.cli ? { cli: options.cli } : {}),
       ...(options.persona ? { persona: options.persona } : {}),
-    };
+    } as AgentDefinition;
 
     if (options.role !== undefined) def.role = options.role;
     if (options.task !== undefined) def.task = options.task;
@@ -362,13 +363,14 @@ export class WorkflowBuilder {
       options.retries !== undefined ||
       options.idleThresholdSecs !== undefined
     ) {
-      def.constraints = {};
-      if (options.model !== undefined) def.constraints.model = options.model;
-      if (options.maxTokens !== undefined) def.constraints.maxTokens = options.maxTokens;
-      if (options.timeoutMs !== undefined) def.constraints.timeoutMs = options.timeoutMs;
-      if (options.retries !== undefined) def.constraints.retries = options.retries;
+      const constraints: AgentConstraints = {};
+      if (options.model !== undefined) constraints.model = options.model;
+      if (options.maxTokens !== undefined) constraints.maxTokens = options.maxTokens;
+      if (options.timeoutMs !== undefined) constraints.timeoutMs = options.timeoutMs;
+      if (options.retries !== undefined) constraints.retries = options.retries;
       if (options.idleThresholdSecs !== undefined)
-        def.constraints.idleThresholdSecs = options.idleThresholdSecs;
+        constraints.idleThresholdSecs = options.idleThresholdSecs;
+      def.constraints = constraints;
     }
 
     this._agents.push(def);

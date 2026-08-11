@@ -555,6 +555,7 @@ agents:
                 agent: 'integration-expert',
                 task: 'Fix the failed sync',
                 timeoutMs: 1,
+                retries: 0,
               },
             ],
           },
