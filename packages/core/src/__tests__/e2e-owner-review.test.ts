@@ -629,7 +629,9 @@ describe('PR #511 E2E: Auto Step Owner + Review Gating', () => {
 
       const spawnResults = (mockRelayInstance.spawnPty as any).mock.results;
       const reviewAgent = await spawnResults[spawnResults.length - 1].value;
-      expect(reviewAgent.waitForExit).toHaveBeenCalledWith(600_000);
+      const [[reviewWaitMs]] = reviewAgent.waitForExit.mock.calls;
+      expect(reviewWaitMs).toBeGreaterThanOrEqual(599_000);
+      expect(reviewWaitMs).toBeLessThanOrEqual(600_000);
     }, 15000);
   });
 

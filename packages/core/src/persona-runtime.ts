@@ -38,7 +38,7 @@ export function resolveWorkflowPersona(reference: string, cwd: string): Resolved
     ? built
     : { ...built, mount: { ignoredPatterns: [], readonlyPatterns: [] } };
   const args = plan.initialPrompt ? [...plan.args, plan.initialPrompt] : [...plan.args];
-  if (plan.cli === 'api' || !getCliDefinition(plan.cli)) {
+  if (!getCliDefinition(plan.cli)) {
     throw new Error(
       `Persona "${resolved.spec.id}" resolves to unsupported interactive CLI "${plan.cli}"`
     );

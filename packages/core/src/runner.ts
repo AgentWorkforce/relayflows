@@ -2125,7 +2125,7 @@ export class WorkflowRunner {
       return explicitProvider;
     }
 
-    const model = agentDef.constraints?.model?.trim().toLowerCase() ?? '';
+    const model = WorkflowRunner.agentConstraintModel(agentDef)?.trim().toLowerCase() ?? '';
     if (model.includes('openrouter')) {
       return 'openrouter';
     }
@@ -4566,8 +4566,12 @@ export class WorkflowRunner {
   }
 
   private async runDeterministicRepairAgent(context: DeterministicRepairContext): Promise<void> {
-    const repairAgent: AgentDefinition = {
+    if (!context.agentDef.cli) {
+      throw new Error(`Repair agent "${context.agentDef.name}" must be a raw CLI agent`);
+    }
+    const repairAgent: Extract<AgentDefinition, { cli: AgentCli }> = {
       ...context.agentDef,
+      cli: context.agentDef.cli,
       interactive: false,
     };
     const repairPrompt = this.buildDeterministicRepairPrompt(context);
@@ -4661,8 +4665,12 @@ export class WorkflowRunner {
   }
 
   private async runAgentStepRepairAgent(context: AgentStepRepairContext): Promise<void> {
-    const repairAgent: AgentDefinition = {
+    if (!context.agentDef.cli) {
+      throw new Error(`Repair agent "${context.agentDef.name}" must be a raw CLI agent`);
+    }
+    const repairAgent: Extract<AgentDefinition, { cli: AgentCli }> = {
       ...context.agentDef,
+      cli: context.agentDef.cli,
       interactive: false,
     };
     const repairPrompt = this.buildAgentStepRepairPrompt(context);
@@ -7056,6 +7064,10 @@ export class WorkflowRunner {
     return { ...defaults, ...def, cli: resolvedCli } as AgentDefinition;
   }
 
+  private static agentConstraintModel(def: AgentDefinition): string | undefined {
+    return def.cli ? def.constraints?.model : undefined;
+  }
+
   /**
    * Returns a preset-specific prefix that is prepended to the non-interactive
    * enforcement block in execNonInteractive.
@@ -7459,7 +7471,7 @@ export class WorkflowRunner {
           : undefined;
       const spawnOptions = {
         name: agentName,
-        model: personaResolution?.model ?? agentDef.constraints?.model,
+        model: personaResolution?.model ?? WorkflowRunner.agentConstraintModel(agentDef),
         args: personaResolution?.args ?? interactiveSpawnPolicy.args,
         channels: agentChannels,
         task: preparedTask.spawnTaskText,
