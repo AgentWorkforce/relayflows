@@ -2,6 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
+import { scrubForChannel } from './channel-messenger.js';
 import type {
   CompletionEvidenceSignal,
   CompletionEvidenceToolSideEffect,
@@ -10,6 +11,26 @@ import type {
 } from './types.js';
 
 export type { VerificationCheck } from './types.js';
+
+/** How much of a failing step's output to quote inline. The full text is on disk. */
+const OUTPUT_EXCERPT_CHARS = 400;
+
+/**
+ * Describe what a step actually produced, for a verification-failure message.
+ *
+ * "output does not contain X" is indistinguishable between "the step returned
+ * nothing" and "the step returned a considered answer that simply wasn't X" — and
+ * those call for opposite responses. This makes the distinction explicit and
+ * quotes the tail, where a verdict marker would be if there were one. Secrets are
+ * scrubbed because failure messages reach the run log and the channel.
+ */
+export function describeOutputForFailure(output: string): string {
+  const scrubbed = scrubForChannel(output ?? '').trim();
+  if (!scrubbed) return ' The step produced no output.';
+  const excerpt =
+    scrubbed.length > OUTPUT_EXCERPT_CHARS ? `…${scrubbed.slice(-OUTPUT_EXCERPT_CHARS)}` : scrubbed;
+  return ` The step produced ${scrubbed.length} chars; last ${Math.min(scrubbed.length, OUTPUT_EXCERPT_CHARS)}:\n${excerpt}`;
+}
 
 export interface VerificationResult {
   passed: boolean;
@@ -85,7 +106,10 @@ export function runVerification(
     case 'output_contains': {
       const token = check.value;
       if (!checkOutputContains(output, token, injectedTaskText)) {
-        return fail(`Verification failed for "${stepName}": output does not contain "${token}"`);
+        return fail(
+          `Verification failed for "${stepName}": output does not contain "${token}".` +
+            describeOutputForFailure(output)
+        );
       }
       break;
     }

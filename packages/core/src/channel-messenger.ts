@@ -48,7 +48,11 @@ export function formatError(stepName: string, error: unknown): string {
 const SECRET_PATTERNS = [
   /(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer)\s*[:=]\s*\S+/gi,
   /(?:rk_live_|at_live_|nt_live_|ot_live_|cld_at_|rth_at_|ocl_node_enr_|br_)[a-zA-Z0-9_%-]+(?:\.[a-zA-Z0-9_%-]+)*/g,
-  /(?:sk|pk|rk|ak)[-_][a-zA-Z0-9]{20,}/g,
+  // Body allows `-` and `_` so hyphenated vendor prefixes are covered: the old
+  // `[a-zA-Z0-9]{20,}` stopped at the first hyphen, so `sk-ant-api03-…`
+  // (Anthropic) and `sk-proj-…` (OpenAI) — the two most likely keys to appear in
+  // agent output here — were matched only up to `ant`/`proj` and left unredacted.
+  /\b(?:sk|pk|rk|ak)[-_][a-zA-Z0-9][a-zA-Z0-9_-]{19,}/g,
   /ghp_[a-zA-Z0-9]{36,}/g,
   /gho_[a-zA-Z0-9]{36,}/g,
   /github_pat_[a-zA-Z0-9_]{22,}/g,

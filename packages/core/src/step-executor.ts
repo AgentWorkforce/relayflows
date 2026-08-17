@@ -45,7 +45,12 @@ export interface StepExecutorDeps<TState extends StateLike = StateLike> {
   runId?: string;
   postToChannel?: (text: string) => void;
   persistStepRow?: (stepId: string, patch: Partial<WorkflowStepRow>) => Promise<void>;
-  persistStepOutput?: (runId: string, stepName: string, output: string) => Promise<void>;
+  persistStepOutput?: (
+    runId: string,
+    stepName: string,
+    output: string,
+    status?: StepResult['status']
+  ) => Promise<void>;
   resolveTemplate?: (template: string, context: Record<string, unknown>) => string;
   getStepOutput?: (stepName: string) => string | undefined;
   loadStepOutput?: (runId: string, stepName: string) => string | undefined;
@@ -200,8 +205,12 @@ export class StepExecutor<TState extends StateLike = StateLike> {
       completedAt,
       updatedAt: new Date().toISOString(),
     });
-    if (finalResult.status === 'completed' && this.deps.runId && finalResult.output) {
-      await this.deps.persistStepOutput?.(this.deps.runId, step.name, finalResult.output);
+    // Persist on failure too. A failing step's output is usually the MOST useful
+    // thing in the run — a review lane that returns a considered rejection reads as
+    // "output does not contain PASS", and gating persistence on success meant that
+    // verdict was written nowhere and the operator saw only the mismatch.
+    if (this.deps.runId && finalResult.output) {
+      await this.deps.persistStepOutput?.(this.deps.runId, step.name, finalResult.output, finalResult.status);
     }
 
     if (finalResult.status === 'failed') {

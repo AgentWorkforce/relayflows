@@ -3679,8 +3679,8 @@ export class WorkflowRunner {
         this.runVerification(check, output, stepName, injectedTaskText, options),
       postToChannel: (text) => this.postToChannel(text),
       persistStepRow: async (stepId, patch) => this.db.updateStep(stepId, patch),
-      persistStepOutput: async (lifecycleRunId, stepName, output) =>
-        this.persistStepOutput(lifecycleRunId, stepName, output),
+      persistStepOutput: async (lifecycleRunId, stepName, output, status) =>
+        this.persistStepOutput(lifecycleRunId, stepName, output, status),
       loadStepOutput: (lifecycleRunId, stepName) => this.loadStepOutput(lifecycleRunId, stepName),
       checkAborted: () => this.checkAborted(),
       waitIfPaused: () => this.waitIfPaused(),
@@ -10856,7 +10856,12 @@ export class WorkflowRunner {
   }
 
   /** Persist step output to disk and post full output as a channel message. */
-  private async persistStepOutput(runId: string, stepName: string, output: string): Promise<void> {
+  private async persistStepOutput(
+    runId: string,
+    stepName: string,
+    output: string,
+    status: 'completed' | 'failed' | string = 'completed'
+  ): Promise<void> {
     // 1. Write to disk
     const outputPath = path.join(this.getStepOutputDir(runId), `${stepName}.md`);
     try {
@@ -10876,7 +10881,8 @@ export class WorkflowRunner {
     // 2. Post scrubbed output as a single channel message (most recent tail only)
     const scrubbed = WorkflowRunner.scrubForChannel(output);
     if (scrubbed.length === 0) {
-      this.postToChannel(`**[${stepName}]** Step completed — output written to disk`, { stepName });
+      const verb = status === 'failed' ? 'failed' : 'completed';
+      this.postToChannel(`**[${stepName}]** Step ${verb} — output written to disk`, { stepName });
       return;
     }
 
@@ -10885,8 +10891,9 @@ export class WorkflowRunner {
     // Surface the final output preview in the local workflow log immediately.
     // Some deterministic wrappers grep stdout/stderr for completion sentinels,
     // and fire-and-forget channel delivery can arrive too late for single-step runs.
-    this.log(`[${stepName}] Output:\n\`\`\`\n${preview}\n\`\`\``);
-    this.postToChannel(`**[${stepName}] Output:**\n\`\`\`\n${preview}\n\`\`\``, { stepName });
+    const label = status === 'failed' ? 'Output (FAILED)' : 'Output';
+    this.log(`[${stepName}] ${label}:\n\`\`\`\n${preview}\n\`\`\``);
+    this.postToChannel(`**[${stepName}] ${label}:**\n\`\`\`\n${preview}\n\`\`\``, { stepName });
   }
 
   private async persistAgentReport(runId: string, stepName: string, report: CliSessionReport): Promise<void> {
