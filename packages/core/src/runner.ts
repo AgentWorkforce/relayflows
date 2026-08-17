@@ -8854,7 +8854,8 @@ export class WorkflowRunner {
       if (!runtime) break;
       try {
         // Slack lives on the integration-owning workspace, not the run's throwaway.
-        runtime = await this.redirectToIntegrationWorkspace(runtime);
+        const redirected = await this.redirectToIntegrationWorkspace(runtime);
+        runtime = redirected.runtime;
         // Fail closed rather than parking on a question that cannot be delivered.
         this.assertRelayfileCredentialUsable(runtime, 'Slack human assistance');
         this.log(`Slack human assistance using Relayfile ${this.describeRelayfileCredential(runtime)}`);
@@ -8862,6 +8863,7 @@ export class WorkflowRunner {
           ...input,
           channel,
           runtime,
+          client: redirected.client,
         });
       } catch (err) {
         if (attempt > 0 || !this.isRelayfileAuthExpiredError(err)) throw err;
@@ -8884,8 +8886,10 @@ export class WorkflowRunner {
     mentions?: string[];
     timeoutMs?: number;
     runtime: RelayfileRuntimeConfig;
+    /** Scoped client for a redirected workspace; falls back to the shared one. */
+    client?: RelayFileClient;
   }): Promise<{ answer: { text: string; path?: string; eventId?: string } }> {
-    const client = this.getRelayfileClient();
+    const client = input.client ?? this.getRelayfileClient();
     const runtime = input.runtime;
     const channel = await this.resolveRelayfileSlackChannelId({
       channel: input.channel,
@@ -9404,6 +9408,55 @@ export class WorkflowRunner {
   }
 
   /**
+   * Find a local Relayfile credential minted for a specific workspace.
+   *
+   * The generic resolver stops at the first root {@link resolveRelayfileLocalRoot}
+   * happens to return, which may belong to a different workspace — so asking it
+   * for workspace X and comparing afterwards reports "no credential" even when X's
+   * credential sits in another mount. This scans every known root and matches on
+   * the JWT's `wks` claim, so the answer is about the workspace rather than about
+   * which mount sorted first.
+   */
+  private async findLocalRelayfileCredentialForWorkspace(
+    workspaceId: string
+  ): Promise<RelayfileRuntimeConfig | undefined> {
+    const roots = new Set<string>();
+    const configured = await this.resolveRelayfileLocalRoot(this.currentConfig);
+    if (configured) roots.add(configured);
+
+    // Every Pear-managed workspace mirror, not just the active one.
+    const pearRoot = path.join(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces');
+    const pearEntries = await readdir(pearRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of pearEntries) {
+      if (entry.isDirectory()) roots.add(path.join(pearRoot, entry.name));
+    }
+
+    for (const root of roots) {
+      for (const rel of [
+        path.join('discovery', 'slack', '.relay', 'creds.json'),
+        path.join('slack', '.relay', 'creds.json'),
+      ]) {
+        const raw = await readFile(path.join(root, rel), 'utf8').catch(() => undefined);
+        if (!raw) continue;
+        const parsed = this.tryParseJson(raw);
+        if (!parsed || typeof parsed !== 'object') continue;
+        const token = (parsed as Record<string, unknown>).token;
+        if (typeof token !== 'string' || !token.trim()) continue;
+        if (this.relayfileWorkspaceIdFromJwt(token) !== workspaceId) continue;
+        return {
+          baseUrl: resolveRelayfileBaseUrl({
+            configBaseUrl: this.currentConfig?.integrations?.relayfile?.baseUrl,
+          }),
+          workspaceId,
+          token,
+          source: 'local-creds',
+        };
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Point a Slack human-assistance call at the workspace that owns the Slack
    * integration, when the resolved one demonstrably does not.
    *
@@ -9414,31 +9467,34 @@ export class WorkflowRunner {
    */
   private async redirectToIntegrationWorkspace(
     runtime: RelayfileRuntimeConfig
-  ): Promise<RelayfileRuntimeConfig> {
+  ): Promise<{ runtime: RelayfileRuntimeConfig; client?: RelayFileClient }> {
     const registry = await this.readRelayfileWorkspaceRegistry();
     const choice = chooseIntegrationWorkspace({
       resolvedWorkspaceId: runtime.workspaceId,
       configuredWorkspaceId: this.currentConfig?.integrations?.relayfile?.workspaceId,
       registry,
     });
-    if (choice.workspaceId === runtime.workspaceId) return runtime;
+    if (choice.workspaceId === runtime.workspaceId) return { runtime };
 
-    // Find a credential minted for the target workspace. The local-credentials
-    // files carry their workspace in the JWT's `wks` claim, so this is a match
-    // rather than an assumption.
-    const candidate = await this.resolveRelayfileRuntimeConfigFromLocalCredentials(this.currentConfig);
-    if (!candidate || candidate.workspaceId !== choice.workspaceId) {
+    const candidate = await this.findLocalRelayfileCredentialForWorkspace(choice.workspaceId);
+    if (!candidate) {
       this.log(
         `Slack human assistance: ${choice.reason} No local credential was found for ` +
           `"${choice.workspaceId}", so continuing with "${runtime.workspaceId}".`
       );
-      return runtime;
+      return { runtime };
     }
 
     this.log(`Slack human assistance: ${choice.reason}`);
-    this.relayfileRuntimeConfig = candidate;
-    this.relayfileClient = undefined;
-    return candidate;
+    // Deliberately NOT assigned to this.relayfileRuntimeConfig / relayfileClient.
+    // Those are workflow-wide: overwriting them would leave later
+    // waitForRelayfileEvent gates polling this Slack workspace while the run's
+    // subscriptions and integration mount still belong to the original one. The
+    // redirect is scoped to this request via a dedicated client.
+    return {
+      runtime: candidate,
+      client: new RelayFileClient({ baseUrl: candidate.baseUrl, token: candidate.token }),
+    };
   }
 
   /**
