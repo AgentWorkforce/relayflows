@@ -55,7 +55,11 @@ const SECRET_PATTERNS = [
   // and destroying legitimate output is the opposite of what the channel is for.
   // Real keys always carry a long CONSECUTIVE alphanumeric run, so short
   // `-`/`_`-delimited prefix segments are allowed only ahead of one.
-  /\b(?:sk|pk|rk|ak)[-_](?:[a-zA-Z0-9]{1,12}[-_])*[a-zA-Z0-9]{20,}/g,
+  // The trailing `[a-zA-Z0-9_-]*` matters: base64url key bodies legitimately
+  // contain `-` and `_` AFTER the long run, and stopping at the run redacted the
+  // prefix while leaking the remainder — a partial redaction is still a leak. The
+  // long consecutive run stays REQUIRED, so hyphenated prose is still untouched.
+  /\b(?:sk|pk|rk|ak)[-_](?:[a-zA-Z0-9]{1,12}[-_])*[a-zA-Z0-9]{20,}[a-zA-Z0-9_-]*/g,
   /ghp_[a-zA-Z0-9]{36,}/g,
   /gho_[a-zA-Z0-9]{36,}/g,
   /github_pat_[a-zA-Z0-9_]{22,}/g,

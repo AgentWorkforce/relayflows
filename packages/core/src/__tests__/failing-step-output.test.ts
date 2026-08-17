@@ -126,6 +126,22 @@ describe('scrubSecrets covers hyphenated vendor key prefixes', () => {
     });
   }
 
+  it('redacts the WHOLE key when the body has later -/_ segments', () => {
+    // base64url bodies legitimately contain `-`/`_` after the long run. Stopping
+    // at the run redacted the prefix and left the rest in the clear — a partial
+    // redaction is still a leak.
+    for (const key of [
+      `sk-ant-api03-${'a'.repeat(60)}-Xy9_${'b'.repeat(30)}`,
+      `rk_live_${'c'.repeat(32)}_${'d'.repeat(16)}`,
+    ]) {
+      const scrubbed = scrubSecrets(`token ${key} end`);
+      expect(scrubbed).toBe('token [REDACTED] end');
+      // No fragment of the key may survive anywhere in the output.
+      expect(scrubbed).not.toContain('Xy9_');
+      expect(scrubbed).not.toContain('dddd');
+    }
+  });
+
   it('does not eat legitimate hyphenated identifiers', () => {
     // Allowing `-`/`_` anywhere in the body swallowed any 20+ char identifier
     // starting `sk-`/`rk_`/…, destroying real output — the opposite of the point.
