@@ -638,6 +638,36 @@ export function chooseIntegrationWorkspace(input: {
   };
 }
 
+/**
+ * Slugify a Slack channel title the way Relayfile names its `<id>__<name>` dirs.
+ */
+export function slackChannelTitleSlug(title: string): string {
+  return title
+    .trim()
+    .replace(/^#/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The subscription glob for a channel's `<id>__<name>` directory.
+ *
+ * Inbound Slack messages and thread replies are delivered under this path, not the
+ * bare-id one. Returns undefined when there is no usable title, so the caller can
+ * say so rather than subscribing to a fabricated path.
+ */
+export function slackSuffixedChannelPath(
+  channelId: string,
+  title: string | undefined
+): string | undefined {
+  const id = channelId.trim().replace(/^#/, '');
+  if (!id) return undefined;
+  const slug = title ? slackChannelTitleSlug(title) : '';
+  if (!slug) return undefined;
+  return `/slack/channels/${id}__${slug}/**`;
+}
+
 /** Decode a Relayfile JWT payload. Returns undefined for anything unparseable. */
 export function relayfileJwtPayloadOf(token: string): Record<string, unknown> | undefined {
   const parts = token.split('.');
@@ -8923,7 +8953,13 @@ export class WorkflowRunner {
     const event = await this.waitForRelayfileEvent(
       {
         name: 'slack-human-answer',
-        paths: this.slackHumanAnswerSubscriptionPaths(channelPrefix, input.channel),
+        paths: await this.resolveSlackHumanAnswerPaths({
+          client,
+          workspaceId: runtime.workspaceId,
+          channelPrefix,
+          channelId: channel,
+          requestedChannel: input.channel,
+        }),
         provider: 'slack',
         source: 'workflow',
       },
@@ -8949,8 +8985,84 @@ export class WorkflowRunner {
   private slackHumanAnswerSubscriptionPaths(channelPrefix: string, requestedChannel: string): string[] {
     const paths = new Set<string>([`${channelPrefix}/**`]);
     const slug = this.slackChannelAliasSlug(requestedChannel);
+    // Kept as a fallback for the case this used to be written for: a channel
+    // NAME, where the slug does reconstruct the `<id>__<name>` directory. It is
+    // useless for a channel id, which is what discovery below covers.
     if (slug) paths.add(`${channelPrefix}__${slug}/**`);
     return [...paths];
+  }
+
+  /**
+   * Subscription paths for a Slack human answer, including the `<id>__<name>`
+   * directory that inbound replies actually arrive in.
+   *
+   * {@link slackHumanAnswerSubscriptionPaths} derives the suffix by slugifying the
+   * identifier it was handed. That reconstructs the real directory when a caller
+   * passes a channel NAME, but a caller may pass a channel ID — the documented
+   * alternative — and slugifying `C0B9Z4CLG1J` yields
+   * `C0B9Z4CLG1J__c0b9z4clg1j`, a directory that does not exist. The run then
+   * watches only the bare-id path while Relayfile delivers the reply to
+   * `C0B9Z4CLG1J__watchdog-test`, so a correctly threaded human answer is never
+   * observed and the gate times out with no indication why.
+   *
+   * The channel index already maps id -> title, and the runner already reads it to
+   * resolve a name to an id. This reads it the other way to recover the title, so
+   * the suffix comes from data rather than from a guess about the caller's input.
+   *
+   * A missing or unreadable index is non-fatal: it falls back to the derived paths
+   * rather than taking the run down.
+   */
+  private async resolveSlackHumanAnswerPaths(input: {
+    client: RelayFileClient;
+    workspaceId: string;
+    channelPrefix: string;
+    channelId: string;
+    requestedChannel: string;
+  }): Promise<string[]> {
+    const paths = new Set(
+      this.slackHumanAnswerSubscriptionPaths(input.channelPrefix, input.requestedChannel)
+    );
+
+    const title = await this.resolveSlackChannelTitleById(
+      input.client,
+      input.workspaceId,
+      input.channelId
+    );
+    const discovered = slackSuffixedChannelPath(input.channelId, title);
+    if (discovered) {
+      if (!paths.has(discovered)) {
+        this.log(
+          `Slack human assistance watching "${discovered}" (resolved from the Slack ` +
+            `channel index) in addition to the bare-id path.`
+        );
+      }
+      paths.add(discovered);
+    } else {
+      this.log(
+        `Slack human assistance could not resolve a channel title for "${input.channelId}" ` +
+          `from the Slack channel index; watching derived paths only, which may miss ` +
+          `replies delivered to an "<id>__<name>" directory.`
+      );
+    }
+    return [...paths];
+  }
+
+  /** Look up a Slack channel's title by id via the synced channel index. */
+  private async resolveSlackChannelTitleById(
+    client: RelayFileClient,
+    workspaceId: string,
+    channelId: string
+  ): Promise<string | undefined> {
+    for (const indexPath of ['/slack/channels/_index.json', '/discovery/slack/channels/_index.json']) {
+      const raw = await this.readRelayfileSlackLookupFile(client, workspaceId, indexPath);
+      if (!raw) continue;
+      for (const entry of this.parseSlackChannelIndex(raw)) {
+        if (entry.id !== channelId) continue;
+        const title = entry.title ?? entry.name;
+        if (title && title.trim()) return title.trim();
+      }
+    }
+    return undefined;
   }
 
   private isRelayfileAuthExpiredError(err: unknown): boolean {
