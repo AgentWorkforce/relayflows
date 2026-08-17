@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  RELAYFILE_CREDENTIAL_EXPIRED_MARKER,
   assertRelayfileCredentialUsable,
   describeRelayfileCredential,
   relayfileTokenExpiresAtMs,
@@ -87,6 +88,13 @@ describe('assertRelayfileCredentialUsable', () => {
     expect(message).toContain('/discovery/slack/**');
     // And it says what to do about it.
     expect(message).toMatch(/relayfile login|RELAYFILE_TOKEN/);
+    // Critically: the message must stay recognizable as an expired-auth error so
+    // the runner's existing refresh-and-retry path still fires. Failing closed
+    // must not mean skipping the recovery that would have worked.
+    expect(message).toContain(RELAYFILE_CREDENTIAL_EXPIRED_MARKER);
+    expect(message).toMatch(
+      new RegExp(`token has expired|jwt expired|unauthorized|401|${RELAYFILE_CREDENTIAL_EXPIRED_MARKER}`, 'i')
+    );
   });
 
   it('is silent for a credential that is still valid', () => {

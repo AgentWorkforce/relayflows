@@ -646,6 +646,14 @@ export function describeRelayfileCredential(
  * rejecting credentials that actually work. Scopes are reported instead, which is
  * what a human needs to see anyway.
  */
+/**
+ * Marker embedded in the preflight's error so {@link isRelayfileAuthExpiredError}
+ * recognizes it and the existing refresh-and-retry path still fires. Without this
+ * the preflight would short-circuit the retry that used to recover from an expired
+ * credential — a regression dressed up as a better error message.
+ */
+export const RELAYFILE_CREDENTIAL_EXPIRED_MARKER = 'relayfile credential expired';
+
 export function assertRelayfileCredentialUsable(
   runtime: { workspaceId: string; token: string; baseUrl: string; source?: string },
   purpose: string,
@@ -654,7 +662,7 @@ export function assertRelayfileCredentialUsable(
   const expiresAtMs = relayfileTokenExpiresAtMs(runtime.token);
   if (expiresAtMs === undefined || expiresAtMs > nowMs) return;
   throw new Error(
-    `${purpose} cannot use the resolved Relayfile credential: it expired at ` +
+    `${purpose} cannot use the resolved Relayfile credential (${RELAYFILE_CREDENTIAL_EXPIRED_MARKER}): it expired at ` +
       `${new Date(expiresAtMs).toISOString()}. Resolved credential: ` +
       `${describeRelayfileCredential(runtime, nowMs)}. ` +
       `Refresh it (\`relayfile login\`, or re-mint the workspace token), or point the ` +
@@ -8878,7 +8886,10 @@ export class WorkflowRunner {
 
   private isRelayfileAuthExpiredError(err: unknown): boolean {
     const message = err instanceof Error ? err.message : String(err);
-    return /token has expired|jwt expired|unauthorized|401/i.test(message);
+    return new RegExp(
+      `token has expired|jwt expired|unauthorized|401|${RELAYFILE_CREDENTIAL_EXPIRED_MARKER}`,
+      'i'
+    ).test(message);
   }
 
   private async askSlackViaLocalRelayfile(input: {
