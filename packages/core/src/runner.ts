@@ -3679,8 +3679,8 @@ export class WorkflowRunner {
         this.runVerification(check, output, stepName, injectedTaskText, options),
       postToChannel: (text) => this.postToChannel(text),
       persistStepRow: async (stepId, patch) => this.db.updateStep(stepId, patch),
-      persistStepOutput: async (lifecycleRunId, stepName, output) =>
-        this.persistStepOutput(lifecycleRunId, stepName, output),
+      persistStepOutput: async (lifecycleRunId, stepName, output, status) =>
+        this.persistStepOutput(lifecycleRunId, stepName, output, status),
       loadStepOutput: (lifecycleRunId, stepName) => this.loadStepOutput(lifecycleRunId, stepName),
       checkAborted: () => this.checkAborted(),
       waitIfPaused: () => this.waitIfPaused(),
@@ -4741,7 +4741,11 @@ export class WorkflowRunner {
       },
       getFailureResult: () => ({
         status: 'failed',
-        output: '',
+        // Carry the captured command output through. Returning '' here discarded
+        // it: this path DOES reach StepExecutor.completeStep, so the output is
+        // persisted and logged as `Output (FAILED)` as soon as it is non-empty.
+        // For a failing deterministic gate, that output is the evidence.
+        output: lastCommandOutput || this.lastFailedStepOutput.get(step.name) || '',
         error: lastError,
         retries: state.row.retryCount,
         exitCode: lastExitCode,
@@ -5903,7 +5907,8 @@ export class WorkflowRunner {
         exitCode: lastExitCode,
         exitSignal: lastExitSignal,
       },
-      lastCompletionReason
+      lastCompletionReason,
+      this.lastFailedStepOutput.get(step.name) || undefined
     );
     throw new Error(
       `Step "${step.name}" failed after ${maxRetries} retries: ${lastError ?? 'Unknown error'}`
@@ -10417,20 +10422,33 @@ export class WorkflowRunner {
     error: string,
     runId: string,
     exitInfo?: { exitCode?: number; exitSignal?: string },
-    completionReason?: WorkflowStepCompletionReason
+    completionReason?: WorkflowStepCompletionReason,
+    /**
+     * What the step actually produced before failing. The agent path reaches this
+     * without going through StepExecutor.completeStep — `executeAll` sees the row
+     * already failed and skips it — so persistence has to happen here or the
+     * output is lost. A verification failure is precisely the case where that
+     * output is the most valuable artifact in the run.
+     */
+    output?: string
   ): Promise<void> {
     this.captureStepTerminalEvidence(state.row.stepName, {}, exitInfo);
     state.row.status = 'failed';
     state.row.error = error;
     state.row.completionReason = completionReason;
     state.row.completedAt = new Date().toISOString();
+    if (output) state.row.output = output;
     await this.db.updateStep(state.row.id, {
       status: 'failed',
       error,
       completionReason,
       completedAt: state.row.completedAt,
+      ...(output ? { output } : {}),
       updatedAt: new Date().toISOString(),
     });
+    if (output) {
+      await this.persistStepOutput(runId, state.row.stepName, output, 'failed');
+    }
     this.emit({
       type: 'step:failed',
       runId,
@@ -10856,7 +10874,12 @@ export class WorkflowRunner {
   }
 
   /** Persist step output to disk and post full output as a channel message. */
-  private async persistStepOutput(runId: string, stepName: string, output: string): Promise<void> {
+  private async persistStepOutput(
+    runId: string,
+    stepName: string,
+    output: string,
+    status: WorkflowStepStatus = 'completed'
+  ): Promise<void> {
     // 1. Write to disk
     const outputPath = path.join(this.getStepOutputDir(runId), `${stepName}.md`);
     try {
@@ -10876,7 +10899,8 @@ export class WorkflowRunner {
     // 2. Post scrubbed output as a single channel message (most recent tail only)
     const scrubbed = WorkflowRunner.scrubForChannel(output);
     if (scrubbed.length === 0) {
-      this.postToChannel(`**[${stepName}]** Step completed — output written to disk`, { stepName });
+      const verb = status === 'failed' ? 'failed' : 'completed';
+      this.postToChannel(`**[${stepName}]** Step ${verb} — output written to disk`, { stepName });
       return;
     }
 
@@ -10885,8 +10909,9 @@ export class WorkflowRunner {
     // Surface the final output preview in the local workflow log immediately.
     // Some deterministic wrappers grep stdout/stderr for completion sentinels,
     // and fire-and-forget channel delivery can arrive too late for single-step runs.
-    this.log(`[${stepName}] Output:\n\`\`\`\n${preview}\n\`\`\``);
-    this.postToChannel(`**[${stepName}] Output:**\n\`\`\`\n${preview}\n\`\`\``, { stepName });
+    const label = status === 'failed' ? 'Output (FAILED)' : 'Output';
+    this.log(`[${stepName}] ${label}:\n\`\`\`\n${preview}\n\`\`\``);
+    this.postToChannel(`**[${stepName}] ${label}:**\n\`\`\`\n${preview}\n\`\`\``, { stepName });
   }
 
   private async persistAgentReport(runId: string, stepName: string, report: CliSessionReport): Promise<void> {

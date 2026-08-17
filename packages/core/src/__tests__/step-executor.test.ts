@@ -237,8 +237,10 @@ describe('StepExecutor — output capture', () => {
     const step = makeStep({ command: 'echo result-data' });
 
     await executor.executeOne(step, new Map());
+    // The 4th argument is the step status: output is now persisted for failed
+    // steps too, and persistStepOutput labels the record accordingly.
     expect(deps.persistStepOutput).toHaveBeenCalledWith(
-      'run-001', 'step-1', expect.stringContaining('hello')
+      'run-001', 'step-1', expect.stringContaining('hello'), 'completed'
     );
   });
 
