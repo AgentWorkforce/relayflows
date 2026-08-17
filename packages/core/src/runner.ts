@@ -578,6 +578,91 @@ const DEFAULT_RELAYFILE_BASE_URL = 'https://file.agentrelay.com';
  * documented way to point a workflow at a different Relayfile, and the
  * provisioning path used to ignore it entirely.
  */
+/** Decode a Relayfile JWT payload. Returns undefined for anything unparseable. */
+export function relayfileJwtPayloadOf(token: string): Record<string, unknown> | undefined {
+  const parts = token.split('.');
+  if (parts.length < 2 || !parts[1]) return undefined;
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Expiry of a Relayfile JWT in epoch ms, or undefined when it carries no `exp`. */
+export function relayfileTokenExpiresAtMs(token: string): number | undefined {
+  const exp = relayfileJwtPayloadOf(token)?.exp;
+  return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : undefined;
+}
+
+/**
+ * One-line description of the credential a Relayfile call is about to use.
+ *
+ * Purely diagnostic — every field is read off the JWT the runner already holds,
+ * so it issues no requests and cannot fail a run by itself. It exists because
+ * `Token has expired` on its own does not say WHICH credential, for which
+ * workspace, resolved from where.
+ */
+export function describeRelayfileCredential(
+  runtime: { workspaceId: string; token: string; baseUrl: string; source?: string },
+  nowMs: number = Date.now()
+): string {
+  const payload = relayfileJwtPayloadOf(runtime.token) ?? {};
+  const scopes = Array.isArray(payload.scopes)
+    ? (payload.scopes as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
+  const expiresAtMs = relayfileTokenExpiresAtMs(runtime.token);
+  const parts = [
+    `workspace=${runtime.workspaceId}`,
+    `source=${runtime.source ?? 'unknown'}`,
+    `baseUrl=${runtime.baseUrl}`,
+  ];
+  if (expiresAtMs === undefined) {
+    parts.push('exp=none');
+  } else {
+    const deltaMs = expiresAtMs - nowMs;
+    const rel =
+      deltaMs < 0
+        ? `expired ${Math.round(-deltaMs / 60_000)}m ago`
+        : `expires in ${Math.round(deltaMs / 60_000)}m`;
+    parts.push(`exp=${new Date(expiresAtMs).toISOString()} (${rel})`);
+  }
+  if (scopes.length) parts.push(`scopes=[${scopes.join(', ')}]`);
+  return parts.join(' ');
+}
+
+/**
+ * Fail closed before using an expired Relayfile credential.
+ *
+ * Slack human assistance parks a run waiting for an answer, so a credential
+ * problem does not surface as a normal step failure — it surfaces as a gate that
+ * never delivers its question. This turns that into one actionable line before
+ * anything is written.
+ *
+ * Expiry is the only property asserted. Relayfile scope strings come in several
+ * shapes (bare `fs:write`, `relayfile:fs:write:/glob/**`,
+ * `workspace:<name>:write:/glob/**`) and a credential can carry a broad grant
+ * alongside narrower path grants, so enforcing path coverage here would risk
+ * rejecting credentials that actually work. Scopes are reported instead, which is
+ * what a human needs to see anyway.
+ */
+export function assertRelayfileCredentialUsable(
+  runtime: { workspaceId: string; token: string; baseUrl: string; source?: string },
+  purpose: string,
+  nowMs: number = Date.now()
+): void {
+  const expiresAtMs = relayfileTokenExpiresAtMs(runtime.token);
+  if (expiresAtMs === undefined || expiresAtMs > nowMs) return;
+  throw new Error(
+    `${purpose} cannot use the resolved Relayfile credential: it expired at ` +
+      `${new Date(expiresAtMs).toISOString()}. Resolved credential: ` +
+      `${describeRelayfileCredential(runtime, nowMs)}. ` +
+      `Refresh it (\`relayfile login\`, or re-mint the workspace token), or point the ` +
+      `workflow at a live credential via integrations.relayfile.{workspaceId,token} ` +
+      `or RELAYFILE_TOKEN / RELAYFILE_WORKSPACE_ID.`
+  );
+}
+
 export function resolveRelayfileBaseUrl(options: {
   configBaseUrl?: string;
   env?: Record<string, string | undefined>;
@@ -8697,6 +8782,9 @@ export class WorkflowRunner {
       const runtime: RelayfileRuntimeConfig | undefined = this.relayfileRuntimeConfig;
       if (!runtime) break;
       try {
+        // Fail closed rather than parking on a question that cannot be delivered.
+        this.assertRelayfileCredentialUsable(runtime, 'Slack human assistance');
+        this.log(`Slack human assistance using Relayfile ${this.describeRelayfileCredential(runtime)}`);
         return await this.askSlackViaRelayfileRuntime({
           ...input,
           channel,
@@ -9268,6 +9356,14 @@ export class WorkflowRunner {
       };
     }
     return undefined;
+  }
+
+  private describeRelayfileCredential(runtime: RelayfileRuntimeConfig): string {
+    return describeRelayfileCredential(runtime);
+  }
+
+  private assertRelayfileCredentialUsable(runtime: RelayfileRuntimeConfig, purpose: string): void {
+    assertRelayfileCredentialUsable(runtime, purpose);
   }
 
   private relayfileRuntimeTokenNeedsRefresh(runtime: RelayfileRuntimeConfig): boolean {
