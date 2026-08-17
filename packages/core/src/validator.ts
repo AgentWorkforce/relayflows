@@ -182,7 +182,7 @@ export function validateWorkflow(config: RelayYamlConfig): ValidationIssue[] {
  * gate is the worst available outcome — the run proceeds to whatever the gate was
  * protecting without anyone having said yes. Both are errors, not warnings.
  */
-function validateHumanAssistanceGates(config: RelayYamlConfig): ValidationIssue[] {
+export function validateHumanAssistanceGates(config: RelayYamlConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const swarmAssistance = config.swarm?.humanAssistance;
   const agentMap = new Map(config.agents.map((a) => [a.name, a]));
@@ -229,10 +229,21 @@ function validateHumanAssistanceGates(config: RelayYamlConfig): ValidationIssue[
         typeof swarmAssistance?.slack === 'object' &&
         swarmAssistance.slack !== null
       ) {
+        // Only complain when the swarm object actually holds settings the override
+        // would lose. `humanAssistance: { slack: {} }` upstream carries nothing, so
+        // `{ slack: true }` on the step is exactly equivalent and erroring on it
+        // would be noise.
         const dropped = [
           swarmAssistance.slack.channel ? `channel "${swarmAssistance.slack.channel}"` : undefined,
           swarmAssistance.slack.timeoutMs ? `timeoutMs ${swarmAssistance.slack.timeoutMs}` : undefined,
+          swarmAssistance.slack.mentions?.length
+            ? `mentions [${swarmAssistance.slack.mentions.join(', ')}]`
+            : undefined,
+          swarmAssistance.slack.ignoreUserIds?.length
+            ? `ignoreUserIds [${swarmAssistance.slack.ignoreUserIds.join(', ')}]`
+            : undefined,
         ].filter(Boolean);
+        if (dropped.length === 0) continue;
         issues.push({
           severity: 'error',
           code: 'HUMAN_ASSISTANCE_STEP_OVERRIDE_DROPS_CONFIG',

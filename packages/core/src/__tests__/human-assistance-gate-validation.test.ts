@@ -6,9 +6,9 @@
  * is to stop a writeback, that is the worst available outcome, so both are
  * errors rather than warnings.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { validateWorkflow } from '../validator.js';
-import { resolveRelayfileBaseUrl } from '../runner.js';
+import { WorkflowRunner, resolveRelayfileBaseUrl } from '../runner.js';
 import type { RelayYamlConfig } from '../types.js';
 
 function configWith(overrides: {
@@ -119,6 +119,34 @@ describe('human-assistance gate validation', () => {
     ).toBeUndefined();
   });
 
+  it('allows `slack: true` when the swarm slack object carries nothing to lose', () => {
+    // `humanAssistance: { slack: {} }` upstream has identical effective defaults,
+    // so the override discards nothing and erroring would be noise.
+    const issues = validateWorkflow(
+      configWith({
+        gateAgent: {},
+        swarmHumanAssistance: { slack: {} },
+        stepHumanAssistance: { slack: true },
+      })
+    );
+    expect(
+      issues.find((i) => i.code === 'HUMAN_ASSISTANCE_STEP_OVERRIDE_DROPS_CONFIG')
+    ).toBeUndefined();
+  });
+
+  it('still reports the override when only mentions or ignoreUserIds would be lost', () => {
+    const issues = validateWorkflow(
+      configWith({
+        gateAgent: {},
+        swarmHumanAssistance: { slack: { mentions: ['@oncall'] } },
+        stepHumanAssistance: { slack: true },
+      })
+    );
+    const issue = issues.find((i) => i.code === 'HUMAN_ASSISTANCE_STEP_OVERRIDE_DROPS_CONFIG');
+    expect(issue?.severity).toBe('error');
+    expect(issue?.message).toContain('@oncall');
+  });
+
   it('does not warn about a step override when the swarm has no slack config to lose', () => {
     const issues = validateWorkflow(
       configWith({ gateAgent: {}, stepHumanAssistance: { slack: true } })
@@ -130,11 +158,32 @@ describe('human-assistance gate validation', () => {
 });
 
 describe('resolveRelayfileBaseUrl', () => {
+  // The resolver consults process.env, so every case here pins it explicitly.
+  // Without this the default-value assertions pass or fail depending on whether
+  // the developer happens to have RELAYFILE_BASE_URL exported.
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('defaults to the hosted service, not localhost', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', '');
     expect(resolveRelayfileBaseUrl({})).toBe('https://file.agentrelay.com');
   });
 
+  it('falls back to process.env when there is no config or supplied env', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', 'https://from-process-env');
+    expect(resolveRelayfileBaseUrl({})).toBe('https://from-process-env');
+  });
+
+  it('prefers a supplied env value over process.env', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', 'https://from-process-env');
+    expect(resolveRelayfileBaseUrl({ env: { RELAYFILE_BASE_URL: 'https://from-supplied' } })).toBe(
+      'https://from-supplied'
+    );
+  });
+
   it('prefers explicit workflow config over the environment', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', 'https://from-process-env');
     expect(
       resolveRelayfileBaseUrl({
         configBaseUrl: 'https://relayfile.internal',
@@ -144,20 +193,63 @@ describe('resolveRelayfileBaseUrl', () => {
   });
 
   it('falls back to the supplied env before the default', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', '');
     expect(resolveRelayfileBaseUrl({ env: { RELAYFILE_BASE_URL: 'https://from-env' } })).toBe(
       'https://from-env'
     );
   });
 
   it('ignores blank values rather than treating them as configured', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', '');
     expect(resolveRelayfileBaseUrl({ configBaseUrl: '   ', env: { RELAYFILE_BASE_URL: '' } })).toBe(
       'https://file.agentrelay.com'
     );
   });
 
   it('trims a configured value', () => {
+    vi.stubEnv('RELAYFILE_BASE_URL', '');
     expect(resolveRelayfileBaseUrl({ configBaseUrl: '  https://trimmed  ' })).toBe(
       'https://trimmed'
     );
+  });
+});
+
+/**
+ * The checks above are worthless if they only run under `--validate`.
+ * `WorkflowRunner.validateConfig` is on the normal execution path, so a
+ * fail-open gate has to be refused there too.
+ */
+describe('gate validation is enforced on the normal execution path', () => {
+  const runner = () => new WorkflowRunner({ cwd: process.cwd() });
+
+  it('refuses to run a config whose gate agent is non-interactive', () => {
+    const config = configWith({
+      gateAgent: { preset: 'worker' },
+      swarmHumanAssistance: SWARM_SLACK,
+    });
+    expect(() => runner().validateConfig(config)).toThrow(
+      /HUMAN_ASSISTANCE_NON_INTERACTIVE_AGENT/
+    );
+  });
+
+  it('refuses a step override that would discard the swarm slack config', () => {
+    const config = configWith({
+      gateAgent: {},
+      swarmHumanAssistance: SWARM_SLACK,
+      stepHumanAssistance: { slack: true },
+    });
+    expect(() => runner().validateConfig(config)).toThrow(
+      /HUMAN_ASSISTANCE_STEP_OVERRIDE_DROPS_CONFIG/
+    );
+  });
+
+  it('accepts a correctly configured gate', () => {
+    const config = configWith({ gateAgent: {}, swarmHumanAssistance: SWARM_SLACK });
+    expect(() => runner().validateConfig(config)).not.toThrow();
+  });
+
+  it('leaves configs without human assistance alone', () => {
+    const config = configWith({ gateAgent: { preset: 'worker' } });
+    expect(() => runner().validateConfig(config)).not.toThrow();
   });
 });

@@ -77,6 +77,7 @@ import {
   StepExecutor as WorkflowStepLifecycleExecutor,
   type StepExecutorDeps as WorkflowStepLifecycleExecutorDeps,
 } from './step-executor.js';
+import { validateHumanAssistanceGates } from './validator.js';
 import {
   interpolateStepTask as interpolateStepTaskTemplate,
   resolveDotPath as resolveTemplateDotPath,
@@ -2860,6 +2861,24 @@ export class WorkflowRunner {
     }
     if (c.agents !== undefined && !Array.isArray(c.agents)) {
       throw new Error(`${source}: "agents" must be an array when provided`);
+    }
+
+    // Approval gates that cannot reach a human fail OPEN, so they must be refused
+    // on every path — not only when someone happens to run `--validate` first.
+    // Scoped deliberately to the human-assistance checks: running the whole
+    // validator here would turn today's warnings into hard failures for configs
+    // that already work.
+    if (Array.isArray(c.agents) && Array.isArray(c.workflows)) {
+      const gateIssues = validateHumanAssistanceGates(config as RelayYamlConfig).filter(
+        (issue) => issue.severity === 'error'
+      );
+      if (gateIssues.length > 0) {
+        throw new Error(
+          `${source}: ${gateIssues
+            .map((issue) => `${issue.code} at ${issue.location ?? 'workflow'} — ${issue.message}${issue.fix ? ` Fix: ${issue.fix}` : ''}`)
+            .join('; ')}`
+        );
+      }
     }
     const legacyPermissions = c.permissions;
     if (
@@ -7526,6 +7545,14 @@ export class WorkflowRunner {
           ...baseEnv,
           ...(personaResolution?.env ?? {}),
           ...(proxyEnvOverrides ?? {}),
+          // Interactive agents must reach the SAME Relayfile the run provisioned
+          // against. Without this they inherit only the ambient env, so a workflow
+          // setting integrations.relayfile.baseUrl would provision a token on one
+          // server while the agent talked to another.
+          RELAYFILE_BASE_URL: resolveRelayfileBaseUrl({
+            configBaseUrl: this.currentConfig?.integrations?.relayfile?.baseUrl,
+            env: { RELAYFILE_BASE_URL: baseEnv?.RELAYFILE_BASE_URL },
+          }),
         },
       };
       this.log(
