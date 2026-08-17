@@ -621,8 +621,11 @@ export function describeRelayfileCredential(
     parts.push('exp=none');
   } else {
     const deltaMs = expiresAtMs - nowMs;
+    // `<= 0` so this agrees with assertRelayfileCredentialUsable, which treats
+    // exact expiry as expired. `< 0` reported "expires in 0m" for a token the
+    // guard was simultaneously rejecting.
     const rel =
-      deltaMs < 0
+      deltaMs <= 0
         ? `expired ${Math.round(-deltaMs / 60_000)}m ago`
         : `expires in ${Math.round(deltaMs / 60_000)}m`;
     parts.push(`exp=${new Date(expiresAtMs).toISOString()} (${rel})`);
@@ -9384,20 +9387,11 @@ export class WorkflowRunner {
   }
 
   private relayfileJwtExpiresAtMs(token: string): number | undefined {
-    const payload = this.relayfileJwtPayload(token);
-    const exp = payload?.exp;
-    if (typeof exp !== 'number' || !Number.isFinite(exp)) return undefined;
-    return exp * 1000;
+    return relayfileTokenExpiresAtMs(token);
   }
 
   private relayfileJwtPayload(token: string): Record<string, unknown> | undefined {
-    const parts = token.split('.');
-    if (parts.length < 2 || !parts[1]) return undefined;
-    try {
-      return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
-    } catch {
-      return undefined;
-    }
+    return relayfileJwtPayloadOf(token);
   }
 
   private relayfileJwtScopes(token: string): string[] {

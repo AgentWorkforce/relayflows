@@ -137,6 +137,14 @@ describe('describeRelayfileCredential', () => {
     expect(describeRelayfileCredential(runtime(token), NOW)).toContain('expires in 45m');
   });
 
+  it('says "expired 0m ago" at exact expiry, agreeing with the guard', () => {
+    // `< 0` used to report "expires in 0m" for a token the assert rejects.
+    const token = jwt({ exp: Math.floor(NOW / 1000) });
+    const d = describeRelayfileCredential(runtime(token), NOW);
+    expect(d).toContain('expired 0m ago');
+    expect(d).not.toContain('expires in');
+  });
+
   it('says exp=none rather than guessing when there is no exp', () => {
     expect(describeRelayfileCredential(runtime(jwt({})), NOW)).toContain('exp=none');
   });
