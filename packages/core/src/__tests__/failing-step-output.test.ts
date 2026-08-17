@@ -16,7 +16,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { describeOutputForFailure, runVerification } from '../verification.js';
-import { scrubSecrets } from '../channel-messenger.js';
+import { scrubDiagnostic, scrubSecrets } from '../channel-messenger.js';
 
 const PREQ_VERDICT = `### Verdict rationale
 The lockout logic is correctly implemented and meaningfully tested. However, the
@@ -126,6 +126,19 @@ describe('scrubSecrets covers hyphenated vendor key prefixes', () => {
     });
   }
 
+  it('does not eat legitimate hyphenated identifiers', () => {
+    // Allowing `-`/`_` anywhere in the body swallowed any 20+ char identifier
+    // starting `sk-`/`rk_`/…, destroying real output — the opposite of the point.
+    // Real keys always carry a long CONSECUTIVE alphanumeric run.
+    for (const id of [
+      'rk_production_build_pipeline_configuration_v2024_release_candidate_final',
+      'ak-asynchronous-housekeeping-service-for-quarterly-forecasting-2024-update',
+      'sk-feature-flag-rollout-controller-staging-environment-config',
+    ]) {
+      expect(scrubSecrets(id)).not.toContain('[REDACTED]');
+    }
+  });
+
   it('leaves ordinary hyphenated prose alone', () => {
     // A `\b` guard keeps `ask-`/`task-` from matching on their `sk-` tail — the
     // false positive the widened body would otherwise introduce.
@@ -136,5 +149,52 @@ describe('scrubSecrets covers hyphenated vendor key prefixes', () => {
     ]) {
       expect(scrubSecrets(prose)).not.toContain('[REDACTED]');
     }
+  });
+});
+
+
+/**
+ * `scrubDiagnostic` is the middle ground the failure excerpt needs: secrets
+ * redacted and terminal chrome stripped, but payload preserved. `scrubForChannel`
+ * deletes JSON as noise; `scrubSecrets` alone leaks ANSI and system-reminder
+ * blocks into the run log and channel.
+ */
+describe('scrubDiagnostic', () => {
+  const ESC = String.fromCharCode(27);
+
+  it('strips ANSI escapes', () => {
+    expect(scrubDiagnostic(`${ESC}[31mERROR${ESC}[0m done`)).not.toContain(ESC);
+  });
+
+  it('strips system-reminder blocks, closed and unclosed', () => {
+    expect(scrubDiagnostic('a <system-reminder>x</system-reminder> b')).not.toContain('system-reminder');
+    expect(scrubDiagnostic('a <system-reminder>x b')).not.toContain('system-reminder');
+  });
+
+  it('keeps JSON payloads that scrubForChannel would delete', () => {
+    expect(scrubDiagnostic('{"verdict":"FAIL"}')).toContain('"verdict":"FAIL"');
+  });
+
+  it('still redacts secrets', () => {
+    const key = `sk-ant-api03-${'a'.repeat(95)}`;
+    expect(scrubDiagnostic(`token ${key}`)).not.toContain(key);
+  });
+});
+
+describe('output_contains failure quotes the text verification judged', () => {
+  it('describes the echo-stripped output, not the raw prompt echo', () => {
+    // The worker echoes its task, which contains the expected marker. Quoting raw
+    // output would show `PREQ: PASS` in a message reporting it as absent.
+    const injected = 'End with PREQ: PASS when every check passes.';
+    const output = `${injected}\n...work...\nPREQ: FAIL unbounded map`;
+    let message = '';
+    try {
+      runVerification({ type: 'output_contains', value: 'PREQ: PASS' }, output, 'review-preq', injected);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('PREQ: FAIL');
+    // The echoed instruction must not survive into the excerpt.
+    expect(message).not.toContain('End with PREQ: PASS when every check passes.');
   });
 });

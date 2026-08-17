@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
-import { scrubSecrets } from './channel-messenger.js';
+import { scrubDiagnostic } from './channel-messenger.js';
 import type {
   CompletionEvidenceSignal,
   CompletionEvidenceToolSideEffect,
@@ -23,14 +23,15 @@ const OUTPUT_EXCERPT_CHARS = 400;
  * those call for opposite responses. This makes the distinction explicit and
  * quotes the tail, where a verdict marker would be if there were one.
  *
- * Uses `scrubSecrets`, NOT `scrubForChannel`. The latter is a channel FORMATTER:
- * it strips terminal noise and, critically, removes JSON objects and fenced JSON
- * blocks — so a step whose whole output is JSON would be described as producing
- * nothing, reintroducing exactly the false signal this function exists to remove.
- * Redaction is what is wanted here; content must survive.
+ * Uses `scrubDiagnostic`: secrets redacted and terminal chrome stripped, but
+ * content preserved. `scrubForChannel` would also delete JSON objects and fenced
+ * JSON as noise, describing a JSON-producing step as having produced nothing —
+ * the exact false signal this function exists to remove. `scrubSecrets` alone
+ * would leave ANSI escapes and `<system-reminder>` blocks to surface raw in the
+ * run log and channel.
  */
 export function describeOutputForFailure(output: string): string {
-  const scrubbed = scrubSecrets(output ?? '').trim();
+  const scrubbed = scrubDiagnostic(output).trim();
   if (!scrubbed) return ' The step produced no output.';
   const excerpt =
     scrubbed.length > OUTPUT_EXCERPT_CHARS ? `…${scrubbed.slice(-OUTPUT_EXCERPT_CHARS)}` : scrubbed;
@@ -113,7 +114,10 @@ export function runVerification(
       if (!checkOutputContains(output, token, injectedTaskText)) {
         return fail(
           `Verification failed for "${stepName}": output does not contain "${token}".` +
-            describeOutputForFailure(output)
+            // The echo-stripped text is what the check actually judged. Quoting the
+            // raw output could echo the token back from the injected task text and
+            // read as contradicting the very failure being reported.
+            describeOutputForFailure(stripInjectedTaskEcho(output, injectedTaskText))
         );
       }
       break;

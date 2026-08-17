@@ -10878,7 +10878,7 @@ export class WorkflowRunner {
     runId: string,
     stepName: string,
     output: string,
-    status: 'completed' | 'failed' | string = 'completed'
+    status: WorkflowStepStatus = 'completed'
   ): Promise<void> {
     // 1. Write to disk
     const outputPath = path.join(this.getStepOutputDir(runId), `${stepName}.md`);

@@ -48,11 +48,14 @@ export function formatError(stepName: string, error: unknown): string {
 const SECRET_PATTERNS = [
   /(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer)\s*[:=]\s*\S+/gi,
   /(?:rk_live_|at_live_|nt_live_|ot_live_|cld_at_|rth_at_|ocl_node_enr_|br_)[a-zA-Z0-9_%-]+(?:\.[a-zA-Z0-9_%-]+)*/g,
-  // Body allows `-` and `_` so hyphenated vendor prefixes are covered: the old
-  // `[a-zA-Z0-9]{20,}` stopped at the first hyphen, so `sk-ant-api03-…`
-  // (Anthropic) and `sk-proj-…` (OpenAI) — the two most likely keys to appear in
-  // agent output here — were matched only up to `ant`/`proj` and left unredacted.
-  /\b(?:sk|pk|rk|ak)[-_][a-zA-Z0-9][a-zA-Z0-9_-]{19,}/g,
+  // Hyphenated vendor prefixes (`sk-ant-api03-…`, `sk-proj-…`) followed by the
+  // long base64/JWT body. Allowing `[-_]` anywhere in the body would swallow any
+  // 20+ char hyphenated identifier starting `sk-`/`rk_`/… — e.g.
+  // `rk_production_build_pipeline_configuration_v2024_release_candidate_final` —
+  // and destroying legitimate output is the opposite of what the channel is for.
+  // Real keys always carry a long CONSECUTIVE alphanumeric run, so short
+  // `-`/`_`-delimited prefix segments are allowed only ahead of one.
+  /\b(?:sk|pk|rk|ak)[-_](?:[a-zA-Z0-9]{1,12}[-_])*[a-zA-Z0-9]{20,}/g,
   /ghp_[a-zA-Z0-9]{36,}/g,
   /gho_[a-zA-Z0-9]{36,}/g,
   /github_pat_[a-zA-Z0-9_]{22,}/g,
@@ -119,9 +122,24 @@ function stripMalformedPtyFrameGarbage(line: string): string {
   return strippedRuns;
 }
 
-export function scrubForChannel(text: string): string {
-  // Strip system-reminder blocks (closed or unclosed) iteratively to avoid
-  // polynomial backtracking (ReDoS) with [\s\S]*? on adversarial input.
+/**
+ * Redact secrets and strip terminal chrome, but keep content.
+ *
+ * `scrubForChannel` additionally drops JSON objects, fenced JSON, and short
+ * lines as noise — fine when formatting a channel message, wrong when quoting a
+ * failing step's output, where those ARE the payload. `scrubSecrets` alone keeps
+ * the payload but lets ANSI escapes and `<system-reminder>` blocks through into
+ * the run log and channel. This is the middle: safe to show, still legible.
+ */
+export function scrubDiagnostic(text: string): string {
+  return stripAnsi(stripSystemReminders(scrubSecrets(text ?? '')));
+}
+
+/**
+ * Strip `<system-reminder>` blocks (closed or unclosed) iteratively, avoiding the
+ * polynomial backtracking (ReDoS) that `[\s\S]*?` invites on adversarial input.
+ */
+function stripSystemReminders(text: string): string {
   let withoutSystemReminders = text;
   const openTag = '<system-reminder>';
   const closeTag = '</system-reminder>';
@@ -137,6 +155,18 @@ export function scrubForChannel(text: string): string {
       break;
     }
   }
+  return withoutSystemReminders;
+}
+
+/** Normalize PTY line endings and strip ANSI escapes. */
+function stripAnsi(text: string): string {
+  // PTY output often contains \r\r\n, which leaves stray \r after stripping and
+  // confuses line splitting downstream.
+  return stripAnsiFn(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+}
+
+export function scrubForChannel(text: string): string {
+  const withoutSystemReminders = stripSystemReminders(text);
 
   // Normalize CRLF and bare \r before stripping ANSI — PTY output often
   // contains \r\r\n which leaves stray \r after stripping that confuse line splitting.
