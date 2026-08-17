@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
-import { scrubForChannel } from './channel-messenger.js';
+import { scrubSecrets } from './channel-messenger.js';
 import type {
   CompletionEvidenceSignal,
   CompletionEvidenceToolSideEffect,
@@ -21,11 +21,16 @@ const OUTPUT_EXCERPT_CHARS = 400;
  * "output does not contain X" is indistinguishable between "the step returned
  * nothing" and "the step returned a considered answer that simply wasn't X" — and
  * those call for opposite responses. This makes the distinction explicit and
- * quotes the tail, where a verdict marker would be if there were one. Secrets are
- * scrubbed because failure messages reach the run log and the channel.
+ * quotes the tail, where a verdict marker would be if there were one.
+ *
+ * Uses `scrubSecrets`, NOT `scrubForChannel`. The latter is a channel FORMATTER:
+ * it strips terminal noise and, critically, removes JSON objects and fenced JSON
+ * blocks — so a step whose whole output is JSON would be described as producing
+ * nothing, reintroducing exactly the false signal this function exists to remove.
+ * Redaction is what is wanted here; content must survive.
  */
 export function describeOutputForFailure(output: string): string {
-  const scrubbed = scrubForChannel(output ?? '').trim();
+  const scrubbed = scrubSecrets(output ?? '').trim();
   if (!scrubbed) return ' The step produced no output.';
   const excerpt =
     scrubbed.length > OUTPUT_EXCERPT_CHARS ? `…${scrubbed.slice(-OUTPUT_EXCERPT_CHARS)}` : scrubbed;

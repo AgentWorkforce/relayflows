@@ -4741,7 +4741,11 @@ export class WorkflowRunner {
       },
       getFailureResult: () => ({
         status: 'failed',
-        output: '',
+        // Carry the captured command output through. Returning '' here discarded
+        // it: this path DOES reach StepExecutor.completeStep, so the output is
+        // persisted and logged as `Output (FAILED)` as soon as it is non-empty.
+        // For a failing deterministic gate, that output is the evidence.
+        output: lastCommandOutput || this.lastFailedStepOutput.get(step.name) || '',
         error: lastError,
         retries: state.row.retryCount,
         exitCode: lastExitCode,
@@ -5903,7 +5907,8 @@ export class WorkflowRunner {
         exitCode: lastExitCode,
         exitSignal: lastExitSignal,
       },
-      lastCompletionReason
+      lastCompletionReason,
+      this.lastFailedStepOutput.get(step.name) || undefined
     );
     throw new Error(
       `Step "${step.name}" failed after ${maxRetries} retries: ${lastError ?? 'Unknown error'}`
@@ -10417,20 +10422,33 @@ export class WorkflowRunner {
     error: string,
     runId: string,
     exitInfo?: { exitCode?: number; exitSignal?: string },
-    completionReason?: WorkflowStepCompletionReason
+    completionReason?: WorkflowStepCompletionReason,
+    /**
+     * What the step actually produced before failing. The agent path reaches this
+     * without going through StepExecutor.completeStep — `executeAll` sees the row
+     * already failed and skips it — so persistence has to happen here or the
+     * output is lost. A verification failure is precisely the case where that
+     * output is the most valuable artifact in the run.
+     */
+    output?: string
   ): Promise<void> {
     this.captureStepTerminalEvidence(state.row.stepName, {}, exitInfo);
     state.row.status = 'failed';
     state.row.error = error;
     state.row.completionReason = completionReason;
     state.row.completedAt = new Date().toISOString();
+    if (output) state.row.output = output;
     await this.db.updateStep(state.row.id, {
       status: 'failed',
       error,
       completionReason,
       completedAt: state.row.completedAt,
+      ...(output ? { output } : {}),
       updatedAt: new Date().toISOString(),
     });
+    if (output) {
+      await this.persistStepOutput(runId, state.row.stepName, output, 'failed');
+    }
     this.emit({
       type: 'step:failed',
       runId,

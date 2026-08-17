@@ -48,6 +48,22 @@ describe('describeOutputForFailure', () => {
     expect(described.length).toBeLessThan(700);
   });
 
+  it('preserves JSON output, which a channel formatter would have deleted', () => {
+    // scrubForChannel strips JSON objects and fenced JSON blocks as terminal
+    // noise, so using it here would report a JSON-producing step as having
+    // produced nothing — reintroducing the exact false signal this fixes.
+    const cases: Array<[string, string]> = [
+      ['{"verdict":"FAIL","reason":"unbounded map"}', 'unbounded map'],
+      ['[{"a":1},{"b":2}]', '{"a":1}'],
+      ['```json\n{"verdict":"FAIL"}\n```', '"verdict":"FAIL"'],
+    ];
+    for (const [json, expected] of cases) {
+      const described = describeOutputForFailure(json);
+      expect(described).not.toContain('produced no output');
+      expect(described).toContain(expected);
+    }
+  });
+
   it('scrubs secrets, because this message reaches the log and the channel', () => {
     const key = `sk-ant-api03-${'a'.repeat(95)}`;
     expect(describeOutputForFailure(`checking token ${key} done`)).not.toContain(key);
