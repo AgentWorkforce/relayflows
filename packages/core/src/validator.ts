@@ -170,6 +170,85 @@ export function validateWorkflow(config: RelayYamlConfig): ValidationIssue[] {
     }
   }
 
+  issues.push(...validateHumanAssistanceGates(config));
+
+  return issues;
+}
+
+/**
+ * Human-assistance gates must be able to actually reach a human.
+ *
+ * Two misconfigurations here fail OPEN rather than closed, which on an approval
+ * gate is the worst available outcome — the run proceeds to whatever the gate was
+ * protecting without anyone having said yes. Both are errors, not warnings.
+ */
+function validateHumanAssistanceGates(config: RelayYamlConfig): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const swarmAssistance = config.swarm?.humanAssistance;
+  const agentMap = new Map(config.agents.map((a) => [a.name, a]));
+
+  for (const workflow of config.workflows ?? []) {
+    for (const step of workflow.steps) {
+      // `step.humanAssistance === false` is an explicit opt-out, not a gate.
+      if (step.humanAssistance === false) continue;
+      const assistance = step.humanAssistance ?? swarmAssistance;
+      if (!assistance?.slack) continue;
+      if (!step.agent) continue;
+
+      const agent = agentMap.get(step.agent);
+      if (!agent) continue;
+
+      // 1. Only the interactive PTY path observes the HUMAN_QUESTION marker and
+      //    injects the operator's reply. A non-interactive agent never parks, so
+      //    nothing is ever asked, and the enforcement prompt ("complete the
+      //    ENTIRE task in a single pass") pushes the model to emit the approval
+      //    token by itself.
+      const resolved = resolveForValidation(agent);
+      if (resolved.interactive === false) {
+        issues.push({
+          severity: 'error',
+          code: 'HUMAN_ASSISTANCE_NON_INTERACTIVE_AGENT',
+          message:
+            `Step "${step.name}" requests Slack human assistance but its agent "${agent.name}" is non-interactive` +
+            `${agent.preset ? ` (preset: '${agent.preset}')` : ' (interactive: false)'}. ` +
+            `Human assistance is only wired into the interactive PTY path, so this step would never park, never post to ` +
+            `Slack, and would very likely print its own answer to satisfy the single-pass output contract. An approval ` +
+            `gate that fails open is worse than no gate.`,
+          fix:
+            `Remove \`preset\` from agent "${agent.name}" (the default is interactive), or set \`interactive: true\`. ` +
+            `If this step does not actually need a human, set \`humanAssistance: false\` on it.`,
+          location: `step:${step.name}`,
+        });
+      }
+
+      // 2. A step-level value REPLACES the swarm-level one rather than merging,
+      //    so `{ slack: true }` on the step silently discards the channel and
+      //    timeout configured on the swarm.
+      if (
+        step.humanAssistance?.slack === true &&
+        typeof swarmAssistance?.slack === 'object' &&
+        swarmAssistance.slack !== null
+      ) {
+        const dropped = [
+          swarmAssistance.slack.channel ? `channel "${swarmAssistance.slack.channel}"` : undefined,
+          swarmAssistance.slack.timeoutMs ? `timeoutMs ${swarmAssistance.slack.timeoutMs}` : undefined,
+        ].filter(Boolean);
+        issues.push({
+          severity: 'error',
+          code: 'HUMAN_ASSISTANCE_STEP_OVERRIDE_DROPS_CONFIG',
+          message:
+            `Step "${step.name}" sets \`humanAssistance: { slack: true }\`, which REPLACES the swarm-level ` +
+            `configuration instead of merging with it${dropped.length ? `, discarding ${dropped.join(' and ')}` : ''}. ` +
+            `The question would fall back to SLACK_DEFAULT_CHANNEL and the default timeout.`,
+          fix:
+            `Delete \`humanAssistance\` from step "${step.name}" so it inherits \`swarm.humanAssistance\`, or restate ` +
+            `the full \`{ slack: { channel, timeoutMs } }\` object on the step.`,
+          location: `step:${step.name}`,
+        });
+      }
+    }
+  }
+
   return issues;
 }
 

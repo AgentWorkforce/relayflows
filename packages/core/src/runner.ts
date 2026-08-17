@@ -554,6 +554,44 @@ const BROKER_OPERATION_RETRY_DELAY_MS = 1_000;
 const AGENT_TRANSIENT_NETWORK_MAX_ATTEMPTS = 3;
 const AGENT_TRANSIENT_NETWORK_RETRY_DELAY_MS = 1_000;
 
+/**
+ * The one Relayfile base URL default.
+ *
+ * Every path that talks to Relayfile — agent provisioning, the human-assistance
+ * bridge, local-credential resolution, and the env handed to spawned agents —
+ * resolves through {@link resolveRelayfileBaseUrl} so they cannot disagree.
+ * They used to: provisioning defaulted to `http://127.0.0.1:8080` while the
+ * human-assistance bridge defaulted to the hosted service, so a workflow whose
+ * agents declared `permissions` (which is what turns provisioning on) died at
+ * startup with a bare `TypeError: fetch failed` against a local server that was
+ * never running, while the hosted service was healthy.
+ */
+const DEFAULT_RELAYFILE_BASE_URL = 'https://file.agentrelay.com';
+
+/**
+ * Resolve the Relayfile base URL from the highest-precedence source available.
+ *
+ * Precedence: explicit workflow config, then environment (caller-supplied env
+ * first, then the process env), then {@link DEFAULT_RELAYFILE_BASE_URL}.
+ * `configBaseUrl` matters because `integrations.relayfile.baseUrl` is the
+ * documented way to point a workflow at a different Relayfile, and the
+ * provisioning path used to ignore it entirely.
+ */
+export function resolveRelayfileBaseUrl(options: {
+  configBaseUrl?: string;
+  env?: Record<string, string | undefined>;
+}): string {
+  const candidates = [
+    options.configBaseUrl,
+    options.env?.RELAYFILE_BASE_URL,
+    process.env.RELAYFILE_BASE_URL,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return DEFAULT_RELAYFILE_BASE_URL;
+}
+
 interface ChannelEvidenceOptions {
   stepName?: string;
   sender?: string;
@@ -2612,7 +2650,10 @@ export class WorkflowRunner {
       tokenSigningKey,
       workspace: this.workspaceId,
       projectDir: this.cwd,
-      relayfileBaseUrl: relayEnv.RELAYFILE_BASE_URL ?? 'http://127.0.0.1:8080',
+      relayfileBaseUrl: resolveRelayfileBaseUrl({
+        configBaseUrl: this.currentConfig?.integrations?.relayfile?.baseUrl,
+        env: relayEnv,
+      }),
       agents: agentsToProvision,
       tokenTtlSeconds: 3600,
     });
@@ -7196,11 +7237,10 @@ export class WorkflowRunner {
       env.RELAY_WORKSPACE_ID = this.workspaceId;
       env.RELAY_DEFAULT_WORKSPACE = this.workspaceId;
     }
-    env.RELAYFILE_BASE_URL =
-      env.RELAYFILE_BASE_URL ??
-      this.getRelayEnv(proxyMode)?.RELAYFILE_BASE_URL ??
-      process.env.RELAYFILE_BASE_URL ??
-      'http://127.0.0.1:8080';
+    env.RELAYFILE_BASE_URL = resolveRelayfileBaseUrl({
+      configBaseUrl: this.currentConfig?.integrations?.relayfile?.baseUrl,
+      env: { RELAYFILE_BASE_URL: env.RELAYFILE_BASE_URL ?? this.getRelayEnv(proxyMode)?.RELAYFILE_BASE_URL },
+    });
 
     try {
       const {
@@ -7807,7 +7847,7 @@ export class WorkflowRunner {
     if (!workspaceId || !token) return undefined;
 
     return {
-      baseUrl: relayfileConfig?.baseUrl ?? process.env.RELAYFILE_BASE_URL ?? 'https://file.agentrelay.com',
+      baseUrl: resolveRelayfileBaseUrl({ configBaseUrl: relayfileConfig?.baseUrl }),
       workspaceId,
       token,
       source: hasExplicitWorkflowCredentials ? 'config' : undefined,
@@ -9190,11 +9230,11 @@ export class WorkflowRunner {
       const workspaceId = this.relayfileWorkspaceIdFromJwt(token);
       if (!workspaceId) continue;
       return {
-        baseUrl:
-          this.currentConfig?.integrations?.relayfile?.baseUrl ??
-          config?.integrations?.relayfile?.baseUrl ??
-          process.env.RELAYFILE_BASE_URL ??
-          'https://file.agentrelay.com',
+        baseUrl: resolveRelayfileBaseUrl({
+          configBaseUrl:
+            this.currentConfig?.integrations?.relayfile?.baseUrl ??
+            config?.integrations?.relayfile?.baseUrl,
+        }),
         workspaceId,
         token,
         source: 'local-creds',
