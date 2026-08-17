@@ -578,6 +578,66 @@ const DEFAULT_RELAYFILE_BASE_URL = 'https://file.agentrelay.com';
  * documented way to point a workflow at a different Relayfile, and the
  * provisioning path used to ignore it entirely.
  */
+/** The operator's locally registered Relayfile workspaces, as recorded by the CLI. */
+export interface RelayfileWorkspaceRegistry {
+  /** Workspace the CLI treats as current. */
+  defaultId?: string;
+  /** Every registered workspace id. */
+  ids: string[];
+}
+
+export interface IntegrationWorkspaceChoice {
+  /** Workspace the Slack gate should address. */
+  workspaceId: string;
+  /** Why, for the log line. Undefined when the resolved workspace was kept as-is. */
+  reason?: string;
+}
+
+/**
+ * Choose the workspace a Slack human-assistance gate should address.
+ *
+ * Slack lives on a real OAuth connection owned by one of the operator's
+ * REGISTERED workflows. A run's provisioned workspace is a throwaway for agent
+ * file scope and has no integrations, so asking it to post a Slack question can
+ * never work. Prefer the registered workspace that actually owns the connection.
+ *
+ * Deliberately conservative:
+ * - An explicitly configured workspace always wins. If someone names a workspace,
+ *   that is a decision, not a guess to override.
+ * - With no registry (headless / cloud, where there is no
+ *   `~/.relayfile/workspaces.json`), keep whatever was resolved. There the
+ *   deploy's workspace is the integration-owning one already.
+ * - If the resolved workspace IS registered, keep it.
+ * Only an unregistered workspace alongside a known default gets redirected.
+ */
+export function chooseIntegrationWorkspace(input: {
+  resolvedWorkspaceId: string;
+  configuredWorkspaceId?: string;
+  registry?: RelayfileWorkspaceRegistry;
+}): IntegrationWorkspaceChoice {
+  const { resolvedWorkspaceId, configuredWorkspaceId, registry } = input;
+
+  if (configuredWorkspaceId?.trim()) {
+    return { workspaceId: configuredWorkspaceId.trim() };
+  }
+  if (!registry || !registry.defaultId?.trim()) {
+    return { workspaceId: resolvedWorkspaceId };
+  }
+  if (registry.ids.includes(resolvedWorkspaceId)) {
+    return { workspaceId: resolvedWorkspaceId };
+  }
+  if (registry.defaultId === resolvedWorkspaceId) {
+    return { workspaceId: resolvedWorkspaceId };
+  }
+  return {
+    workspaceId: registry.defaultId,
+    reason:
+      `workspace "${resolvedWorkspaceId}" is not one of the locally registered Relayfile ` +
+      `workspaces, so it carries no Slack integration; using the registered default ` +
+      `"${registry.defaultId}" instead. Set integrations.relayfile.workspaceId to override.`,
+  };
+}
+
 /** Decode a Relayfile JWT payload. Returns undefined for anything unparseable. */
 export function relayfileJwtPayloadOf(token: string): Record<string, unknown> | undefined {
   const parts = token.split('.');
@@ -8790,9 +8850,11 @@ export class WorkflowRunner {
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const runtime: RelayfileRuntimeConfig | undefined = this.relayfileRuntimeConfig;
+      let runtime: RelayfileRuntimeConfig | undefined = this.relayfileRuntimeConfig;
       if (!runtime) break;
       try {
+        // Slack lives on the integration-owning workspace, not the run's throwaway.
+        runtime = await this.redirectToIntegrationWorkspace(runtime);
         // Fail closed rather than parking on a question that cannot be delivered.
         this.assertRelayfileCredentialUsable(runtime, 'Slack human assistance');
         this.log(`Slack human assistance using Relayfile ${this.describeRelayfileCredential(runtime)}`);
@@ -9339,6 +9401,65 @@ export class WorkflowRunner {
 
   private looksLikeSlackChannelId(channel: string): boolean {
     return /^[cdg][a-z0-9]{8,}$/i.test(channel);
+  }
+
+  /**
+   * Point a Slack human-assistance call at the workspace that owns the Slack
+   * integration, when the resolved one demonstrably does not.
+   *
+   * Only redirects when it can also produce a credential for the target — a
+   * workspace id without a usable token is not an improvement, so in that case it
+   * keeps the original and lets `assertRelayfileCredentialUsable` report the real
+   * problem rather than inventing a second one.
+   */
+  private async redirectToIntegrationWorkspace(
+    runtime: RelayfileRuntimeConfig
+  ): Promise<RelayfileRuntimeConfig> {
+    const registry = await this.readRelayfileWorkspaceRegistry();
+    const choice = chooseIntegrationWorkspace({
+      resolvedWorkspaceId: runtime.workspaceId,
+      configuredWorkspaceId: this.currentConfig?.integrations?.relayfile?.workspaceId,
+      registry,
+    });
+    if (choice.workspaceId === runtime.workspaceId) return runtime;
+
+    // Find a credential minted for the target workspace. The local-credentials
+    // files carry their workspace in the JWT's `wks` claim, so this is a match
+    // rather than an assumption.
+    const candidate = await this.resolveRelayfileRuntimeConfigFromLocalCredentials(this.currentConfig);
+    if (!candidate || candidate.workspaceId !== choice.workspaceId) {
+      this.log(
+        `Slack human assistance: ${choice.reason} No local credential was found for ` +
+          `"${choice.workspaceId}", so continuing with "${runtime.workspaceId}".`
+      );
+      return runtime;
+    }
+
+    this.log(`Slack human assistance: ${choice.reason}`);
+    this.relayfileRuntimeConfig = candidate;
+    this.relayfileClient = undefined;
+    return candidate;
+  }
+
+  /**
+   * Read `~/.relayfile/workspaces.json`. Absent or unreadable is a normal state
+   * (headless runs, fresh machines), so this returns undefined rather than
+   * throwing and callers treat undefined as "no opinion".
+   */
+  private async readRelayfileWorkspaceRegistry(): Promise<RelayfileWorkspaceRegistry | undefined> {
+    const registryPath = path.join(homedir(), '.relayfile', 'workspaces.json');
+    const raw = await readFile(registryPath, 'utf8').catch(() => undefined);
+    if (!raw) return undefined;
+    const parsed = this.tryParseJson(raw);
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    const record = parsed as Record<string, unknown>;
+    const entries = Array.isArray(record.workspaces) ? record.workspaces : [];
+    const ids = entries
+      .map((entry) => (entry && typeof entry === 'object' ? (entry as Record<string, unknown>).id : undefined))
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+    const defaultId = typeof record.default === 'string' && record.default.trim() ? record.default.trim() : undefined;
+    if (!ids.length && !defaultId) return undefined;
+    return { defaultId, ids };
   }
 
   private async resolveRelayfileRuntimeConfigFromLocalCredentials(config?: RelayYamlConfig): Promise<RelayfileRuntimeConfig | undefined> {
