@@ -163,7 +163,7 @@ export interface WorkflowRunOptions {
   onEvent?: WorkflowEventListener;
   /** Validate and print execution plan without spawning agents. */
   dryRun?: boolean;
-  /** External step executor (e.g. Daytona sandbox backend). */
+  /** External step executor (e.g. a sandbox-backed backend). */
   executor?: RunnerStepExecutor;
   /** Start from a specific step, skipping all predecessors. */
   startFrom?: string;

@@ -851,6 +851,57 @@ For interactive agent steps, the runner uses a point-person-led completion model
 
 Deterministic and worktree steps are unchanged and do not require owner/review delegation.
 
+## Sandbox Execution
+
+By default the runner spawns steps as local child processes. To run them in
+isolated sandboxes instead, select a provider — the runner still owns command
+construction, env, cwd, timeout, and the whole DAG/retry/verification pipeline;
+the provider only supplies "where the command runs".
+
+```bash
+# Off by default. Unset the flag to get local child processes back.
+export RELAYFLOWS_SANDBOX_PROVIDER=daytona
+export DAYTONA_API_KEY=...
+export RELAYFLOWS_SANDBOX_HOME_DIR=/home/daytona   # image-specific, required
+export RELAYFLOWS_SANDBOX_SNAPSHOT=my-snapshot     # optional
+```
+
+Or in code:
+
+```typescript
+import { WorkflowRunner } from "@relayflows/core";
+
+const runner = new WorkflowRunner({
+  sandbox: { provider: "daytona", homeDir: "/home/daytona" },
+});
+```
+
+| Provider | What it gives you |
+| --- | --- |
+| `none` (default) | No sandbox. Local child processes, exactly as before. |
+| `daytona` | Real remote sandboxes via `@agent-relay/sandbox`. Needs the optional peer `@daytonaio/sdk`. |
+| `local-process` | Real local processes in a private per-step directory with its own `HOME`. Isolates the filesystem root, not the machine — good for development and CI, not a security boundary. |
+
+**Reversibility.** `provider: "none"` (or an unset `RELAYFLOWS_SANDBOX_PROVIDER`)
+produces no backend at all, so nothing about the default path changes. An
+explicit `executor` or `processBackend` still wins over sandbox config, so a
+host that injects its own backend today keeps it.
+
+**Custom providers.** Register a runtime under any name, or hand one in
+directly. This is the seam a host uses to plug in a runtime that does not live
+in this repo:
+
+```typescript
+import { registerSandboxProvider, WorkflowRunner } from "@relayflows/core";
+
+registerSandboxProvider("my-runtime", (config) => new MyRuntime(config));
+// ...or skip the registry entirely:
+new WorkflowRunner({ sandbox: { runtime: myRuntime } });
+```
+
+A runtime needs five methods — `launch`, `exec`, `uploadFile`, `getHomeDir`,
+`destroy` — matching `@agent-relay/sandbox`'s `WorkflowRuntime`.
+
 ## Schema Validation
 
 A JSON Schema is available at `packages/core/src/schema.json` for editor autocompletion and validation of `relay.yaml` files.

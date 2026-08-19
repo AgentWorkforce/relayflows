@@ -472,8 +472,8 @@ export interface VerificationCheck {
 
 /**
  * Extension point for delegating step execution to an external backend
- * (e.g. Daytona sandboxes) while keeping the runner's DAG/retry/verification
- * machinery intact.
+ * (a sandbox provider, typically) while keeping the runner's DAG/retry/
+ * verification machinery intact.
  */
 export interface RunnerStepExecutor {
   executeAgentStep(

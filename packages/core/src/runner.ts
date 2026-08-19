@@ -72,6 +72,11 @@ import {
 import { InMemoryWorkflowDb } from './memory-db.js';
 import { buildCommand as buildProcessCommand, spawnProcess } from './process-spawner.js';
 import { createProcessBackendExecutor } from './process-backend-executor.js';
+import {
+  createLazySandboxProcessBackend,
+  resolveSandboxConfigFromEnv,
+  type SandboxBackendConfig,
+} from './sandbox-backend.js';
 import { formatRunSummaryTable } from './run-summary-table.js';
 import {
   StepExecutor as WorkflowStepLifecycleExecutor,
@@ -407,6 +412,17 @@ export interface WorkflowRunnerOptions {
    * When neither is set, the broker spawns local child processes (default).
    */
   processBackend?: ProcessBackend;
+  /**
+   * Sandbox provider selection. Used only when neither `executor` nor
+   * `processBackend` is supplied — an explicit backend still wins, so nothing
+   * an existing caller passes changes meaning.
+   *
+   * Omitted, this falls back to {@link resolveSandboxConfigFromEnv}, whose
+   * provider defaults to `none`. So the default path is unchanged: no sandbox,
+   * local child processes. Pass `{ provider: 'none' }` to opt out of the env
+   * flag entirely.
+   */
+  sandbox?: SandboxBackendConfig;
 }
 
 // ── Internal step state ─────────────────────────────────────────────────────
@@ -937,7 +953,7 @@ export class WorkflowRunner {
   /** Optional per-run token budget tracker; only created when budgets are configured. */
   private budgetTracker?: BudgetTracker;
   private static readonly PTY_TASK_ARG_SIZE_LIMIT = 2 * 1024 * 1024; // 2 MB
-  private readonly processBackend?: ProcessBackend;
+  private processBackend?: ProcessBackend;
 
   constructor(options: WorkflowRunnerOptions = {}) {
     this.db = options.db ?? new InMemoryWorkflowDb();
@@ -949,6 +965,13 @@ export class WorkflowRunner {
     this.executor = options.executor;
     this.processBackend = options.processBackend;
     this.envSecrets = options.envSecrets;
+    if (!this.executor && !this.processBackend) {
+      // Only reached when the caller injected neither an executor nor a
+      // backend. The config's provider defaults to `none`, which yields
+      // `undefined` here and leaves the local child-process path intact.
+      const sandboxConfig = options.sandbox ?? resolveSandboxConfigFromEnv();
+      this.processBackend = createLazySandboxProcessBackend(sandboxConfig);
+    }
     if (!this.executor && this.processBackend) {
       this.executor = createProcessBackendExecutor(this.processBackend, {
         env: this.envSecrets,
