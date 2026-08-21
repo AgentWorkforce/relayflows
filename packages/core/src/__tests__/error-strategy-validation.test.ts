@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { validateWorkflow } from '../validator.js';
+import { WorkflowRunner } from '../runner.js';
 import type { RelayYamlConfig } from '../types.js';
 
 const baseConfig = (strategy?: string): RelayYamlConfig =>
@@ -23,7 +24,7 @@ const baseConfig = (strategy?: string): RelayYamlConfig =>
         steps: [{ name: 'gate', type: 'deterministic', command: 'true' }],
       },
     ],
-    ...(strategy ? { errorHandling: { strategy } } : {}),
+    ...(strategy !== undefined ? { errorHandling: { strategy } } : {}),
   }) as unknown as RelayYamlConfig;
 
 const strategyErrors = (strategy?: string) =>
@@ -48,5 +49,35 @@ describe('errorHandling.strategy validation', () => {
 
   it('rejects an arbitrary unknown strategy', () => {
     expect(strategyErrors('halt-and-catch-fire')).toHaveLength(1);
+  });
+
+  it('rejects an explicitly empty strategy', () => {
+    expect(strategyErrors('')).toHaveLength(1);
+  });
+});
+
+describe('errorHandling.strategy on the execution path', () => {
+  // validateWorkflow() only runs under `--validate`. Every normal path —
+  // packages/cli, runWorkflow(), and resume — goes through
+  // WorkflowRunner.validateConfig() straight into applyReliabilityDefaults(),
+  // so the check has to be refused there or the repair agent still fires.
+  const runner = () => new WorkflowRunner({ cwd: process.cwd() });
+
+  it.each(['fail-fast', 'continue', 'retry'])('admits "%s"', (strategy) => {
+    expect(() => runner().validateConfig(baseConfig(strategy))).not.toThrow();
+  });
+
+  it('admits a config with no errorHandling block', () => {
+    expect(() => runner().validateConfig(baseConfig(undefined))).not.toThrow();
+  });
+
+  it('refuses to run a config with strategy "fail"', () => {
+    expect(() => runner().validateConfig(baseConfig('fail'))).toThrow(
+      /errorHandling\.strategy "fail" is not valid/
+    );
+  });
+
+  it('names the mode the invalid value would have selected', () => {
+    expect(() => runner().validateConfig(baseConfig('halt'))).toThrow(/treated as "retry"/);
   });
 });

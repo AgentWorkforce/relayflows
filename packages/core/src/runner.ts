@@ -77,7 +77,7 @@ import {
   StepExecutor as WorkflowStepLifecycleExecutor,
   type StepExecutorDeps as WorkflowStepLifecycleExecutorDeps,
 } from './step-executor.js';
-import { validateHumanAssistanceGates } from './validator.js';
+import { validateHumanAssistanceGates, VALID_ERROR_STRATEGIES } from './validator.js';
 import {
   interpolateStepTask as interpolateStepTaskTemplate,
   resolveDotPath as resolveTemplateDotPath,
@@ -3066,6 +3066,26 @@ export class WorkflowRunner {
         );
       }
     }
+    // An unknown error strategy is refused on every path, for the same reason
+    // the gate checks above are: `applyReliabilityDefaults()` treats anything
+    // that is not 'fail-fast' or 'continue' as an opt-in to 'retry', which
+    // attaches an LLM repair agent with write access to the workspace. A
+    // plausible-looking `strategy: fail` therefore selects the most permissive
+    // mode when the author asked for the strictest, and validating only under
+    // `--validate` would leave every normal run path — `packages/cli`,
+    // `runWorkflow()`, and resume — still doing it.
+    const errorHandling = c.errorHandling;
+    if (typeof errorHandling === 'object' && errorHandling !== null) {
+      const strategy = (errorHandling as Record<string, unknown>).strategy;
+      if (strategy !== undefined && !VALID_ERROR_STRATEGIES.includes(strategy as string)) {
+        throw new Error(
+          `${source}: errorHandling.strategy "${String(strategy)}" is not valid. ` +
+            `Use one of: ${VALID_ERROR_STRATEGIES.join(', ')}. ` +
+            `Any other value is treated as "retry", which assigns a repair agent when a deterministic gate fails.`
+        );
+      }
+    }
+
     const legacyPermissions = c.permissions;
     if (
       legacyPermissions !== undefined &&

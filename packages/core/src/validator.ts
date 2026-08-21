@@ -12,7 +12,7 @@ export interface ValidationIssue {
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 /** Accepted values for `errorHandling.strategy`, mirroring schema.json. */
-const VALID_ERROR_STRATEGIES = ['fail-fast', 'continue', 'retry'];
+export const VALID_ERROR_STRATEGIES = ['fail-fast', 'continue', 'retry'];
 
 export function validateWorkflow(config: RelayYamlConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
