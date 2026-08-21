@@ -3075,7 +3075,16 @@ export class WorkflowRunner {
     // `--validate` would leave every normal run path — `packages/cli`,
     // `runWorkflow()`, and resume — still doing it.
     const errorHandling = c.errorHandling;
-    if (typeof errorHandling === 'object' && errorHandling !== null) {
+    if (errorHandling !== undefined) {
+      // A non-object shape — `errorHandling: fail`, the most natural way to get
+      // this wrong in YAML — would otherwise skip the strategy check below and
+      // still be coerced to 'retry' by applyReliabilityDefaults().
+      if (typeof errorHandling !== 'object' || errorHandling === null || Array.isArray(errorHandling)) {
+        throw new Error(
+          `${source}: "errorHandling" must be an object when provided. ` +
+            `Did you mean "errorHandling: { strategy: ${JSON.stringify(errorHandling)} }"?`
+        );
+      }
       const strategy = (errorHandling as Record<string, unknown>).strategy;
       if (strategy !== undefined && !VALID_ERROR_STRATEGIES.includes(strategy as string)) {
         throw new Error(

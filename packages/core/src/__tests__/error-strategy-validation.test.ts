@@ -80,4 +80,13 @@ describe('errorHandling.strategy on the execution path', () => {
   it('names the mode the invalid value would have selected', () => {
     expect(() => runner().validateConfig(baseConfig('halt'))).toThrow(/treated as "retry"/);
   });
+
+  it.each([
+    ['a bare string', 'fail'],
+    ['an array', ['fail-fast']],
+    ['a number', 3],
+  ])('refuses %s as errorHandling', (_label, value) => {
+    const config = { ...baseConfig(undefined), errorHandling: value } as never;
+    expect(() => runner().validateConfig(config)).toThrow(/"errorHandling" must be an object/);
+  });
 });
