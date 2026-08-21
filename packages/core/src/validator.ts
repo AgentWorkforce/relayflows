@@ -11,6 +11,9 @@ export interface ValidationIssue {
 
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
+/** Accepted values for `errorHandling.strategy`, mirroring schema.json. */
+const VALID_ERROR_STRATEGIES = ['fail-fast', 'continue', 'retry'];
+
 export function validateWorkflow(config: RelayYamlConfig): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
@@ -23,6 +26,25 @@ export function validateWorkflow(config: RelayYamlConfig): ValidationIssue[] {
       message: `Channel name "${channel}" is invalid. Must be lowercase alphanumeric and hyphens, starting with a letter or number.`,
       fix: `Use .toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') on the channel name.`,
       location: 'swarm:channel',
+    });
+  }
+
+  // Validate the global error strategy.
+  //
+  // This matters more than a typo check. `applyReliabilityDefaults()` treats
+  // anything that is not 'fail-fast' or 'continue' as an opt-in to `retry`,
+  // which attaches an LLM repair agent with write access to the workspace when
+  // a deterministic gate fails. So a plausible-looking value like `fail` — not
+  // in the schema, previously accepted here without comment — silently selects
+  // the most permissive mode rather than the strictest one the author meant.
+  const strategy = config.errorHandling?.strategy;
+  if (strategy !== undefined && !VALID_ERROR_STRATEGIES.includes(strategy)) {
+    issues.push({
+      severity: 'error',
+      code: 'INVALID_ERROR_STRATEGY',
+      message: `errorHandling.strategy "${strategy}" is not a valid strategy. Valid values are: ${VALID_ERROR_STRATEGIES.join(', ')}.`,
+      fix: `Use "fail-fast" to stop on the first failure, "continue" to carry on past it, or "retry" to retry with a repair agent. Note that any other value is treated as "retry".`,
+      location: 'errorHandling:strategy',
     });
   }
 
