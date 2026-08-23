@@ -235,6 +235,12 @@ export function createWorkflowRenderer(): WorkflowRenderer {
         break;
       }
 
+      case 'run:completed-early': {
+        setHeader(chalk.cyan(`Workflow completed early at ${event.stepName}`));
+        resolveWorkflow();
+        break;
+      }
+
       case 'run:failed': {
         setHeader(chalk.red(`Workflow failed: ${event.error ?? 'unknown error'}`));
         rejectWorkflow(new Error(event.error ?? 'Workflow failed'));

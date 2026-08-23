@@ -353,6 +353,7 @@ interface CompletionDecisionResult {
 export type WorkflowEvent =
   | { type: 'run:started'; runId: string }
   | { type: 'run:completed'; runId: string }
+  | { type: 'run:completed-early'; runId: string; stepName: string }
   | { type: 'run:failed'; runId: string; error: string }
   | { type: 'run:needs-human'; runId: string; error: string; stepName: string }
   | { type: 'run:cancelled'; runId: string }
@@ -3552,10 +3553,33 @@ export class WorkflowRunner {
         throw new Error(`${source}: each step must have a string "name" field`);
       }
 
+      if (s.terminalSuccessExitCodes !== undefined && s.type !== 'deterministic') {
+        throw new Error(
+          `${source}: terminalSuccessExitCodes is only valid on deterministic steps ("${s.name}")`
+        );
+      }
+
       // Deterministic steps require type and command
       if (s.type === 'deterministic') {
         if (typeof s.command !== 'string') {
           throw new Error(`${source}: deterministic step "${s.name}" must have a "command" field`);
+        }
+        if (s.terminalSuccessExitCodes !== undefined) {
+          const codes = s.terminalSuccessExitCodes;
+          if (
+            !Array.isArray(codes) ||
+            codes.length === 0 ||
+            codes.some((code) => !Number.isInteger(code) || (code as number) < 0 || (code as number) > 255)
+          ) {
+            throw new Error(
+              `${source}: deterministic step "${s.name}" terminalSuccessExitCodes must be a non-empty array of integer exit codes from 0 to 255`
+            );
+          }
+          if (new Set(codes).size !== codes.length) {
+            throw new Error(
+              `${source}: deterministic step "${s.name}" terminalSuccessExitCodes must not contain duplicates`
+            );
+          }
         }
       } else if (s.type === 'worktree') {
         if (typeof s.branch !== 'string' || s.branch.trim().length === 0) {
@@ -3820,6 +3844,8 @@ export class WorkflowRunner {
       },
       markDownstreamSkipped: async (failedStepName) =>
         this.markDownstreamSkipped(failedStepName, workflow.steps, stepStates, runId),
+      markRemainingSkipped: async (terminalStepName) =>
+        this.markRemainingStepsSkipped(terminalStepName, workflow.steps, stepStates, runId),
       buildCompletionMode: (stepName, completionReason) =>
         completionReason ? this.buildStepCompletionDecision(stepName, completionReason)?.mode : undefined,
     };
@@ -4195,7 +4221,37 @@ export class WorkflowRunner {
         (s) => s.row.status === 'completed' || s.row.status === 'skipped'
       );
 
-      if (allCompleted) {
+      const completedEarlyStep = [...stepStates.values()].find(
+        (state) => state.row.completionReason === 'completed_early_exit'
+      );
+      const hasFailedStep = [...stepStates.values()].some((state) => state.row.status === 'failed');
+
+      if (completedEarlyStep && !hasFailedStep) {
+        const terminalStepName = completedEarlyStep.row.stepName;
+        this.log(`Workflow completed early at "${terminalStepName}"`);
+        await this.updateRunStatus(runId, 'completed_early');
+        this.emit({ type: 'run:completed-early', runId, stepName: terminalStepName });
+
+        const outcomes = this.collectOutcomes(stepStates, workflow.steps);
+        const skippedCount = outcomes.filter((outcome) => outcome.status === 'skipped').length;
+        const summary =
+          `Workflow completed early at "${terminalStepName}"; ` +
+          `${skippedCount} not-started step${skippedCount === 1 ? ' was' : 's were'} skipped.`;
+        const confidence = this.trajectory.computeConfidence(outcomes);
+        await this.trajectory.complete(summary, confidence, {
+          learnings: this.trajectory.extractLearnings(outcomes),
+          challenges: this.trajectory.extractChallenges(outcomes),
+        });
+
+        this.channelMessenger.postEarlyCompletionReport(
+          workflow.name,
+          outcomes,
+          terminalStepName,
+          summary,
+          confidence
+        );
+        this.logRunSummary(workflow.name, outcomes, runId, 'completed_early');
+      } else if (allCompleted) {
         this.log('Workflow completed successfully');
         await this.updateRunStatus(runId, 'completed');
         this.emit({ type: 'run:completed', runId });
@@ -4649,8 +4705,9 @@ export class WorkflowRunner {
           lastExitCode = executorResult.exitCode;
           lastExitSignal = undefined;
           lastCommandOutput = executorResult.output;
+          const terminalSuccess = this.isTerminalSuccessExitCode(step, executorResult.exitCode);
           const failOnError = step.failOnError !== false;
-          if (failOnError && executorResult.exitCode !== 0) {
+          if (!terminalSuccess && failOnError && executorResult.exitCode !== 0) {
             this.log(`[${step.name}] Command failed (exit code ${executorResult.exitCode})`);
             if (executorResult.output) {
               this.log(`[${step.name}] Output:\n${executorResult.output}`);
@@ -4675,7 +4732,9 @@ export class WorkflowRunner {
             : undefined;
           return {
             output,
-            completionReason: verificationResult?.completionReason,
+            completionReason: terminalSuccess
+              ? ('completed_early_exit' as const)
+              : verificationResult?.completionReason,
           };
         }
 
@@ -4744,8 +4803,9 @@ export class WorkflowRunner {
             lastExitSignal = signal ?? undefined;
             lastCommandOutput = [stdout, stderr].filter(Boolean).join('\n');
 
+            const terminalSuccess = this.isTerminalSuccessExitCode(step, code ?? undefined);
             const failOnError = step.failOnError !== false;
-            if (failOnError && code !== 0 && code !== null) {
+            if (!terminalSuccess && failOnError && code !== 0 && code !== null) {
               this.log(`[${step.name}] Command failed (exit code ${code})`);
               if (stdout) {
                 this.log(`[${step.name}] stdout:\n${stdout}`);
@@ -4790,7 +4850,9 @@ export class WorkflowRunner {
 
         return {
           output,
-          completionReason: verificationResult?.completionReason,
+          completionReason: this.isTerminalSuccessExitCode(step, lastExitCode)
+            ? ('completed_early_exit' as const)
+            : verificationResult?.completionReason,
         };
       },
       toCompletionResult: ({ output, completionReason }, attempt) => ({
@@ -4828,6 +4890,10 @@ export class WorkflowRunner {
       this.postToChannel(`**[${step.name}]** Failed: ${result.error ?? 'Unknown error'}`);
       throw new Error(`Step "${step.name}" failed: ${result.error ?? 'Unknown error'}`);
     }
+  }
+
+  private isTerminalSuccessExitCode(step: WorkflowStep, exitCode: number | undefined): boolean {
+    return exitCode !== undefined && step.terminalSuccessExitCodes?.includes(exitCode) === true;
   }
 
   private resolveWorkflowRepairAgent(
@@ -10833,7 +10899,13 @@ export class WorkflowRunner {
       status,
       updatedAt: new Date().toISOString(),
     };
-    if (status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'needs_human') {
+    if (
+      status === 'completed' ||
+      status === 'completed_early' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'needs_human'
+    ) {
       patch.completedAt = new Date().toISOString();
     }
     if (error) {
@@ -10970,6 +11042,32 @@ export class WorkflowRunner {
     }
   }
 
+  private async markRemainingStepsSkipped(
+    terminalStepName: string,
+    allSteps: WorkflowStep[],
+    stepStates: Map<string, StepState>,
+    runId: string
+  ): Promise<void> {
+    for (const step of allSteps) {
+      const state = stepStates.get(step.name);
+      if (!state || state.row.status !== 'pending') continue;
+
+      const completedAt = new Date().toISOString();
+      state.row.status = 'skipped';
+      state.row.completedAt = completedAt;
+      await this.db.updateStep(state.row.id, {
+        status: 'skipped',
+        completedAt,
+        updatedAt: completedAt,
+      });
+      this.emit({ type: 'step:skipped', runId, stepName: step.name });
+      const reason = `Workflow completed early at "${terminalStepName}"`;
+      this.postToChannel(`**[${step.name}]** Skipped — ${reason}`);
+      await this.trajectory?.stepSkipped(step, reason);
+      await this.trajectory?.decide(`Whether to skip ${step.name}`, 'skip', reason);
+    }
+  }
+
   // ── startFrom dependency resolution ─────────────────────────────────
 
   /**
@@ -11100,7 +11198,7 @@ export class WorkflowRunner {
     workflowName: string,
     outcomes: StepOutcome[],
     runId: string,
-    status: Extract<WorkflowRunStatus, 'completed' | 'failed' | 'needs_human'> = 'failed'
+    status: Extract<WorkflowRunStatus, 'completed' | 'completed_early' | 'failed' | 'needs_human'> = 'failed'
   ): void {
     const completed = outcomes.filter((o) => o.status === 'completed');
     const failed = outcomes.filter((o) => o.status === 'failed');
@@ -11108,6 +11206,8 @@ export class WorkflowRunner {
     const statusLabel =
       status === 'completed'
         ? chalk.green('COMPLETED')
+        : status === 'completed_early'
+          ? chalk.cyan('COMPLETED EARLY')
         : status === 'needs_human'
           ? chalk.yellow('NEEDS HUMAN')
           : chalk.red('FAILED');

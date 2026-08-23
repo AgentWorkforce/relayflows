@@ -121,6 +121,8 @@ export interface DeterministicStepOptions {
   captureOutput?: boolean;
   /** Fail if command exit code is non-zero. Default: true. */
   failOnError?: boolean;
+  /** Exit codes that end the workflow with the distinct completed_early status. */
+  terminalSuccessExitCodes?: number[];
   dependsOn?: string[];
   verification?: VerificationCheck;
   timeoutMs?: number;
@@ -423,6 +425,9 @@ export class WorkflowBuilder {
       if (options.cwd !== undefined) step.cwd = options.cwd;
       if (options.captureOutput !== undefined) step.captureOutput = options.captureOutput;
       if (options.failOnError !== undefined) step.failOnError = options.failOnError;
+      if (options.terminalSuccessExitCodes !== undefined) {
+        step.terminalSuccessExitCodes = [...options.terminalSuccessExitCodes];
+      }
       if (options.dependsOn !== undefined) step.dependsOn = options.dependsOn;
       if (options.verification !== undefined) step.verification = options.verification;
       if (options.timeoutMs !== undefined) step.timeoutMs = options.timeoutMs;

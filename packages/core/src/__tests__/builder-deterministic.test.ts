@@ -46,6 +46,7 @@ describe('deterministic/worktree steps in builder', () => {
         command: 'npm test',
         captureOutput: true,
         failOnError: false,
+        terminalSuccessExitCodes: [78],
         dependsOn: ['build'],
         timeoutMs: 30000,
       })
@@ -55,6 +56,7 @@ describe('deterministic/worktree steps in builder', () => {
     const step = config.workflows![0].steps[0];
     expect(step.captureOutput).toBe(true);
     expect(step.failOnError).toBe(false);
+    expect(step.terminalSuccessExitCodes).toEqual([78]);
     expect(step.dependsOn).toEqual(['build']);
     expect(step.timeoutMs).toBe(30000);
   });

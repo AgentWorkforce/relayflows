@@ -417,6 +417,11 @@ export interface WorkflowStep {
   failOnError?: boolean;
   /** Capture stdout as step output for downstream steps. Default: true. */
   captureOutput?: boolean;
+  /**
+   * Explicit exit codes that end the workflow successfully without running
+   * remaining work. The run is reported as completed_early, not completed.
+   */
+  terminalSuccessExitCodes?: number[];
 
   // ── Integration step fields ────────────────────────────────────────────────
   /** Integration name: 'github', 'linear', 'slack' (required for integration steps). */

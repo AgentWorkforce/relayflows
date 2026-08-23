@@ -576,6 +576,7 @@ describe('Custom Step Resolution', () => {
         ],
         command: 'docker build -t {{image}} -f {{dockerfile}} .',
         captureOutput: true,
+        terminalSuccessExitCodes: [78],
       },
     ],
     [
@@ -597,6 +598,7 @@ describe('Custom Step Resolution', () => {
     expect(resolved.type).toBe('deterministic');
     expect(resolved.command).toBe('docker build -t myapp:latest -f Dockerfile .');
     expect(resolved.captureOutput).toBe(true);
+    expect(resolved.terminalSuccessExitCodes).toEqual([78]);
   });
 
   it('should resolve custom step with all params', () => {

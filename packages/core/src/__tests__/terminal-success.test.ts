@@ -42,7 +42,7 @@ function terminalStep(exitCode: number, configuredCodes: number[]): WorkflowStep
     type: 'deterministic',
     command: `exit ${exitCode}`,
     terminalSuccessExitCodes: configuredCodes,
-  } as WorkflowStep;
+  };
 }
 
 function configWithSteps(steps: WorkflowStep[]): RelayYamlConfig {
@@ -66,6 +66,19 @@ describe('terminal-success deterministic exits', () => {
     }
   });
 
+  it.each([
+    { codes: [] as number[], message: 'non-empty array' },
+    { codes: [78, 78], message: 'must not contain duplicates' },
+    { codes: [256], message: 'from 0 to 255' },
+  ])('rejects invalid terminal-success exit code lists: $codes', async ({ codes, message }) => {
+    const db = makeDb();
+    const runner = new WorkflowRunner({ db, workspaceId: 'ws-test' });
+
+    await expect(
+      runner.execute(configWithSteps([terminalStep(0, codes)]), 'default')
+    ).rejects.toThrow(message);
+  });
+
   it('ends the run as completed_early and skips all not-started work', async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-success-'));
     tempDirs.push(cwd);
@@ -76,12 +89,12 @@ describe('terminal-success deterministic exits', () => {
 
     const run = await runner.execute(
       configWithSteps([
-        terminalStep(78, [78]),
         {
           name: 'ready-sibling',
           type: 'deterministic',
           command: 'touch ready-sibling-ran',
         },
+        terminalStep(78, [78]),
         {
           name: 'downstream',
           type: 'deterministic',
@@ -132,6 +145,74 @@ describe('terminal-success deterministic exits', () => {
     const steps = await db.getStepsByRunId(run.id);
     expect(steps.find((step) => step.stepName === 'gate')?.status).toBe('failed');
     expect(steps.find((step) => step.stepName === 'downstream')?.status).toBe('skipped');
+  });
+
+  it('does not let terminal-success classification hide a verification failure', async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-verification-'));
+    tempDirs.push(cwd);
+    const db = makeDb();
+    const runner = new WorkflowRunner({ db, cwd, workspaceId: 'ws-test' });
+    const gate = {
+      ...terminalStep(78, [78]),
+      command: 'printf no-work; exit 78',
+      verification: { type: 'output_contains', value: 'verified' } as const,
+    };
+
+    const run = await runner.execute(configWithSteps([gate]), 'default');
+
+    expect(run.status).toBe('failed');
+    expect(run.error).toContain('output does not contain "verified"');
+    const steps = await db.getStepsByRunId(run.id);
+    expect(steps[0]).toMatchObject({
+      status: 'failed',
+      completionReason: 'failed_verification',
+    });
+  });
+
+  it('continues normally when a terminal-capable gate exits with an unlisted success code', async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-continue-'));
+    tempDirs.push(cwd);
+    const db = makeDb();
+    const runner = new WorkflowRunner({ db, cwd, workspaceId: 'ws-test' });
+
+    const run = await runner.execute(
+      configWithSteps([
+        terminalStep(0, [78]),
+        {
+          name: 'ready-sibling',
+          type: 'deterministic',
+          command: 'touch ready-sibling-ran',
+        },
+      ]),
+      'default'
+    );
+
+    expect(run.status).toBe('completed');
+    expect(existsSync(path.join(cwd, 'ready-sibling-ran'))).toBe(true);
+  });
+
+  it('honors terminal-success exits returned by an injected executor', async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-executor-'));
+    tempDirs.push(cwd);
+    const db = makeDb();
+    const executeDeterministicStep = vi.fn(async () => ({ output: 'nothing to do', exitCode: 78 }));
+    const runner = new WorkflowRunner({
+      db,
+      cwd,
+      workspaceId: 'ws-test',
+      executor: { executeDeterministicStep },
+    });
+
+    const run = await runner.execute(
+      configWithSteps([
+        terminalStep(78, [78]),
+        { name: 'ready-sibling', type: 'deterministic', command: 'echo should-not-run' },
+      ]),
+      'default'
+    );
+
+    expect(run.status).toBe('completed_early');
+    expect(executeDeterministicStep).toHaveBeenCalledTimes(1);
   });
 
   it('does not reinterpret exit 78 without the opt-in field', async () => {

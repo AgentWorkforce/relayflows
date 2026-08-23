@@ -184,6 +184,30 @@ function validateCustomStepDefinition(
     );
   }
 
+  if (stepDef.terminalSuccessExitCodes !== undefined) {
+    if (
+      stepType !== 'deterministic' ||
+      !Array.isArray(stepDef.terminalSuccessExitCodes) ||
+      stepDef.terminalSuccessExitCodes.length === 0 ||
+      stepDef.terminalSuccessExitCodes.some(
+        (code) => !Number.isInteger(code) || (code as number) < 0 || (code as number) > 255
+      )
+    ) {
+      throw new CustomStepsParseError(
+        `Invalid terminalSuccessExitCodes for step "${name}"`,
+        'terminalSuccessExitCodes must be a non-empty array of unique integer exit codes from 0 to 255 on a deterministic step',
+        filePath
+      );
+    }
+    if (new Set(stepDef.terminalSuccessExitCodes).size !== stepDef.terminalSuccessExitCodes.length) {
+      throw new CustomStepsParseError(
+        `Invalid terminalSuccessExitCodes for step "${name}"`,
+        'terminalSuccessExitCodes must not contain duplicate exit codes',
+        filePath
+      );
+    }
+  }
+
   if (stepType === 'worktree' && !hasBranch) {
     throw new CustomStepsParseError(
       `Worktree step "${name}" is missing "branch"`,
@@ -415,6 +439,9 @@ export function resolveCustomStep(
     resolvedStep.command = interpolate(customDef.command);
     resolvedStep.failOnError = customDef.failOnError;
     resolvedStep.captureOutput = customDef.captureOutput;
+    resolvedStep.terminalSuccessExitCodes = customDef.terminalSuccessExitCodes
+      ? [...customDef.terminalSuccessExitCodes]
+      : undefined;
   } else if (stepType === 'worktree') {
     resolvedStep.branch = interpolate(customDef.branch);
     resolvedStep.baseBranch = interpolate(customDef.baseBranch);
