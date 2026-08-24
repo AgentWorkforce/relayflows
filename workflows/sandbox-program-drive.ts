@@ -291,7 +291,7 @@ Rerun: bash -c 'cd ${REPO_ROOT} && git status --short'
 Write what you did to ${ARTIFACTS}/preflight-repair.md.
 
 ${REPAIR_RULES}`,
-    verification: { type: 'exit_code' },
+    verification: { type: 'file_exists', value: `${ARTIFACTS}/preflight-repair.md` },
     timeoutMs: PLUMBING_STEP_TIMEOUT_MS,
   });
 
@@ -435,7 +435,7 @@ Rerun the reconcile when you are done: ${gate('lane-reconcile')}
 Write what you did to ${ARTIFACTS}/reconcile-repair.md.
 
 ${REPAIR_RULES}`,
-    verification: { type: 'exit_code' },
+    verification: { type: 'file_exists', value: `${ARTIFACTS}/reconcile-repair.md` },
     timeoutMs: PLUMBING_STEP_TIMEOUT_MS,
   });
 
@@ -533,7 +533,7 @@ Keep iterating until the gate is green or a blocker is genuinely external.
 Record what you changed and the commands you ran in ${ARTIFACTS}/${key}-repair.md.
 
 ${REPAIR_RULES}`,
-      verification: { type: 'exit_code' },
+      verification: { type: 'file_exists', value: `${ARTIFACTS}/${key}-repair.md` },
       timeoutMs: REPAIR_STEP_TIMEOUT_MS,
     });
     wf.step(`verify-${key}`, {
@@ -668,7 +668,7 @@ reconciliation, routing), and drive it until it is green or genuinely blocked.
 Rerun: ${gate('program-acceptance')}
 
 ${REPAIR_RULES}`,
-    verification: { type: 'exit_code' },
+    verification: { type: 'file_exists', value: `${ARTIFACTS}/program-acceptance-signoff.md` },
     timeoutMs: REPAIR_STEP_TIMEOUT_MS,
   });
 
@@ -716,7 +716,7 @@ Write ${ARTIFACTS}/claude-review.md using this schema per finding:
   finding_id / severity (blocker|high|medium|low) / file / issue /
   fix_required / test_required / status / evidence
 If there are no actionable issues, write NO_ISSUES_FOUND.`,
-    verification: { type: 'exit_code' },
+    verification: { type: 'file_exists', value: `${ARTIFACTS}/claude-review.md` },
     timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
@@ -734,7 +734,7 @@ Write ${ARTIFACTS}/claude-fix.md with what changed and the commands run.
 If the review says NO_ISSUES_FOUND, record that no fix was needed.
 
 ${REPAIR_RULES}`,
-    verification: { type: 'exit_code' },
+    verification: { type: 'file_exists', value: `${ARTIFACTS}/claude-fix.md` },
     timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
@@ -746,7 +746,7 @@ on the fixer's summary — read the files and rerun what you need to.
 
 Write ${ARTIFACTS}/claude-review-final.md with findings, or NO_ISSUES_FOUND
 only if there are no actionable issues left.`,
-    verification: { type: 'exit_code' },
+    verification: { type: 'file_exists', value: `${ARTIFACTS}/claude-review-final.md` },
     timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
@@ -763,7 +763,10 @@ external — and do not commit.
 If it says NO_ISSUES_FOUND, write ${ARTIFACTS}/claude-signoff.md.
 
 ${REPAIR_RULES}`,
-    verification: { type: 'exit_code' },
+    verification: {
+      type: 'custom',
+      value: `test -s ${ARTIFACTS}/claude-signoff.md || test -s ${ARTIFACTS}/BLOCKED_NO_COMMIT.md`,
+    },
     timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
