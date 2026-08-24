@@ -547,6 +547,11 @@ type DiagnosticVerificationCheck = VerificationCheck & {
   diagnosticTimeout?: number;
 };
 
+/** Fallback bound on how long a pending Slack human question may hold a step
+ *  open once that step is past its own deadline. Only used when the workflow
+ *  declares human assistance without an explicit `slack.timeoutMs`. */
+const DEFAULT_HUMAN_QUESTION_WAIT_MS = 3_600_000;
+
 const DEFAULT_WORKFLOW_MAX_RETRIES = 2;
 const DEFAULT_WORKFLOW_REPAIR_RETRIES = 2;
 const DEFAULT_WORKFLOW_RETRY_DELAY_MS = 1000;
@@ -8814,20 +8819,61 @@ export class WorkflowRunner {
     });
   }
 
-  private async waitForPendingHumanQuestion(agentName: string): Promise<boolean> {
-    const pendingQuestion = this.pendingHumanQuestions.get(agentName);
-    if (pendingQuestion) {
-      await pendingQuestion;
+  /**
+   * Wait for an agent's pending Slack human question to settle.
+   *
+   * `timeoutMs` bounds the wait and MUST be supplied by any caller that is
+   * itself under a deadline. A question's promise settles when the human
+   * answers or the Slack ask fails — but if the agent's PTY dies while the
+   * question is outstanding, nothing is left to settle it, and an unbounded
+   * `await` here silently outlives every step deadline above it. That is not
+   * hypothetical: it hung a run for 34 minutes with no BLOCKED artifact and no
+   * failure, because a deadline checked between calls does not bound the call.
+   *
+   * Returns true if the question settled, false if the budget expired first.
+   */
+  private async waitForPendingHumanQuestion(agentName: string, timeoutMs?: number): Promise<boolean> {
+    const settle = async (): Promise<boolean> => {
+      const pendingQuestion = this.pendingHumanQuestions.get(agentName);
+      if (pendingQuestion) {
+        await pendingQuestion;
+        return true;
+      }
+
+      const draft = this.pendingHumanQuestionDrafts.get(agentName);
+      if (!draft) return false;
+
+      await this.delay(1500);
+      const started = this.pendingHumanQuestions.get(agentName);
+      if (started) await started;
       return true;
+    };
+
+    if (timeoutMs === undefined) return settle();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+    });
+    try {
+      return await Promise.race([settle(), expiry]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
+  }
 
-    const draft = this.pendingHumanQuestionDrafts.get(agentName);
-    if (!draft) return false;
-
-    await this.delay(1500);
-    const started = this.pendingHumanQuestions.get(agentName);
-    if (started) await started;
-    return true;
+  /**
+   * How long a pending human question may extend a step past its own deadline.
+   *
+   * A human question is a legitimate reason for a step to sit idle, so the step
+   * deadline alone must not kill it. But the extension is bounded by the
+   * configured Slack answer timeout, so a question nobody can ever answer —
+   * including one whose agent has died — ends the step instead of the run.
+   */
+  private resolveHumanQuestionWaitBudgetMs(step: WorkflowStep): number {
+    const config = this.resolveHumanAssistanceConfig(step);
+    const slack = config && typeof config.slack === 'object' && config.slack !== null ? config.slack : undefined;
+    return slack?.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
   }
 
   private async askSlackAndInjectAnswer(
@@ -10088,7 +10134,20 @@ export class WorkflowRunner {
             this.postToChannel(
               `**[${step.name}]** Agent \`${agent.name}\` is blocked on Slack human input`
             );
-            await this.waitForPendingHumanQuestion(agent.name);
+            // Bounded: the step is already past its deadline, so the question
+            // gets one finite extension. Without a budget this await never
+            // returns when the agent's PTY died holding the question, and the
+            // loop below re-enters this same branch forever.
+            const settled = await this.waitForPendingHumanQuestion(
+              agent.name,
+              this.resolveHumanQuestionWaitBudgetMs(step)
+            );
+            if (!settled) {
+              this.log(
+                `[${step.name}] Agent "${agent.name}" is past its deadline with a human question that never settled — timing out`
+              );
+              return 'timeout';
+            }
             if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
               return 'released';
             }
@@ -10106,7 +10165,16 @@ export class WorkflowRunner {
             this.postToChannel(
               `**[${step.name}]** Agent \`${agent.name}\` is waiting for a Slack human answer`
             );
-            await this.waitForPendingHumanQuestion(agent.name);
+            const answered = await this.waitForPendingHumanQuestion(
+              agent.name,
+              this.resolveHumanQuestionWaitBudgetMs(step)
+            );
+            if (!answered) {
+              this.log(
+                `[${step.name}] Agent "${agent.name}" idled on a human question that never settled — timing out`
+              );
+              return 'timeout';
+            }
             if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
               return 'released';
             }

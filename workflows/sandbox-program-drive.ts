@@ -115,8 +115,12 @@ const AGENT_IDLE_SECS = 900;
 
 /** Wall-clock bound per agent step. The idle threshold is deliberately long,
  *  so this is what stops a wedged PTY from holding the DAG open. */
-const REPAIR_STEP_TIMEOUT_MS = 45 * 60_000;
-const REVIEW_STEP_TIMEOUT_MS = 30 * 60_000;
+const REPAIR_STEP_TIMEOUT_MS = 12 * 60_000;
+const REVIEW_STEP_TIMEOUT_MS = 15 * 60_000;
+
+/** Plumbing repair owners (preflight, reconcile) get a shorter leash still.
+ *  They do bounded bookkeeping, so anything longer is a dead PTY, not work. */
+const PLUMBING_STEP_TIMEOUT_MS = 8 * 60_000;
 
 const gate = (name: string) => `bash ${GATES}/${name}.sh`;
 
@@ -288,7 +292,7 @@ Write what you did to ${ARTIFACTS}/preflight-repair.md.
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
-    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
+    timeoutMs: PLUMBING_STEP_TIMEOUT_MS,
   });
 
   // ── Phase 1: acceptance contract ───────────────────────────────────────────
@@ -345,9 +349,14 @@ ${REPAIR_RULES}`,
 
   // ── Phase 2: lane reconcile — the critical path ────────────────────────────
 
+  // Depends on `preflight`, NOT on `repair-preflight`. The first gate must never
+  // sit downstream of an interactive agent: an agent whose PTY dies takes its
+  // whole step with it, and everything behind it in the DAG waits on a corpse.
+  // `repair-preflight` runs beside this as an advisory producer — if it dies,
+  // the reconcile still runs and the evidence still lands.
   wf.step('lane-reconcile', {
     type: 'deterministic',
-    dependsOn: ['repair-preflight'],
+    dependsOn: ['preflight'],
     captureOutput: true,
     failOnError: false,
     command: gate('lane-reconcile'),
@@ -427,12 +436,55 @@ Write what you did to ${ARTIFACTS}/reconcile-repair.md.
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
-    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
+    timeoutMs: PLUMBING_STEP_TIMEOUT_MS,
   });
 
-  wf.step('lane-reconcile-verify', {
+  // ── Deterministic agent-liveness reconcile ─────────────────────────────────
+  //
+  // Chief's ask, and the right one: agent death must become a red gate a repair
+  // owner can act on, not silence. This step records, per agent step, whether
+  // the artifact that step owed actually landed. It is deterministic, it always
+  // completes, and it is what the gates depend on.
+
+  wf.step('agent-liveness', {
     type: 'deterministic',
     dependsOn: ['repair-lane-reconcile'],
+    captureOutput: true,
+    failOnError: false,
+    command: [
+      'set -uo pipefail',
+      `mkdir -p ${ARTIFACTS}`,
+      `EV=${ARTIFACTS}/agent-liveness-evidence.txt`,
+      'FAILED=0',
+      'echo "gate: agent-liveness" > "$EV"',
+      'echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$EV"',
+      'echo "---" >> "$EV"',
+      // An agent step that produced no artifact did not do its work, whether it
+      // was killed, timed out, or exited early. All three are the same red.
+      `for pair in "repair-preflight:${ARTIFACTS}/preflight-repair.md" "repair-lane-reconcile:${ARTIFACTS}/reconcile-repair.md"; do`,
+      '  NAME="${pair%%:*}"; FILE="${pair#*:}"',
+      '  if [ -s "$FILE" ]; then',
+      '    echo "AGENT_${NAME}_PRODUCED exit=0  # $FILE" >> "$EV"',
+      '  else',
+      '    echo "AGENT_${NAME}_PRODUCED exit=1  # no artifact at $FILE — agent died, timed out, or exited without working" >> "$EV"',
+      '    FAILED=$((FAILED + 1))',
+      '  fi',
+      'done',
+      'echo "---" >> "$EV"',
+      'echo "failed: $FAILED" >> "$EV"',
+      'cat "$EV"',
+      'if [ "$FAILED" -eq 0 ]; then echo AGENT_LIVENESS_OK; exit 0; fi',
+      'echo "AGENT_LIVENESS_RED: $FAILED agent steps produced nothing"',
+      'exit 1',
+    ].join('\n'),
+  });
+
+  // `agent-liveness` sits between the repair owner and this rerun so a dead
+  // agent becomes a RED CHECK with evidence rather than silence. The rerun
+  // depends on the liveness step, which is deterministic and always completes.
+  wf.step('lane-reconcile-verify', {
+    type: 'deterministic',
+    dependsOn: ['agent-liveness'],
     captureOutput: true,
     failOnError: false,
     command: gate('lane-reconcile'),
@@ -823,8 +875,28 @@ ${REPAIR_RULES}`,
   // approval gate that fails open is worse than no gate — so it is switched
   // off explicitly for exactly those two steps. `.step()` does not carry this
   // field, so it is set on the built config.
+  // Two classes of step get human assistance switched off explicitly.
+  //
+  //   The reviewers, because they run one-shot: a reviewer that can answer its
+  //   own approval gate fails open, which is worse than no gate.
+  //
+  //   The plumbing repair owners, because a preflight or reconcile problem is
+  //   the driver's to fix and not Khaliq's — and because every hang this flow
+  //   has suffered entered through the human-question path. A question left
+  //   outstanding by a dying PTY used to hold its step open indefinitely; the
+  //   SDK now bounds that wait, but the smaller blast radius is still correct.
+  //
+  // Human assistance stays ON where it earns its place: the four stage repair
+  // owners and the program lead, which are the steps that can hit a decision
+  // only Khaliq can make.
+  const NO_HUMAN_ASSISTANCE = new Set([
+    'claude-review',
+    'claude-review-final',
+    'repair-preflight',
+    'repair-lane-reconcile',
+  ]);
   for (const step of config.workflows[0].steps) {
-    if (step.name === 'claude-review' || step.name === 'claude-review-final') {
+    if (NO_HUMAN_ASSISTANCE.has(step.name)) {
       step.humanAssistance = false;
     }
   }
