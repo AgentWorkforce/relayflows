@@ -137,11 +137,22 @@ Rules for every repair owner in this flow:
 - Never merge and never push. Khaliq owns every merge gate.
 - sandbox, sandbox-router and relayflows are PUBLIC repos: no customer names,
   no credentials, no exploit paths in any file, commit, issue or comment.
-- If you are blocked on something only a human can decide — a missing
-  credential, a product intent call, an unsafe action — print EXACTLY one line:
-  HUMAN_QUESTION: <your concise question>
-  then wait for the injected HUMAN_ANSWER and continue from it. Do not stall
-  silently and do not invent an answer.
+- WHEN BLOCKED, ASK CHIEF FIRST. Chief holds the brain, the briefs and every
+  standing ruling, and is awake when Khaliq is not. Most of what blocks you is
+  already decided somewhere Chief can reach in seconds.
+  1. Write your question to ${ARTIFACTS}/questions/<step-name>.md FIRST, verbatim,
+     with the evidence line that prompted it. Do this before asking anyone: a
+     question that only exists inside a PTY is unrecoverable once that PTY is
+     gone, and we have already lost three that way.
+  2. Then DM chief via the Agent Relay MCP tool send_dm (to: "chief") and wait
+     for the reply.
+  3. Only escalate to Slack — one line, exactly \`HUMAN_QUESTION: <question>\` —
+     for what genuinely needs KHALIQ: a merge, a spend, a credential, or a
+     product-direction call. Then wait for the injected HUMAN_ANSWER.
+  Escalating to Slack something Chief could have answered stalls the flow
+  overnight, and that is a worse failure than a red gate. Never invent an
+  answer, and never stall silently.
+- Ask ONCE. Do not repeat the question while you wait.
 - If the blocker is external and no answer unblocks it, append the exact
   evidence to ${ARTIFACTS}/BLOCKED_NO_COMMIT.md and exit cleanly.
 - ALWAYS write your step's artifact before you exit, even when the answer is
@@ -244,7 +255,7 @@ async function main(): Promise<void> {
     failOnError: false,
     command: [
       'set -uo pipefail',
-      `mkdir -p ${ARTIFACTS}`,
+      `mkdir -p ${ARTIFACTS} ${ARTIFACTS}/questions`,
       'BLOCKED=0',
       'git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "PREFLIGHT_BLOCKED: not a git repo"; exit 1; }',
       'CURRENT=$(git rev-parse --abbrev-ref HEAD)',
