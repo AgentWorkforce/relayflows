@@ -104,6 +104,20 @@ const LANES = {
   stage4: { repo: `${AW_ROOT}/sandbox-router`, branch: 'agent/process-manifest-0820', owner: 'sandbox-router lane' },
 } as const;
 
+/** Seconds of true PTY silence before the runner calls an agent finished.
+ *  The default is 30, which is shorter than a Claude Code cold boot: the first
+ *  run of this flow retired two repair owners as "idle — treating as complete"
+ *  before their task had even been typed into the prompt, and they produced
+ *  nothing. A repair owner reading files and editing is legitimately quiet for
+ *  minutes at a time, so this is generous on purpose. Step timeouts, not the
+ *  idle detector, are what bound a hung agent. */
+const AGENT_IDLE_SECS = 900;
+
+/** Wall-clock bound per agent step. The idle threshold is deliberately long,
+ *  so this is what stops a wedged PTY from holding the DAG open. */
+const REPAIR_STEP_TIMEOUT_MS = 45 * 60_000;
+const REVIEW_STEP_TIMEOUT_MS = 30 * 60_000;
+
 const gate = (name: string) => `bash ${GATES}/${name}.sh`;
 
 /** Boilerplate every repair owner gets. Keeps the escape hatch identical and
@@ -152,36 +166,42 @@ async function main(): Promise<void> {
     model: ClaudeModels.OPUS,
     role: 'Sandbox program lead on #wf-sandbox-program. Coordinates the four repair owners, escalates to Khaliq, blocks nothing.',
     retries: 1,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('fix-provisioning', {
     cli: 'codex',
     model: CodexModels.GPT_5_4,
     role: 'Stage 1 repair owner — sandbox provisioning: Relayfile mount, gh, roster, live mounted tree.',
     retries: 2,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('fix-sec30', {
     cli: 'claude',
     model: ClaudeModels.SONNET,
     role: 'Stage 2 repair owner — sandbox#30 initial-sync script mode and credential containment.',
     retries: 2,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('fix-longrun', {
     cli: 'claude',
     model: ClaudeModels.SONNET,
     role: 'Stage 3 repair owner — the long-running provider reconciliation document.',
     retries: 2,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('fix-routing', {
     cli: 'codex',
     model: CodexModels.GPT_5_4,
     role: 'Stage 4 repair owner — capability routing in sandbox-router and its call site in cloud.',
     retries: 2,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('reconcile-repair', {
     cli: 'claude',
     model: ClaudeModels.SONNET,
     role: 'Reconcile repair owner — finishes missing lane artifacts and evidence before the stage gates run.',
     retries: 2,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('claude-reviewer', {
     cli: 'claude',
@@ -189,12 +209,14 @@ async function main(): Promise<void> {
     preset: 'reviewer',
     role: 'Fresh-eyes reviewer. Reads the actual files, gate evidence, and diff from scratch.',
     retries: 1,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
   wf.agent('claude-fixer', {
     cli: 'claude',
     model: ClaudeModels.SONNET,
     role: 'Review-finding fixer. Repairs valid findings, adds proofs, reruns gates.',
     retries: 2,
+    idleThresholdSecs: AGENT_IDLE_SECS,
   });
 
   // ── Phase 0: preflight ─────────────────────────────────────────────────────
@@ -260,6 +282,7 @@ Write what you did to ${ARTIFACTS}/preflight-repair.md.
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
+    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
   });
 
   // ── Phase 1: acceptance contract ───────────────────────────────────────────
@@ -356,6 +379,7 @@ Exit when the repair owners have converged or you have escalated.
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
     retries: 1,
+    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
   });
 
   wf.step('repair-lane-reconcile', {
@@ -397,6 +421,7 @@ Write what you did to ${ARTIFACTS}/reconcile-repair.md.
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
+    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
   });
 
   wf.step('lane-reconcile-verify', {
@@ -451,6 +476,7 @@ Record what you changed and the commands you ran in ${ARTIFACTS}/${key}-repair.m
 
 ${REPAIR_RULES}`,
       verification: { type: 'exit_code' },
+      timeoutMs: REPAIR_STEP_TIMEOUT_MS,
     });
     wf.step(`verify-${key}`, {
       type: 'deterministic',
@@ -585,6 +611,7 @@ Rerun: ${gate('program-acceptance')}
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
+    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
   });
 
   wf.step('program-acceptance-final', {
@@ -632,6 +659,7 @@ Write ${ARTIFACTS}/claude-review.md using this schema per finding:
   fix_required / test_required / status / evidence
 If there are no actionable issues, write NO_ISSUES_FOUND.`,
     verification: { type: 'exit_code' },
+    timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
   wf.step('claude-fix', {
@@ -649,6 +677,7 @@ If the review says NO_ISSUES_FOUND, record that no fix was needed.
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
+    timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
   wf.step('claude-review-final', {
@@ -660,6 +689,7 @@ on the fixer's summary — read the files and rerun what you need to.
 Write ${ARTIFACTS}/claude-review-final.md with findings, or NO_ISSUES_FOUND
 only if there are no actionable issues left.`,
     verification: { type: 'exit_code' },
+    timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
   wf.step('claude-fix-final', {
@@ -676,6 +706,7 @@ If it says NO_ISSUES_FOUND, write ${ARTIFACTS}/claude-signoff.md.
 
 ${REPAIR_RULES}`,
     verification: { type: 'exit_code' },
+    timeoutMs: REVIEW_STEP_TIMEOUT_MS,
   });
 
   wf.step('final-review-pass-gate', {
