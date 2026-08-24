@@ -122,20 +122,42 @@ ci_check() {
     record "$name" 1 "no workflow runs on $slug@$branch — empty is NOT a pass"
     return 0
   fi
-  # Latest run per workflow name; every one must be completed/success.
-  local red
-  red=$(jq -r '
+  # Latest run per workflow name. Three outcomes, kept apart on purpose:
+  #
+  #   success  — green.
+  #   skipped / neutral / cancelled — NOT a pass and NOT a failure. A path
+  #     filter that skips a Preview deploy on a scripts-only change is correct;
+  #     a classifier that skipped the job that mattered is how a green deploy
+  #     shipped nothing in cloud#3155. Silently accepting it is the bug, so it
+  #     is surfaced as its own state for an owner to rule on explicitly.
+  #   anything else — failing.
+  local failing skipped
+  failing=$(jq -r '
     group_by(.name)
     | map(sort_by(.createdAt) | last)
-    | map(select(.status != "completed" or .conclusion != "success"))
+    | map(select(
+        .status != "completed"
+        or ((.conclusion // "null") | . != "success" and . != "skipped" and . != "neutral")
+      ))
     | map("\(.name)=\(.status)/\(.conclusion // "null")")
     | join(", ")
   ' < "$json" 2>> "$LOG")
-  if [ -n "$red" ] && [ "$red" != "null" ]; then
-    record "$name" 1 "non-green workflows on $slug@$branch: $red"
-  else
-    record "$name" 0 "all $count runs green per workflow on $slug@$branch"
+  skipped=$(jq -r '
+    group_by(.name)
+    | map(sort_by(.createdAt) | last)
+    | map(select(.status == "completed" and ((.conclusion // "null") == "skipped" or (.conclusion // "null") == "neutral")))
+    | map(.name) | join(", ")
+  ' < "$json" 2>> "$LOG")
+
+  if [ -n "$failing" ] && [ "$failing" != "null" ]; then
+    record "$name" 1 "FAILING workflows on $slug@$branch: $failing"
+    return 0
   fi
+  if [ -n "$skipped" ] && [ "$skipped" != "null" ]; then
+    record "$name" 1 "NOT-RUN workflows on $slug@$branch: $skipped — skipped is neither pass nor fail; an owner must rule whether the skip is correct for this change"
+    return 0
+  fi
+  record "$name" 0 "all $count runs green per workflow on $slug@$branch"
 }
 
 gate_finish() {
