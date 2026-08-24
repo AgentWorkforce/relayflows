@@ -19,8 +19,12 @@ Not pushed, not merged — Khaliq owns every merge gate.
 
 ## Evidence it is EXECUTING, not authored
 
-- Run id **`075570b618ee39e8d073cebe`**, started locally
-  (`relayflows run workflows/sandbox-program-drive.ts`).
+- Current run id **`e82a9445c08bc18d549557b0`**, started locally
+  (`relayflows run workflows/sandbox-program-drive.ts`). `preflight` reports
+  **PREFLIGHT_OK**. Two earlier runs — `075570b618ee39e8d073cebe` and
+  `2c65b1a75671d4d1177e8425` — were stopped deliberately after each exposed a
+  defect in this flow; their logs are kept as `run-075570b6.log` and
+  `run-2c65b1a7.log`.
 - Live processes: the `relayflows run` parent and the
   `node --experimental-strip-types .../sandbox-program-drive.ts` child.
 - Broker up, channel `wf-sandbox-program` created, 29 steps dispatching.
@@ -34,7 +38,7 @@ Not pushed, not merged — Khaliq owns every merge gate.
 
 Resume, do not restart:
 
-    RESUME_RUN_ID=075570b618ee39e8d073cebe relayflows run workflows/sandbox-program-drive.ts
+    RESUME_RUN_ID=e82a9445c08bc18d549557b0 relayflows run workflows/sandbox-program-drive.ts
 
 ## Shape
 
@@ -101,13 +105,42 @@ document.
 
 Both are routed to repair owners inside the run. Neither stops it.
 
-## One flow bug found and fixed by running it
+## Three flow bugs found by running it — each fixed, none guessed at
 
-The first run's `preflight` blocked on unexpected drift — its own broker
-writes `.agentworkforce/relay/state-*.json` into the seat at startup. Ignored
-now the way `.agent-relay/` already was, and allowed in preflight (`c60a624`).
-`preflight` is `failOnError: false` with a repair owner, so the run continued
-through it rather than dying on it. That is the shape working as intended.
+Running it is what found these. None would have shown up in a dry run, and the
+first two are exactly the class the brief calls out: written-but-not-running
+looks identical to working.
+
+1. **`c60a624` — preflight blocked on the broker's own scratch.** The flow's
+   broker writes `.agentworkforce/relay/state-*.json` into the seat at startup,
+   so run 1 tripped its own drift guard. Ignored now the way `.agent-relay/`
+   already was.
+
+2. **`1c4904f` — repair owners were retired before their task was typed.**
+   Run 1 declared `repair-preflight` and `repair-lane-reconcile` "idle —
+   treating as complete" about 30s after spawn. Their PTY logs contain nothing
+   but the Claude Code splash screen: the task had not reached the prompt, and
+   neither agent made an edit or wrote an artifact. The runner's idle threshold
+   defaults to 30s, which is shorter than a Claude Code cold boot and far
+   shorter than a repair owner reading files. Raised to 900s, with an explicit
+   `timeoutMs` on every agent step so a wedged PTY is caught by a wall clock
+   rather than by silence. **A step that reports success is not a step that
+   ran** — the same lesson as `publish.yml` shipping a defective 0.1.6 off a
+   green run.
+
+3. **`696be00` — the preflight allow-list matched nothing.** The pattern is
+   interpolated inside shell *single* quotes, where the shell does no
+   unescaping, so a JS template literal needs two backslashes to emit the one
+   `\.` that ERE reads as a literal dot. It carried four — the documented rule
+   for a *double*-quoted shell string — and emitted `\\.`, which ERE reads as
+   "a literal backslash then any character". Every allowed path was therefore
+   reported as unexpected drift, on runs 1 and 2 both.
+
+In all three cases `preflight` is `failOnError: false` with a repair owner, so
+the run continued through the red rather than dying on it. That is the shape
+working as intended — but a repair owner cannot fix a defect in the flow that
+spawned it, which is why the driver is a person-shaped lane and not just a
+`fix-*` step.
 
 ## Standing constraints honoured
 
