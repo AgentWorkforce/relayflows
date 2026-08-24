@@ -225,7 +225,7 @@ async function main(): Promise<void> {
       // Allowed dirty: the paths this flow itself writes. Anything else is
       // unexpected drift and blocks, because the commit step adds only
       // declared paths and would otherwise commit someone else's work.
-      `ALLOWED='^(package-lock\\\\.json|workflows/sandbox-program-drive\\\\.ts|workflows/sandbox-program/|\\\\.workflow-artifacts/|\\\\.claude/)'`,
+      `ALLOWED='^(package-lock\\\\.json|workflows/sandbox-program-drive\\\\.ts|workflows/sandbox-program/|\\\\.workflow-artifacts/|\\\\.claude/|\\\\.agentworkforce/)'`,
       `DIRTY=$(git status --short | awk '{print $2}' | grep -vE "$ALLOWED" || true)`,
       'if [ -n "$DIRTY" ]; then echo "PREFLIGHT_BLOCKED: unexpected drift:"; echo "$DIRTY"; BLOCKED=1; fi',
       'gh auth status >/dev/null 2>&1 || { echo "PREFLIGHT_BLOCKED: gh not authenticated — CI gates cannot be read"; BLOCKED=1; }',
