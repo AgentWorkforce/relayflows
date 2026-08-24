@@ -115,12 +115,12 @@ const AGENT_IDLE_SECS = 900;
 
 /** Wall-clock bound per agent step. The idle threshold is deliberately long,
  *  so this is what stops a wedged PTY from holding the DAG open. */
-const REPAIR_STEP_TIMEOUT_MS = 12 * 60_000;
-const REVIEW_STEP_TIMEOUT_MS = 15 * 60_000;
+const REPAIR_STEP_TIMEOUT_MS = 25 * 60_000;
+const REVIEW_STEP_TIMEOUT_MS = 20 * 60_000;
 
 /** Plumbing repair owners (preflight, reconcile) get a shorter leash still.
  *  They do bounded bookkeeping, so anything longer is a dead PTY, not work. */
-const PLUMBING_STEP_TIMEOUT_MS = 8 * 60_000;
+const PLUMBING_STEP_TIMEOUT_MS = 20 * 60_000;
 
 const gate = (name: string) => `bash ${GATES}/${name}.sh`;
 
@@ -144,6 +144,12 @@ Rules for every repair owner in this flow:
   silently and do not invent an answer.
 - If the blocker is external and no answer unblocks it, append the exact
   evidence to ${ARTIFACTS}/BLOCKED_NO_COMMIT.md and exit cleanly.
+- ALWAYS write your step's artifact before you exit, even when the answer is
+  "nothing needed". "No repair was required, and here is the evidence that the
+  gate was already green" is a result and it must be on disk. A step that
+  decided correctly and wrote nothing is indistinguishable from a step whose
+  agent died, and the flow verifies on the artifact for exactly that reason.
+- Then exit promptly. Do not idle after your artifact is written.
 `.trim();
 
 // ── Workflow ─────────────────────────────────────────────────────────────────
@@ -278,7 +284,9 @@ async function main(): Promise<void> {
 Output:
 {{steps.preflight.output}}
 
-If it printed PREFLIGHT_OK, do nothing and say PREFLIGHT_ALREADY_OK.
+If it printed PREFLIGHT_OK there is nothing to repair — write
+${ARTIFACTS}/preflight-repair.md recording PREFLIGHT_ALREADY_OK and the evidence
+line you based that on, then exit.
 
 If it printed PREFLIGHT_BLOCKED, fix what you safely can:
 - unexpected tracked drift in this repo: inspect it, and either leave it alone
@@ -466,7 +474,7 @@ ${REPAIR_RULES}`,
       '  if [ -s "$FILE" ]; then',
       '    echo "AGENT_${NAME}_PRODUCED exit=0  # $FILE" >> "$EV"',
       '  else',
-      '    echo "AGENT_${NAME}_PRODUCED exit=1  # no artifact at $FILE — agent died, timed out, or exited without working" >> "$EV"',
+      '    echo "AGENT_${NAME}_PRODUCED exit=1  # no artifact at $FILE — agent died, timed out, or exited without recording a result (a correct no-op still writes its note)" >> "$EV"',
       '    FAILED=$((FAILED + 1))',
       '  fi',
       'done',
@@ -524,7 +532,8 @@ Gate output — every "exit=1" line is a work item:
 Full evidence: ${ARTIFACTS}/${key}-evidence.txt
 Full command log: ${ARTIFACTS}/${key}.log
 
-If the gate is already green, say NOTHING_TO_REPAIR and stop.
+If the gate is already green, write ${ARTIFACTS}/${key}-repair.md recording
+NOTHING_TO_REPAIR plus the green evidence line, then stop.
 
 Otherwise: fix each red check at its root, then rerun the SAME gate command
 from ${REPO_ROOT}:
