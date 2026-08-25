@@ -165,6 +165,8 @@ export interface WorkflowRunOptions {
   dryRun?: boolean;
   /** External step executor (e.g. Daytona sandbox backend). */
   executor?: RunnerStepExecutor;
+  /** Resume a failed run by its ID instead of starting fresh. */
+  resume?: string;
   /** Start from a specific step, skipping all predecessors. */
   startFrom?: string;
   /** Previous run ID whose cached outputs are used with startFrom. */
@@ -616,7 +618,7 @@ export class WorkflowBuilder {
     }
 
     // Auto-detect RESUME_RUN_ID env var for resuming failed runs
-    const resumeRunId = process.env.RESUME_RUN_ID;
+    const resumeRunId = options.resume ?? process.env.RESUME_RUN_ID;
 
     const startFrom = this._startFrom ?? options.startFrom ?? process.env.START_FROM;
     const previousRunId = this._previousRunId ?? options.previousRunId ?? process.env.PREVIOUS_RUN_ID;
@@ -632,7 +634,7 @@ export class WorkflowBuilder {
       runner.on(renderer.onEvent);
 
       const runPromise = resumeRunId
-        ? runner.resume(resumeRunId, options.vars, config)
+        ? runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true })
         : runner.execute(config, options.workflow, options.vars, executeOptions);
 
       try {
@@ -644,7 +646,7 @@ export class WorkflowBuilder {
     }
 
     if (resumeRunId) {
-      return runner.resume(resumeRunId, options.vars, config);
+      return runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true });
     }
 
     return runner.execute(config, options.workflow, options.vars, executeOptions);

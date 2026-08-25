@@ -122,7 +122,7 @@ import type {
   WorkflowStepStatus,
   ProcessBackend,
   RunnerStepExecutor,
-} from './types.js';
+  ResumeOptions,} from './types.js';
 import { WorkflowTrajectory, type StepOutcome } from './trajectory.js';
 import {
   activateWorkflowPersona,
@@ -3986,7 +3986,13 @@ export class WorkflowRunner {
   }
 
   /** Resume a previously paused or partially completed run. */
-  async resume(runId: string, vars?: VariableContext, config?: RelayYamlConfig): Promise<WorkflowRunRow> {
+  async resume(
+    runId: string,
+    vars?: VariableContext,
+    config?: RelayYamlConfig,
+    options?: ResumeOptions
+  ): Promise<WorkflowRunRow> {
+    const resetRunningSteps = options?.resetRunningSteps ?? false;
     // Set up abort controller early so callers can abort() even during setup
     this.abortController = new AbortController();
     this.paused = false;
@@ -4036,16 +4042,28 @@ export class WorkflowRunner {
       }
     }
 
-    // Reset failed steps to pending for retry
+    // Reset steps to pending so they are retried.
+    //
+    // `failed` is always safe to requeue. `running` is only safe when no other
+    // process is still executing the step: there is no lease/heartbeat on runs
+    // today, so we cannot detect a live owner. Requeueing blindly would let a
+    // second `resume` re-run steps concurrently with the original process and
+    // duplicate non-idempotent side effects. It is therefore opt-in via
+    // `resetRunningSteps`, which the user-facing resume paths set because
+    // `--resume` explicitly means "the previous process is gone".
     for (const [, state] of stepStates) {
-      if (state.row.status === 'failed') {
+      const isFailed = state.row.status === 'failed';
+      const isStaleRunning = state.row.status === 'running' && resetRunningSteps;
+      if (isFailed || isStaleRunning) {
         state.row.status = 'pending';
         state.row.error = undefined;
         state.row.completionReason = undefined;
+        state.row.retryCount = 0;
         await this.db.updateStep(state.row.id, {
           status: 'pending',
           error: undefined,
           completionReason: undefined,
+          retryCount: 0,
           updatedAt: new Date().toISOString(),
         });
       }
