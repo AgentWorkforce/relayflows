@@ -287,3 +287,56 @@ did not prove content.
 | 3 — longrun | GREEN 15/15 structurally | **UNPROVEN — re-score under the new gate** |
 | 4 — routing | BLOCKED_UNBUILT | unchanged |
 | acceptance | BLOCKED, MISSING | unchanged, and now for a fourth reason |
+
+---
+
+# FINAL — run f8780ed6 completed
+
+**Status: `completed`. `TERMINAL_STATE: BLOCKED_NO_COMMIT`.** Verified against
+the evidence, not taken from the printed line: `BLOCKED_NO_COMMIT.md` exists,
+nothing was committed by the flow, and the terminal state matches the acceptance
+result. **This is the contract's handled blocked state — a completed run, not a
+failure, and the first one this program has produced.**
+
+## Final acceptance, re-scored by the tightened gates
+
+```
+ACCEPT_STAGE1_PROVISIONING       exit=1
+ACCEPT_STAGE2_SANDBOX30          exit=1     <- was exit=0 before the review
+ACCEPT_STAGE3_LONGRUN_RECONCILE  exit=0
+ACCEPT_STAGE4_CAPABILITY_ROUTING exit=1
+checks: 4   failed: 3
+```
+
+**Stage 2 flipped green to red under its own tightened gate.** That is
+correction C-1 confirmed by the flow itself rather than by argument: the
+credential is still written into the generated initial-sync script on the path
+that ships. Final state is **1 of 4 green**, not 2 of 4.
+
+## Guard status, stated plainly
+
+The guard was re-baselined **three** times this run — 04:50Z, 05:41Z, 06:25Z.
+Each actor declared or archived it; none hid anything. But it means
+`gate-integrity-verify`, `-verify-final` and `-verify-commit` all compared
+against baselines amended after run start, so **only the first of the three
+attested to anything.**
+
+Fixed since (`7159ca9`): the baseline is bound to the run id via
+`AGENT_RELAY_RUN_ID_FILE`, so a re-baseline inside a run is refused while a new
+run may legitimately take its own; `verify` fails `GATE_INTEGRITY_RUN_MISMATCH`
+on a baseline from another run and `GATE_INTEGRITY_BASELINE_SWAPPED` when the
+baseline file itself was altered. **The negative suite F-01 asked for now
+exists** — `gate-integrity.test.sh`, 10/10, including the exact defeat sequence.
+
+This also fixed **F-16**, which was blocking: the hardened refuse-to-overwrite
+had no run-id binding, `.agent-relay/` is gitignored and host-persistent, and
+`gate-integrity-baseline` is `failOnError: true` — **the next run would have
+died at step 2 with no artifact.** Confirmed live before the fix.
+
+## Open, and not mine to close
+
+- **F-02 — the live credential.** Owner is the `sandbox-sec30-0824` lane; the
+  fix is in `mount-script.ts` / `orchestrator.ts`, not this repo. Needs a
+  decision from Khaliq on rotation as well as code.
+- **F-16 follow-on:** the driver now has 5 parallel steps in wave 3 against
+  `maxConcurrency: 4`, so one queues. Harmless, worth tidying.
