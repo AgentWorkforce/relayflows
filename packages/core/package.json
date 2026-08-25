@@ -56,6 +56,7 @@
     "@agent-relay/config": "^8.2.0",
     "@agent-relay/harness-driver": "^8.2.0",
     "@agent-relay/harnesses": "^8.2.0",
+    "@agent-relay/sandbox": "^0.1.2",
     "@agent-relay/sdk": "^8.2.0",
     "@agentworkforce/persona-kit": "^4.1.39",
     "@agentworkforce/persona-registry": "^4.1.39",

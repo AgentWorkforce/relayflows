@@ -658,7 +658,13 @@ export interface WorkflowStepRow {
 // uploadFile is reserved for future file asset staging; current executors run
 // commands directly with env/cwd/timeout passed through exec options.
 
-/** Backend for creating isolated execution environments (e.g. Daytona sandboxes). */
+/**
+ * Backend for creating isolated execution environments.
+ *
+ * Prefer configuring a provider through `sandbox-backend.ts` rather than
+ * implementing this by hand — `createSandboxProcessBackend` adapts any
+ * `@agent-relay/sandbox` runtime (Daytona among them) to this interface.
+ */
 export interface ProcessBackend {
   /** Create an isolated execution environment. */
   createEnvironment(label: string): Promise<ProcessEnvironment>;

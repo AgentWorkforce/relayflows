@@ -8,6 +8,8 @@ export {
   createProcessBackendExecutor,
   type ProcessBackendExecutorOptions,
 } from './process-backend-executor.js';
+export * from './sandbox-backend.js';
+export * from './sandbox-local-runtime.js';
 export * from './run-summary-table.js';
 export * from './template-resolver.js';
 export * from './verification.js';
