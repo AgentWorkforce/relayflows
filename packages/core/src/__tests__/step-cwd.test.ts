@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 vi.mock('@relaycast/sdk', () => ({
@@ -27,6 +29,27 @@ vi.mock('@agent-relay/harness-driver', async (importOriginal) => {
 const { WorkflowRunner } = await import('../runner.js');
 
 describe('WorkflowRunner step cwd resolution', () => {
+  const config = (cwdResolution?: 'workflow-file' | 'process') => ({
+    version: '1',
+    name: 'cwd-resolution',
+    ...(cwdResolution ? { cwdResolution } : {}),
+    swarm: { pattern: 'dag' as const },
+    agents: [{ name: 'worker', cli: 'claude' as const, cwd: '../agent-workspace' }],
+    workflows: [
+      {
+        name: 'default',
+        steps: [
+          {
+            name: 'generate',
+            agent: 'worker',
+            task: 'Generate',
+            cwd: '../step-workspace',
+          },
+        ],
+      },
+    ],
+  });
+
   it('prefers step.cwd over agent.cwd and runner cwd', () => {
     const runnerRoot = '/runner-root';
     const runner = new WorkflowRunner({ cwd: runnerRoot });
@@ -82,5 +105,83 @@ describe('WorkflowRunner step cwd resolution', () => {
     expect(
       (runner as any).resolveEffectiveCwd({ name: 's4', type: 'deterministic', command: 'pwd' }),
     ).toBe(runnerRoot);
+  });
+
+  it('resolves agent and step cwd from the parsed workflow file when opted in', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'relay-cwd-resolution-'));
+    const runnerRoot = path.join(root, 'process', 'project');
+    const workflowDir = path.join(root, 'workflow', 'config');
+    const yamlPath = path.join(workflowDir, 'relay.yaml');
+    mkdirSync(runnerRoot, { recursive: true });
+    mkdirSync(workflowDir, { recursive: true });
+    writeFileSync(
+      yamlPath,
+      [
+        'version: "1"',
+        'name: cwd-resolution',
+        'cwdResolution: workflow-file',
+        'swarm:',
+        '  pattern: dag',
+        'agents:',
+        '  - name: worker',
+        '    cli: claude',
+        '    cwd: ../agent-workspace',
+        'workflows:',
+        '  - name: default',
+        '    steps:',
+        '      - name: generate',
+        '        agent: worker',
+        '        task: Generate',
+        '        cwd: ../step-workspace',
+      ].join('\n') + '\n'
+    );
+
+    try {
+      const runner = new WorkflowRunner({ cwd: runnerRoot });
+      const parsed = await runner.parseYamlFile(yamlPath);
+      (runner as any).configureCwdResolution(parsed);
+
+      expect((runner as any).resolveAgentCwd(parsed.agents[0])).toBe(
+        path.resolve(workflowDir, '../agent-workspace')
+      );
+      expect((runner as any).resolveEffectiveCwd(parsed.workflows![0].steps[0])).toBe(
+        path.resolve(workflowDir, '../step-workspace')
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves process-relative agent and step cwd when explicitly configured', () => {
+    const runnerRoot = '/process/project';
+    const runner = new WorkflowRunner({ cwd: runnerRoot });
+    (runner as any).workflowFileDir = '/workflow/config';
+    (runner as any).configureCwdResolution(config('process'));
+
+    expect((runner as any).resolveAgentCwd(config('process').agents[0])).toBe(
+      path.resolve(runnerRoot, '../agent-workspace')
+    );
+    expect((runner as any).resolveEffectiveCwd(config('process').workflows[0].steps[0])).toBe(
+      path.resolve(runnerRoot, '../step-workspace')
+    );
+  });
+
+  it('warns with both paths when the default is ambiguous', () => {
+    const runnerRoot = '/process/project';
+    const workflowDir = '/workflow/config';
+    const runner = new WorkflowRunner({ cwd: runnerRoot });
+    (runner as any).workflowFileDir = workflowDir;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    (runner as any).configureCwdResolution(config());
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(path.resolve(runnerRoot, '../agent-workspace'))
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(path.resolve(workflowDir, '../agent-workspace'))
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('future major'));
+    warn.mockRestore();
   });
 });

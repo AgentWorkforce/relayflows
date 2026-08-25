@@ -122,7 +122,7 @@ import type {
   WorkflowStepStatus,
   ProcessBackend,
   RunnerStepExecutor,
-} from './types.js';
+  ResumeOptions,} from './types.js';
 import { WorkflowTrajectory, type StepOutcome } from './trajectory.js';
 import {
   activateWorkflowPersona,
@@ -861,6 +861,8 @@ export class WorkflowRunner {
   private readonly workspaceId: string;
   private readonly relayOptions: RuntimeSpawnOptions;
   private readonly cwd: string;
+  private workflowFileDir?: string;
+  private cwdResolution: NonNullable<RelayYamlConfig['cwdResolution']> = 'process';
   private readonly summaryDir: string;
   private executor?: RunnerStepExecutor;
   private readonly envSecrets?: Record<string, string>;
@@ -1003,6 +1005,50 @@ export class WorkflowRunner {
     return p.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_match, varName: string) => {
       return process.env[varName] ?? _match;
     });
+  }
+
+  private resolveConfiguredCwd(configuredCwd: string): string {
+    const base = this.cwdResolution === 'workflow-file' ? this.workflowFileDir : this.cwd;
+    return path.resolve(base ?? this.cwd, configuredCwd);
+  }
+
+  private configureCwdResolution(config: RelayYamlConfig): void {
+    const configuredMode = config.cwdResolution;
+    this.cwdResolution = configuredMode ?? 'process';
+
+    if (this.cwdResolution === 'workflow-file' && !this.workflowFileDir) {
+      throw new Error(
+        'cwdResolution: "workflow-file" requires a workflow loaded from a YAML file so its directory is known'
+      );
+    }
+    if (configuredMode || !this.workflowFileDir) return;
+
+    const candidates: Array<{ label: string; cwd: string }> = [];
+    for (const agent of config.agents ?? []) {
+      if (agent.cwd) candidates.push({ label: `Agent "${agent.name}"`, cwd: agent.cwd });
+    }
+    for (const workflow of config.workflows ?? []) {
+      for (const step of workflow.steps) {
+        if (step.cwd) {
+          candidates.push({
+            label: `Step "${workflow.name}.${step.name}"`,
+            cwd: step.cwd,
+          });
+        }
+      }
+    }
+
+    for (const candidate of candidates) {
+      const processPath = path.resolve(this.cwd, candidate.cwd);
+      const workflowPath = path.resolve(this.workflowFileDir, candidate.cwd);
+      if (processPath === workflowPath) continue;
+      console.warn(
+        `[WorkflowRunner] DEPRECATION WARNING: ${candidate.label} cwd "${candidate.cwd}" ` +
+          `currently resolves from the process cwd to "${processPath}"; workflow-file resolution ` +
+          `would use "${workflowPath}". Set top-level cwdResolution to "process" or ` +
+          `"workflow-file" explicitly. The default will flip to "workflow-file" in a future major release.`
+      );
+    }
   }
 
   /**
@@ -1467,7 +1513,7 @@ export class WorkflowRunner {
       return resolved;
     }
     if (agent.cwd) {
-      return path.resolve(this.cwd, agent.cwd);
+      return this.resolveConfiguredCwd(agent.cwd);
     }
     return this.cwd;
   }
@@ -1489,7 +1535,7 @@ export class WorkflowRunner {
 
   private resolveEffectiveCwd(step: WorkflowStep, agentDef?: AgentDefinition): string {
     if (step.cwd) {
-      return path.resolve(this.cwd, step.cwd);
+      return this.resolveConfiguredCwd(step.cwd);
     }
     return this.resolveStepWorkdir(step) ?? (agentDef ? this.resolveAgentCwd(agentDef) : this.cwd);
   }
@@ -2998,11 +3044,15 @@ export class WorkflowRunner {
   async parseYamlFile(filePath: string): Promise<RelayYamlConfig> {
     const absPath = path.resolve(this.cwd, filePath);
     const raw = await readFile(absPath, 'utf-8');
+    this.workflowFileDir = path.dirname(absPath);
     return this.parseYamlString(raw, absPath);
   }
 
   /** Parse a relay.yaml string. */
   parseYamlString(raw: string, source = '<string>'): RelayYamlConfig {
+    if (source !== '<string>' && path.isAbsolute(source)) {
+      this.workflowFileDir = path.dirname(source);
+    }
     const parsed = parseYaml(raw);
     this.validateConfig(parsed, source);
     const config = this.normalizeLegacyPermissionConfig(parsed as RelayYamlConfig);
@@ -3085,6 +3135,15 @@ export class WorkflowRunner {
     }
     if (c.agents !== undefined && !Array.isArray(c.agents)) {
       throw new Error(`${source}: "agents" must be an array when provided`);
+    }
+    if (
+      c.cwdResolution !== undefined &&
+      c.cwdResolution !== 'process' &&
+      c.cwdResolution !== 'workflow-file'
+    ) {
+      throw new Error(
+        `${source}: "cwdResolution" must be either "process" or "workflow-file"`
+      );
     }
 
     // Approval gates that cannot reach a human fail OPEN, so they must be refused
@@ -3222,6 +3281,7 @@ export class WorkflowRunner {
       this.validateConfig(config);
       resolved = vars ? this.resolveVariables(config, vars) : config;
       resolved = this.applyPermissionProfiles(resolved);
+      this.configureCwdResolution(resolved);
     } catch (err) {
       errors.push(err instanceof Error ? err.message : String(err));
       return {
@@ -3336,7 +3396,7 @@ export class WorkflowRunner {
     // Validate cwd paths
     for (const agent of resolved.agents) {
       if (agent.cwd) {
-        const resolvedCwd = path.resolve(this.cwd, agent.cwd);
+        const resolvedCwd = this.resolveConfiguredCwd(agent.cwd);
         if (!existsSync(resolvedCwd)) {
           warnings.push(
             `Agent "${agent.name}" cwd "${agent.cwd}" resolves to "${resolvedCwd}" which does not exist`
@@ -3871,6 +3931,7 @@ export class WorkflowRunner {
 
     // Validate config (catches cycles, missing deps, invalid steps, etc.)
     this.validateConfig(resolved);
+    this.configureCwdResolution(resolved);
     const runtimeConfig = this.applyReliabilityDefaults(resolved);
 
     const permissionResult = this.validatePermissions(
@@ -4012,7 +4073,13 @@ export class WorkflowRunner {
   }
 
   /** Resume a previously paused or partially completed run. */
-  async resume(runId: string, vars?: VariableContext, config?: RelayYamlConfig): Promise<WorkflowRunRow> {
+  async resume(
+    runId: string,
+    vars?: VariableContext,
+    config?: RelayYamlConfig,
+    options?: ResumeOptions
+  ): Promise<WorkflowRunRow> {
+    const resetRunningSteps = options?.resetRunningSteps ?? false;
     // Set up abort controller early so callers can abort() even during setup
     this.abortController = new AbortController();
     this.paused = false;
@@ -4041,6 +4108,7 @@ export class WorkflowRunner {
     const resolvedConfig = this.applyReliabilityDefaults(
       vars ? this.resolveVariables(run.config, vars) : run.config
     );
+    this.configureCwdResolution(resolvedConfig);
 
     // Resolve path definitions (same as execute()) so workdir lookups work on resume
     const pathResult = this.resolvePathDefinitions(resolvedConfig.paths, this.cwd);
@@ -4062,16 +4130,28 @@ export class WorkflowRunner {
       }
     }
 
-    // Reset failed steps to pending for retry
+    // Reset steps to pending so they are retried.
+    //
+    // `failed` is always safe to requeue. `running` is only safe when no other
+    // process is still executing the step: there is no lease/heartbeat on runs
+    // today, so we cannot detect a live owner. Requeueing blindly would let a
+    // second `resume` re-run steps concurrently with the original process and
+    // duplicate non-idempotent side effects. It is therefore opt-in via
+    // `resetRunningSteps`, which the user-facing resume paths set because
+    // `--resume` explicitly means "the previous process is gone".
     for (const [, state] of stepStates) {
-      if (state.row.status === 'failed') {
+      const isFailed = state.row.status === 'failed';
+      const isStaleRunning = state.row.status === 'running' && resetRunningSteps;
+      if (isFailed || isStaleRunning) {
         state.row.status = 'pending';
         state.row.error = undefined;
         state.row.completionReason = undefined;
+        state.row.retryCount = 0;
         await this.db.updateStep(state.row.id, {
           status: 'pending',
           error: undefined,
           completionReason: undefined,
+          retryCount: 0,
           updatedAt: new Date().toISOString(),
         });
       }

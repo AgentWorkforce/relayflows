@@ -262,6 +262,33 @@ describe('resume fallback to step-output cache', () => {
     expect(startedSteps).toContain('step-c');
   });
 
+  it('should reset stale running steps to pending and re-execute them', async () => {
+    const runId = 'resume-stale-running-run';
+    const config = makeResumeConfig();
+
+    await db.insertRun(makeRunRow(runId, config, 'running'));
+    await db.insertStep(makeStepRow(runId, 'step-a', 'Do step A', [], 'running'));
+    await db.insertStep(makeStepRow(runId, 'step-b', 'Do step B', ['step-a'], 'pending'));
+    await db.insertStep(makeStepRow(runId, 'step-c', 'Do step C', ['step-b'], 'pending'));
+
+    const events: Array<{ type: string; stepName?: string }> = [];
+    runner.on((event) => {
+      if ('stepName' in event) {
+        events.push({ type: event.type, stepName: event.stepName });
+      }
+    });
+
+    const run = await runner.resume(runId, undefined, undefined, { resetRunningSteps: true });
+    expect(run.status, run.error).toBe('completed');
+
+    expect(db.updateStep).toHaveBeenCalledWith(
+      `${runId}-step-a`,
+      expect.objectContaining({ status: 'pending', error: undefined, completionReason: undefined })
+    );
+    const startedSteps = events.filter((event) => event.type === 'step:started').map((event) => event.stepName);
+    expect(startedSteps).toContain('step-a');
+  });
+
   it('should handle empty step-output directory gracefully', async () => {
     const runId = 'resume-empty-cache';
     const config = makeResumeConfig();
