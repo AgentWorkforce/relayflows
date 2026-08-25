@@ -341,6 +341,8 @@ export interface CustomStepDefinition {
   captureOutput?: boolean;
   /** Exit codes that end the workflow with the distinct completed_early status. */
   terminalSuccessExitCodes?: number[];
+  /** Files a deterministic repair agent must never change. */
+  repairProtection?: import('./schema.js').RepairProtectionConfig;
   /** Timeout in milliseconds. */
   timeoutMs?: number;
   /** Human-readable description of this step. */

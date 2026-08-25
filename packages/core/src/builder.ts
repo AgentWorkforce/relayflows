@@ -123,6 +123,8 @@ export interface DeterministicStepOptions {
   failOnError?: boolean;
   /** Exit codes that end the workflow with the distinct completed_early status. */
   terminalSuccessExitCodes?: number[];
+  /** Files a repair agent must not modify, relative to this step's cwd. */
+  repairProtection?: WorkflowStep['repairProtection'];
   dependsOn?: string[];
   verification?: VerificationCheck;
   timeoutMs?: number;
@@ -429,6 +431,11 @@ export class WorkflowBuilder {
       if (options.failOnError !== undefined) step.failOnError = options.failOnError;
       if (options.terminalSuccessExitCodes !== undefined) {
         step.terminalSuccessExitCodes = [...options.terminalSuccessExitCodes];
+      }
+      if (options.repairProtection !== undefined) {
+        step.repairProtection = {
+          protectedPaths: [...options.repairProtection.protectedPaths],
+        };
       }
       if (options.dependsOn !== undefined) step.dependsOn = options.dependsOn;
       if (options.verification !== undefined) step.verification = options.verification;

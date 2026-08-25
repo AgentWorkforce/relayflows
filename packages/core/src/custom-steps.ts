@@ -208,6 +208,28 @@ function validateCustomStepDefinition(
     }
   }
 
+  if (stepDef.repairProtection !== undefined) {
+    const repairProtection = stepDef.repairProtection;
+    const protectedPaths =
+      typeof repairProtection === 'object' && repairProtection !== null
+        ? (repairProtection as Record<string, unknown>).protectedPaths
+        : undefined;
+    if (
+      stepType !== 'deterministic' ||
+      typeof repairProtection !== 'object' ||
+      repairProtection === null ||
+      !Array.isArray(protectedPaths) ||
+      protectedPaths.length === 0 ||
+      protectedPaths.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)
+    ) {
+      throw new CustomStepsParseError(
+        `Invalid repairProtection for step "${name}"`,
+        'repairProtection.protectedPaths must be a non-empty array of non-empty strings on a deterministic step',
+        filePath
+      );
+    }
+  }
+
   if (stepType === 'worktree' && !hasBranch) {
     throw new CustomStepsParseError(
       `Worktree step "${name}" is missing "branch"`,
@@ -441,6 +463,9 @@ export function resolveCustomStep(
     resolvedStep.captureOutput = customDef.captureOutput;
     resolvedStep.terminalSuccessExitCodes = customDef.terminalSuccessExitCodes
       ? [...customDef.terminalSuccessExitCodes]
+      : undefined;
+    resolvedStep.repairProtection = customDef.repairProtection
+      ? { protectedPaths: [...customDef.repairProtection.protectedPaths] }
       : undefined;
   } else if (stepType === 'worktree') {
     resolvedStep.branch = interpolate(customDef.branch);

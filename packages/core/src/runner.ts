@@ -65,6 +65,10 @@ import { collectCliSession, type CliSessionReport } from './cli-session-collecto
 import { executeApiStep } from './api-executor.js';
 import { BudgetExceededError, BudgetTracker } from './budget-tracker.js';
 import {
+  RepairProtectionSnapshot,
+  RepairScopeViolationError,
+} from './repair-protection.js';
+import {
   ChannelMessenger,
   formatObserverGuidance,
   scrubForChannel as scrubWorkflowOutputForChannel,
@@ -557,6 +561,12 @@ interface DeterministicRepairContext {
   exitSignal?: string;
 }
 
+interface RepairProtectionPlan {
+  protectedPaths: string[];
+  unresolvedLocalGateCode: string[];
+  explicitlyProtected: boolean;
+}
+
 interface AgentStepRepairContext {
   step: WorkflowStep;
   agentDef: AgentDefinition;
@@ -878,6 +888,8 @@ export class WorkflowRunner {
   private readonly relayOptions: RuntimeSpawnOptions;
   private readonly cwd: string;
   private workflowFileDir?: string;
+  /** Absolute path of the loaded YAML, when configuration came from disk. */
+  private workflowFilePath?: string;
   private cwdResolution: NonNullable<RelayYamlConfig['cwdResolution']> = 'process';
   private readonly summaryDir: string;
   private executor?: RunnerStepExecutor;
@@ -3068,6 +3080,7 @@ export class WorkflowRunner {
     const absPath = path.resolve(this.cwd, filePath);
     const raw = await readFile(absPath, 'utf-8');
     this.workflowFileDir = path.dirname(absPath);
+    this.workflowFilePath = absPath;
     return this.parseYamlString(raw, absPath);
   }
 
@@ -3075,6 +3088,10 @@ export class WorkflowRunner {
   parseYamlString(raw: string, source = '<string>'): RelayYamlConfig {
     if (source !== '<string>' && path.isAbsolute(source)) {
       this.workflowFileDir = path.dirname(source);
+      this.workflowFilePath = source;
+    } else if (source === '<string>') {
+      this.workflowFileDir = undefined;
+      this.workflowFilePath = undefined;
     }
     const parsed = parseYaml(raw);
     this.validateConfig(parsed, source);
@@ -3641,6 +3658,11 @@ export class WorkflowRunner {
           `${source}: terminalSuccessExitCodes is only valid on deterministic steps ("${s.name}")`
         );
       }
+      if (s.repairProtection !== undefined && s.type !== 'deterministic') {
+        throw new Error(
+          `${source}: repairProtection is only valid on deterministic steps ("${s.name}")`
+        );
+      }
 
       // Deterministic steps require type and command
       if (s.type === 'deterministic') {
@@ -3661,6 +3683,23 @@ export class WorkflowRunner {
           if (new Set(codes).size !== codes.length) {
             throw new Error(
               `${source}: deterministic step "${s.name}" terminalSuccessExitCodes must not contain duplicates`
+            );
+          }
+        }
+        if (s.repairProtection !== undefined) {
+          const protection = s.repairProtection;
+          if (
+            typeof protection !== 'object' ||
+            protection === null ||
+            Array.isArray(protection) ||
+            !Array.isArray((protection as Record<string, unknown>).protectedPaths) ||
+            ((protection as Record<string, unknown>).protectedPaths as unknown[]).length === 0 ||
+            ((protection as Record<string, unknown>).protectedPaths as unknown[]).some(
+              (entry) => typeof entry !== 'string' || entry.trim().length === 0
+            )
+          ) {
+            throw new Error(
+              `${source}: deterministic step "${s.name}" repairProtection.protectedPaths must be a non-empty array of non-empty strings`
             );
           }
         }
@@ -4840,6 +4879,7 @@ export class WorkflowRunner {
           const verificationResult = step.verification
             ? this.runVerification(step.verification, output, step.name, undefined, {
                 exitCode: executorResult.exitCode,
+                cwd: stepCwd,
               })
             : undefined;
           return {
@@ -4956,6 +4996,7 @@ export class WorkflowRunner {
         const verificationResult = step.verification
           ? this.runVerification(step.verification, output, step.name, undefined, {
               exitCode: lastExitCode,
+              cwd: stepCwd,
             })
           : undefined;
         lastCommandOutput = [commandStdout || output, commandStderr].filter(Boolean).join('\n');
@@ -5067,6 +5108,160 @@ export class WorkflowRunner {
     return score;
   }
 
+  private tokenizeShellCommand(command: string): string[][] {
+    const commands: string[][] = [];
+    let currentCommand: string[] = [];
+    let currentToken = '';
+    let quote: "'" | '"' | undefined;
+    let escaped = false;
+    const flushToken = () => {
+      if (currentToken.length > 0) currentCommand.push(currentToken);
+      currentToken = '';
+    };
+    const flushCommand = () => {
+      flushToken();
+      if (currentCommand.length > 0) commands.push(currentCommand);
+      currentCommand = [];
+    };
+
+    for (const char of command) {
+      if (escaped) {
+        currentToken += char;
+        escaped = false;
+        continue;
+      }
+      if (char === '\\' && quote !== "'") {
+        escaped = true;
+        continue;
+      }
+      if (quote) {
+        if (char === quote) quote = undefined;
+        else currentToken += char;
+        continue;
+      }
+      if (char === "'" || char === '"') {
+        quote = char;
+        continue;
+      }
+      if (/\s/.test(char)) {
+        if (char === '\n') flushCommand();
+        else flushToken();
+        continue;
+      }
+      if (char === ';' || char === '|' || char === '&') {
+        flushCommand();
+        continue;
+      }
+      currentToken += char;
+    }
+    flushCommand();
+    return commands;
+  }
+
+  private resolveProtectedPath(rawPath: string, cwd: string): string {
+    const expanded = WorkflowRunner.resolveEnvVars(rawPath);
+    const tildeExpanded = expanded === '~' ? homedir() : expanded.startsWith('~/') ? path.join(homedir(), expanded.slice(2)) : expanded;
+    return path.resolve(cwd, tildeExpanded);
+  }
+
+  private findDirectLocalScripts(
+    command: string,
+    cwd: string,
+    source: 'gate' | 'verification'
+  ): { paths: string[]; unresolved: string[] } {
+    const paths: string[] = [];
+    const unresolved: string[] = [];
+    const interpreters = new Set([
+      'sh',
+      'bash',
+      'dash',
+      'zsh',
+      'node',
+      'python',
+      'python3',
+      'bun',
+      'deno',
+      'tsx',
+      'ts-node',
+    ]);
+    const packageRunners = new Set(['npm', 'npx', 'pnpm', 'yarn']);
+    const scriptExtension = /\.(?:[cm]?js|ts|tsx|py|sh|bash|zsh)$/i;
+
+    for (const originalTokens of this.tokenizeShellCommand(command)) {
+      const tokens = [...originalTokens];
+      while (tokens[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens.shift();
+      if (tokens[0] === 'env') {
+        tokens.shift();
+        while (tokens[0] && (tokens[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]))) {
+          tokens.shift();
+        }
+      }
+      if (tokens[0] === 'sudo') tokens.shift();
+      const executable = tokens[0];
+      if (!executable) continue;
+      const executableName = path.basename(executable).toLowerCase();
+      let candidate: string | undefined;
+
+      if (interpreters.has(executableName)) {
+        const args = tokens.slice(1);
+        for (let index = 0; index < args.length; index += 1) {
+          const arg = args[index];
+          if (['-c', '-e', '--eval', '-p', '--print', '-m'].includes(arg)) {
+            candidate = undefined;
+            break;
+          }
+          if (['-r', '--require', '--loader', '--import'].includes(arg)) {
+            index += 1;
+            continue;
+          }
+          if (arg === '--') {
+            candidate = args[index + 1];
+            break;
+          }
+          if (!arg.startsWith('-')) {
+            candidate = arg;
+            break;
+          }
+        }
+      } else if (
+        executable.startsWith('.') ||
+        executable.startsWith('/') ||
+        executable.includes('/') ||
+        scriptExtension.test(executable)
+      ) {
+        candidate = executable;
+      } else if (packageRunners.has(executableName)) {
+        unresolved.push(`${source} command uses indirect package runner: ${tokens.join(' ')}`);
+      }
+
+      if (!candidate) continue;
+      const resolved = this.resolveProtectedPath(candidate, cwd);
+      if (existsSync(resolved)) paths.push(resolved);
+      else unresolved.push(`${source} script could not be resolved: ${candidate}`);
+    }
+    return { paths, unresolved };
+  }
+
+  private resolveRepairProtection(context: DeterministicRepairContext): RepairProtectionPlan {
+    const explicit = context.step.repairProtection?.protectedPaths ?? [];
+    const protectedPaths = explicit.map((entry) => this.resolveProtectedPath(entry, context.cwd));
+    if (this.workflowFilePath) protectedPaths.push(this.workflowFilePath);
+
+    const gateScripts = this.findDirectLocalScripts(context.command, context.cwd, 'gate');
+    protectedPaths.push(...gateScripts.paths);
+    const verificationScripts =
+      context.step.verification?.type === 'custom'
+        ? this.findDirectLocalScripts(context.step.verification.value, context.cwd, 'verification')
+        : { paths: [], unresolved: [] };
+    protectedPaths.push(...verificationScripts.paths);
+
+    return {
+      protectedPaths: [...new Set(protectedPaths.map((entry) => path.resolve(entry)))],
+      unresolvedLocalGateCode: [...gateScripts.unresolved, ...verificationScripts.unresolved],
+      explicitlyProtected: explicit.length > 0,
+    };
+  }
+
   private async runDeterministicRepairAgent(context: DeterministicRepairContext): Promise<void> {
     if (!context.agentDef.cli) {
       throw new Error(`Repair agent "${context.agentDef.name}" must be a raw CLI agent`);
@@ -5076,7 +5271,23 @@ export class WorkflowRunner {
       cli: context.agentDef.cli,
       interactive: false,
     };
-    const repairPrompt = this.buildDeterministicRepairPrompt(context);
+    const protection = this.resolveRepairProtection(context);
+    if (protection.unresolvedLocalGateCode.length > 0 && !protection.explicitlyProtected) {
+      const detail =
+        `[${context.step.name}] REPAIR PROTECTION WARNING: repair agent skipped because local gate code ` +
+        `could not be resolved safely (${protection.unresolvedLocalGateCode.join('; ')}). ` +
+        `The deterministic gate will be rerun without repair. Configure repairProtection.protectedPaths to proceed.`;
+      this.log(detail);
+      this.postToChannel(`**[${context.step.name}] REPAIR PROTECTION WARNING:** ${detail}`);
+      this.recordStepToolSideEffect(context.step.name, {
+        type: 'custom',
+        detail,
+        raw: { unresolvedLocalGateCode: protection.unresolvedLocalGateCode },
+      });
+      return;
+    }
+
+    const repairPrompt = this.buildDeterministicRepairPrompt(context, protection.protectedPaths);
     const repairStep: WorkflowStep = {
       name: `${context.step.name}-repair-${context.attempt}`,
       type: 'agent',
@@ -5107,9 +5318,11 @@ export class WorkflowRunner {
       },
     });
 
+    const snapshot = RepairProtectionSnapshot.capture(protection.protectedPaths);
+    let repairOutput: string | undefined;
+    let repairError: unknown;
     try {
       this.ensureBudgetAllowsSpawn(context.step.name, repairAgent.name);
-      let repairOutput: string;
       if (this.executor) {
         repairOutput = await this.executor.executeAgentStep(repairStep, repairAgent, repairPrompt, timeoutMs);
       } else if (repairAgent.cli === 'api') {
@@ -5126,30 +5339,60 @@ export class WorkflowRunner {
         const result = await this.execNonInteractive(repairAgent, repairStep, timeoutMs);
         repairOutput = result.output;
       }
+    } catch (error) {
+      repairError = error;
+    } finally {
+      const violations = snapshot.verifyAndRestore();
+      if (violations.length > 0) {
+        const evidence = violations
+          .map(
+            (violation) =>
+              `${violation.path}: ${violation.reason}; expected sha256=${violation.expectedSha256}, ` +
+              `actual sha256=${violation.actualSha256}; ` +
+              (violation.restoreError ? `restore FAILED: ${violation.restoreError}` : 'snapshot restored')
+          )
+          .join('\n');
+        this.log(`[${context.step.name}] Repair scope violation; terminating run FAILED:\n${evidence}`);
+        this.postToChannel(
+          `**[${context.step.name}] REPAIR SCOPE VIOLATION — RUN FAILED**\n\`\`\`\n${evidence}\n\`\`\``
+        );
+        this.recordStepToolSideEffect(context.step.name, {
+          type: 'custom',
+          detail: 'Repair scope violation; protected snapshot restored and run terminated',
+          raw: { violations },
+        });
+        throw new RepairScopeViolationError(violations);
+      }
+    }
 
+    if (repairError === undefined) {
       this.recordStepToolSideEffect(context.step.name, {
         type: 'custom',
         detail: `Repair agent ${repairAgent.name} completed before deterministic retry`,
-        raw: { repairAgent: repairAgent.name, output: repairOutput.slice(0, 1000) },
+        raw: { repairAgent: repairAgent.name, output: (repairOutput ?? '').slice(0, 1000) },
       });
-    } catch (error) {
-      if (error instanceof BudgetExceededError || this.abortController?.signal.aborted) {
-        throw error;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      this.log(`[${context.step.name}] Repair agent "${repairAgent.name}" failed: ${message}`);
-      this.postToChannel(
-        `**[${context.step.name}]** Repair agent \`${repairAgent.name}\` failed; retrying gate anyway`
-      );
-      this.recordStepToolSideEffect(context.step.name, {
-        type: 'custom',
-        detail: `Repair agent ${repairAgent.name} failed before deterministic retry: ${message}`,
-        raw: { repairAgent: repairAgent.name, error: message },
-      });
+      return;
     }
+
+    if (repairError instanceof BudgetExceededError || this.abortController?.signal.aborted) {
+      throw repairError;
+    }
+    const message = repairError instanceof Error ? repairError.message : String(repairError);
+    this.log(`[${context.step.name}] Repair agent "${repairAgent.name}" failed: ${message}`);
+    this.postToChannel(
+      `**[${context.step.name}]** Repair agent \`${repairAgent.name}\` failed; retrying gate anyway`
+    );
+    this.recordStepToolSideEffect(context.step.name, {
+      type: 'custom',
+      detail: `Repair agent ${repairAgent.name} failed before deterministic retry: ${message}`,
+      raw: { repairAgent: repairAgent.name, error: message },
+    });
   }
 
-  private buildDeterministicRepairPrompt(context: DeterministicRepairContext): string {
+  private buildDeterministicRepairPrompt(
+    context: DeterministicRepairContext,
+    protectedPaths: string[] = []
+  ): string {
     const output = context.output.trim();
     const clippedOutput = output.length > 4000 ? output.slice(-4000) : output;
     return (
@@ -5161,6 +5404,10 @@ export class WorkflowRunner {
       `Exit code: ${context.exitCode ?? 'unknown'}\n` +
       `Exit signal: ${context.exitSignal ?? 'none'}\n\n` +
       `Command output:\n${clippedOutput || '(no output captured)'}\n\n` +
+      (protectedPaths.length > 0
+        ? `Protected gate files (enforced by snapshot; do not edit, delete, replace, chmod, or execute them):\n` +
+          `${protectedPaths.map((entry) => `- ${entry}`).join('\n')}\n\n`
+        : '') +
       `Repair only what is needed for this gate to pass. Preserve unrelated user changes. ` +
       `After making the fix, report the files changed and the reason the gate should pass.`
     );
@@ -10903,7 +11150,7 @@ export class WorkflowRunner {
         output,
         stepName,
         injectedTaskText,
-        { ...options, cwd: this.cwd },
+        { ...options, cwd: options?.cwd ?? this.cwd },
         {
           recordStepToolSideEffect: (name, effect) => this.recordStepToolSideEffect(name, effect),
           getOrCreateStepEvidenceRecord: (name) => this.getOrCreateStepEvidenceRecord(name),
