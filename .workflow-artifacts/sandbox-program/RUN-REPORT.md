@@ -1,153 +1,181 @@
-# sbx-relayflow-0824 — the sandbox-program relayflow is written and running
+# sandbox-program — RUN REPORT
 
-Brief: `~/Projects/AgentWorkforce/chief/.briefs/sbx-relayflow-0824.md`
-Seat: `~/Projects/AgentWorkforce/relayflows` (real clone, branch
-`flow/sandbox-program-drive-0824`, no other writer)
+Run: `f8780ed663bb5851bca97323` ("run 5")
+Driver: `sbx-relayflow-0824b`
+Branch: `flow/sandbox-program-drive-0824` (pushed; never merged)
+Started: 2026-08-25 05:37Z · Log: `.workflow-artifacts/sandbox-program/run-0824b.log`
 
-## The deliverable
+**This is the first run to reach program acceptance and produce an honest
+program-wide result.** Runs 1–4 never got here; runs 3 and 4 died mid-flight.
 
-| What | Path |
+---
+
+## The honest end state
+
+| Stage | State | Why |
+|---|---|---|
+| 1 — provisioning | **PENDING** | Not failing. **Unmeasured.** |
+| 2 — sandbox#30 | **GREEN 8/8** | Genuine. |
+| 3 — longrun reconcile | **GREEN 15/15, structurally** | Green, but see the caveat. |
+| 4 — capability routing | **BLOCKED_UNBUILT** | Not broken. **Never started.** |
+| program acceptance | **BLOCKED — MISSING, not wrong** | Depends on 1 and 4. |
+
+```
+ACCEPT_STAGE1_PROVISIONING       exit=1
+ACCEPT_STAGE2_SANDBOX30          exit=0
+ACCEPT_STAGE3_LONGRUN_RECONCILE  exit=0
+ACCEPT_STAGE4_CAPABILITY_ROUTING exit=1
+checks: 4   failed: 2
+```
+
+### Program acceptance is MISSING, not wrong
+
+This is the classification that matters, and it is why no repair owner could
+ever have turned this gate green. **The code does not exist yet and the
+measurement was never taken.** Fixing code cannot supply either.
+
+**Stage 1 — five of seven failures are one unmeasured thing.**
+`S1_PROBE_MOUNT`, `S1_PROBE_GH_VERSION`, `S1_PROBE_GH_AUTH`, `S1_PROBE_ROSTER`,
+`S1_PROBE_WORKSPACE_IS_MOUNT` are all `exit=1` because **no fresh box has ever
+been probed.** `stage1-freshbox-probe.txt` says so in its first line —
+`PENDING: awaiting fresh-box run from sbx-provisioning-0824` — and then honestly
+records every check as `exit=1`. That file is correct. It needs a live Daytona
+credential and spend approval, both Khaliq-owned.
+
+The remaining two: `S1_ROSTER_IN_SNAPSHOT` (contract A6; no roster referent in
+the snapshot builder) and `S1_CI` (`Preview` NOT-RUN on
+`cloud@fix/snapshot-gh-cli` — skipped is neither pass nor fail).
+
+**Stage 4 — unbuilt.** `git grep -nE
+"sandbox-router|@agent-relay/sandbox-router|selectByCapability|routeByCapability"
+-- packages src infra scripts` in `cloud` returns **exit=1, zero matches**.
+Cloud has never imported the capability router. `S4_ROUTER_CI` is also red
+because `agent/process-manifest-0820` carries **no `.github/workflows` at all**
+(`git ls-tree -r agent/process-manifest-0820 -- .github/workflows` → empty; a
+`ci.yml` exists in the working tree but is uncommitted). Empty is not a pass.
+
+**So the correct disposition is: block once, record the evidence, stop.** It is
+not a repair loop. Pointing successive agents at an unachievable gate is the
+same trap that produced two false greens on stage 4 last night, and the failure
+mode is predictable: the cheapest way to go green is to widen the criterion.
+
+### The stage 3 caveat — read this before trusting the 15/15
+
+Every one of stage 3's fifteen checks is a **marker-string grep**:
+
+```
+S3_DAYTONA_CAP_RULING exit=0  # pattern: DAYTONA_CAP_RULING
+S3_CROSSOVER          exit=0  # pattern: crossover|breakeven|59\.8
+```
+
+A well-marked-up document that was **wrong** would score 15/15. The gate proves
+the document has the right headings, not the right content. It should assert
+that the Daytona ruling names `autoStopInterval=0`, no-ttl, and Modal as the
+only unreset cap. **Not tightened during this run on purpose** — editing a gate
+mid-run is exactly what the integrity guard exists to catch, and it would
+correctly have failed the run for it.
+
+---
+
+## How to verify a step is actually alive
+
+**This misled two readers of this run, so it is written down.** A step name, its
+heartbeat name, and its process name are **three different strings**, and the
+obvious roster check misses the live agent.
+
+One step, `repair-program-acceptance`, ran under all of these:
+
+| What | Name |
 |---|---|
-| The flow | `workflows/sandbox-program-drive.ts` (29 steps, 21 waves, 8 agents) |
-| Gate scripts | `workflows/sandbox-program/gates/*.sh` |
-| Evidence | `.workflow-artifacts/sandbox-program/*-evidence.txt` |
-| Run log | `.workflow-artifacts/sandbox-program/run.log` |
+| step name (in the DAG) | `repair-program-acceptance` |
+| attempt 1 agent | `repair-program-acceptance-f8780ed6` |
+| pre-retry repair agent | `repair-program-acceptance-repair-1` |
+| attempt 2 agent | `repair-program-acceptance-f8780ed6-r2` |
 
-Commits on `flow/sandbox-program-drive-0824`:
-`781aa7e` the flow, `c60a624` a preflight fix the first run exposed.
-Not pushed, not merged — Khaliq owns every merge gate.
+So `ps aux | grep "repair-program-acceptance-f8780ed6"` returns **nothing** while
+`-repair-1` is the live agent — the run looks dead and is not. The heartbeat
+line prints the *agent* name, so `[repair-program-acceptance-repair-1] still
+running (300s)` names something the roster check never looks for.
 
-## Evidence it is EXECUTING, not authored
+**Check in this order. The log clock is authoritative; ps is corroborating.**
 
-- Current run id **`e82a9445c08bc18d549557b0`**, started locally
-  (`relayflows run workflows/sandbox-program-drive.ts`). `preflight` reports
-  **PREFLIGHT_OK**. Two earlier runs — `075570b618ee39e8d073cebe` and
-  `2c65b1a75671d4d1177e8425` — were stopped deliberately after each exposed a
-  defect in this flow; their logs are kept as `run-075570b6.log` and
-  `run-2c65b1a7.log`.
-- Live processes: the `relayflows run` parent and the
-  `node --experimental-strip-types .../sandbox-program-drive.ts` child.
-- Broker up, channel `wf-sandbox-program` created, 29 steps dispatching.
-- Steps already completed with real output on disk:
-  `preflight` → `acceptance-contract` (wrote `ACCEPTANCE.md`) →
-  `repair-preflight` spawned as a live PTY agent
-  (`repair-preflight-075570b6`).
-- Deterministic gates already produced evidence files before the run, and are
-  re-run inside it: `lane-reconcile-evidence.txt` (10 checks, 3 red),
-  `stage3-longrun-reconcile-evidence.txt` (15 checks, 15 red).
+```sh
+# 1. Is the runner process itself alive?           (4 procs = healthy)
+ps aux | grep -c '[s]andbox-program-drive'
 
-Resume, do not restart:
+# 2. Is the log still ADVANCING? This is the real signal.
+stat -f '%Sm' -t '%H:%M:%S' .workflow-artifacts/sandbox-program/run-0824b.log
+date '+%H:%M:%S'          # a gap of minutes during an agent step is NORMAL
+tail -3 .workflow-artifacts/sandbox-program/run-0824b.log
 
-    RESUME_RUN_ID=e82a9445c08bc18d549557b0 relayflows run workflows/sandbox-program-drive.ts
+# 3. Which agent is live for this run — match the RUN ID, never the step name.
+ps aux | grep '[a]gent-relay-broker pty' | grep -oE 'agent-name [a-z0-9-]+'
+```
 
-## Shape
+**Rule: match on the run id, not the step name.** Attempts append `-r2`; the
+pre-retry repair agent replaces the run id entirely with `-repair-N`. A step is
+dead only when the runner is gone **or** the log clock has stopped advancing —
+not when a name you guessed is absent from `ps`.
 
-Repair before failure, per `relay-80-100-workflow`. Every gate is
-`run-*` (`captureOutput: true`, `failOnError: false`) → `fix-*` (agent reading
-`{{steps.run-*.output}}`) → `verify-*` (deterministic rerun). `commit-if-green`
-reruns the full acceptance command, records each exit code, and commits only
-when every one is zero; anything still red becomes `BLOCKED_NO_COMMIT.md` with
-the failing evidence and the step **exits successfully**, so the run reports a
-handled blocked state rather than a `FAILED` run.
+---
 
-Gates stay on the critical path. No gate depends on a live lane process: the
-critical path runs through `lane-reconcile`, a deterministic read of
-`git status --short`, diff stats and required files across the four lane
-clones. `program-lead-coordinate` runs in parallel and is a dependency of
-nothing, so a dropped PTY cannot masquerade as "the product failed".
+## What this run also established
 
-`integrations.relayfile: {}` — the existing Relayfile connection, no
-workspaceId, no tokens, no Slack bot token in the file.
-`swarm.humanAssistance.slack` is declared and every agent is instructed to
-print exactly one `HUMAN_QUESTION:` line when blocked. Human assistance is
-switched **off** for the two one-shot reviewer steps: a reviewer that can
-answer its own approval gate fails open.
+**The crash that killed runs 3 and 4 was not an uncaught throw.**
+`RelayFileClient.subscribe` is synchronous, returns a Subscription, and keeps
+its setup promise in a closure. A token with no `workspace_id` claim rejected
+that promise with nothing attached while `subscribe` returned normally — so the
+`try/catch` saw no throw, the await chain never saw a rejection, and Node killed
+the process. That is why a timeout at `[87:38]` survived and a setup failure at
+`[115:03]` did not. **No try/catch could have caught it.** Fixed at the point it
+surfaces; the same hole existed in `waitFor` event gates.
 
-Runs locally, by design. The flow is the driver and the sandbox is the
-subject. No step tries to prove the runtime can reach a sandbox.
+**Slack human assistance is off; the answer loop is closed.** The reply now
+arrives at `questions/<step>.ANSWER.md` and is injected. The program lead read
+chief's standing ruling from a *previous* run and did not re-ask it.
 
-## What the four stages gate on
+**The gate-integrity guard held.** `GATE_INTEGRITY_OK: 9 gate files unchanged`
+at every checkpoint, across four repair owners and the program lead. Last night
+two owners rewrote the gates they were judged by; tonight none did.
 
-1. **Provisioning** (`sbx-provisioning-0824`, `cloud-provisioning-0824`,
-   `fix/snapshot-gh-cli`) — the live snapshot builder must install `gh`, mount
-   Relayfile, and write the roster; plus a fresh-box probe transcript recording
-   `mount_relayfile`, `gh_version`, `gh_auth_status`, `roster_present`,
-   `workspace_is_mount`, each with its own exit code. A missing transcript is a
-   FAIL routed to the repair owner, not a skip.
-2. **`sandbox#30`** (`sbx-sec30-0824`) — the repo's own mount-script tests run
-   under an explicit `umask 022`, because 0600 inherited from a lucky umask is
-   not a fix. Plus typecheck, full suite, and CI.
-3. **Long-run reconciliation** (`sbx-longrun-0824`) — one document superseding
-   `sandbox-router#16`/`#17`: four axes, per-claim OBSERVED/DOCUMENTED/INFERRED
-   labels, an explicit `DAYTONA_CAP_RULING`, a crossover point rather than a
-   single-number ranking, a `RECOMMENDATION`, an UNKNOWN list, and no raw
-   tokens in a public repo.
-4. **Capability routing** — `sandbox-router` typecheck/tests, selection by
-   capability rather than hardcoded provider, and a **real call site in
-   cloud**. Gated behind stage 1: an empty box beats a good router.
+**Stage 4, then vs now:**
 
-Verification standards are enforced in `gates/_lib.sh`: every check is scored
-by the exit code of the command itself, never through a pipe and never by
-absence of an error; CI is read with `gh run list --branch` (never `--commit`),
-the latest run of every workflow name must be `completed/success`, and an empty
-result is a **FAIL**, not a pass.
+| | last night | this run |
+|---|---|---|
+| checks | `6 checks, 0 failed` | `7 checks, 2 failed` |
+| consumer | `exit=0` (widened to a different package) | `exit=1`, zero matches |
+| CI check | **deleted** | **restored**, `exit=1` |
+| state | green | `BLOCKED_UNBUILT` |
 
-## First red gates — real work, already surfaced
+---
 
-`lane-reconcile`: 3 of 10 red.
-- `RECON_STAGE3_LONGRUN_MATERIALIZED` — no committed or working-tree change in
-  `docs/` on the longrun lane.
-- `RECON_STAGE1_PROBE` — no fresh-box provisioning probe transcript exists yet.
-- `RECON_STAGE3_DOC` — the reconciliation document does not exist yet.
+## What Khaliq should take from this
 
-`stage3-longrun-reconcile`: 15 of 15 red, all downstream of the missing
-document.
+The centre of the sandbox program — capability routing — **has not been
+started**, and provisioning **has never been measured on a real box**. Those are
+the two things standing between this program and done. Stage 2 is genuinely
+finished; stage 3 has a document that passes a gate too weak to confirm it.
 
-Both are routed to repair owners inside the run. Neither stops it.
+Two unblocks are yours and only yours:
+1. **A live Daytona credential and spend approval** so the fresh-box probe can
+   actually run. Until then stage 1 is unmeasurable, not failing.
+2. **A decision on capability routing** — whether `sandbox-router` is still the
+   architecture, given `cloud` went to a provider-neutral runtime seam instead.
 
-## Three flow bugs found by running it — each fixed, none guessed at
+## Follow-ups, deliberately not done during this run
 
-Running it is what found these. None would have shown up in a dry run, and the
-first two are exactly the class the brief calls out: written-but-not-running
-looks identical to working.
+All three would have meant editing a gate mid-flight, which the integrity guard
+correctly fails the run for.
 
-1. **`c60a624` — preflight blocked on the broker's own scratch.** The flow's
-   broker writes `.agentworkforce/relay/state-*.json` into the seat at startup,
-   so run 1 tripped its own drift guard. Ignored now the way `.agent-relay/`
-   already was.
+1. Tighten stage 3 to assert content, not markers.
+2. Fix `RECON_STAGE1_PROBE` — it reports **green because the probe file exists**
+   while its contents are entirely `exit=1`. Existence where it means exit code.
+3. Restore the `git grep` command echo in the stage-4 blocked record (the
+   evidence shows `exit=1` without the command line above it).
 
-2. **`1c4904f` — repair owners were retired before their task was typed.**
-   Run 1 declared `repair-preflight` and `repair-lane-reconcile` "idle —
-   treating as complete" about 30s after spawn. Their PTY logs contain nothing
-   but the Claude Code splash screen: the task had not reached the prompt, and
-   neither agent made an edit or wrote an artifact. The runner's idle threshold
-   defaults to 30s, which is shorter than a Claude Code cold boot and far
-   shorter than a repair owner reading files. Raised to 900s, with an explicit
-   `timeoutMs` on every agent step so a wedged PTY is caught by a wall clock
-   rather than by silence. **A step that reports success is not a step that
-   ran** — the same lesson as `publish.yml` shipping a defective 0.1.6 off a
-   green run.
+## Provenance note
 
-3. **`696be00` — the preflight allow-list matched nothing.** The pattern is
-   interpolated inside shell *single* quotes, where the shell does no
-   unescaping, so a JS template literal needs two backslashes to emit the one
-   `\.` that ERE reads as a literal dot. It carried four — the documented rule
-   for a *double*-quoted shell string — and emitted `\\.`, which ERE reads as
-   "a literal backslash then any character". Every allowed path was therefore
-   reported as unexpected drift, on runs 1 and 2 both.
-
-In all three cases `preflight` is `failOnError: false` with a repair owner, so
-the run continued through the red rather than dying on it. That is the shape
-working as intended — but a repair owner cannot fix a defect in the flow that
-spawned it, which is why the driver is a person-shaped lane and not just a
-`fix-*` step.
-
-## Standing constraints honoured
-
-Never merge, never push. `relayflows`, `sandbox` and `sandbox-router` are
-public: no customer names, no credentials, no exploit paths. Repair owners are
-each scoped to one lane clone — one writer per repo by placement.
-
-Per `relay#1593`, an agent can stop receiving DM injections after roughly 1–5
-hours while every send still reports success. If my inbound goes quiet, that is
-the reason, and this artifact stays the source of truth.
+The previous `RUN-REPORT.md` at this path (mtime `2026-08-25T00:05:24Z`) was
+written by hand by `sbx-relayflow-0824`. **No step in this flow writes this
+file**, so its staleness was never a symptom of a stuck run. This copy is also
+written by hand, by `sbx-relayflow-0824b`.
