@@ -11,3 +11,4 @@ dist/
 /packages/*/.npm-cache
 # Workflow runtime scratch (step outputs, worker logs, team state) — not source
 **/.agent-relay/
+**/.agentworkforce/

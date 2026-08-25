@@ -49,7 +49,7 @@ const result = await workflow("ship-feature")
   })
   .run();
 
-console.log(result.status); // "completed" | "failed" | "cancelled" | "needs_human"
+console.log(result.status); // "completed" | "completed_early" | "failed" | "cancelled" | "needs_human"
 ```
 
 ### Python
@@ -452,6 +452,27 @@ steps:
     retries: 3          # Retry up to 3 times on failure
     timeoutMs: 300000   # 5 minute timeout
 ```
+
+### Successful early termination
+
+A deterministic gate can explicitly declare exit codes that mean “there is no work to do.” A matching code ends the run with the distinct `completed_early` status and skips every step that has not started:
+
+```yaml
+steps:
+  - name: claim-work
+    type: deterministic
+    command: node bin/claim-work.mjs
+    terminalSuccessExitCodes: [78]
+
+  - name: process-claim
+    agent: worker
+    task: Process the claimed work
+    dependsOn: [claim-work]
+```
+
+Terminal-capable gates are scheduling barriers, so other ready work does not race the gate. The triggering step is `completed` with completion reason `completed_early_exit`; remaining steps are `skipped`, and the CLI exits 0 while clearly reporting **COMPLETED EARLY**. Verification still applies, so a verification failure remains a real failure.
+
+This behavior is opt-in. Without `terminalSuccessExitCodes`, exit 78 and every other non-zero exit retain their existing failure behavior. The new `completed_early` run status is an additive public API value: consumers with exhaustive status switches, strict validators, database constraints, or terminal-status polling must handle it separately from `completed`.
 
 ### Workflow-Level
 

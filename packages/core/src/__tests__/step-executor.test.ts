@@ -94,6 +94,47 @@ describe('StepExecutor — deterministic steps', () => {
     const result = await executor.executeOne(step, new Map());
     expect(result.status).toBe('completed');
   });
+
+  it('processSpawner path runs exit_code verification before accepting terminal success', async () => {
+    const executor = createExecutor({
+      processSpawner: mockSpawner({
+        spawnShell: vi.fn(async () => ({ output: 'claim already taken', exitCode: 78 })),
+      }),
+    });
+    const step = makeStep({
+      command: 'claim-work',
+      failOnError: false,
+      verification: { type: 'exit_code', value: '0' },
+      ...({ terminalSuccessExitCodes: [78] } as Partial<WorkflowStep>),
+    });
+
+    const result = await executor.executeOne(step, new Map());
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('recorded exit code "78" did not match "0"');
+  });
+
+  it('injected executeStep path runs exit_code verification before accepting terminal success', async () => {
+    const executor = createExecutor({
+      executeStep: vi.fn(async () => ({
+        status: 'completed',
+        output: 'claim already taken',
+        exitCode: 78,
+        completionReason: 'completed_early_exit' as any,
+      })),
+    });
+    const step = makeStep({
+      command: 'claim-work',
+      verification: { type: 'exit_code', value: '0' },
+      ...({ terminalSuccessExitCodes: [78] } as Partial<WorkflowStep>),
+    });
+
+    const result = await executor.executeOne(step, new Map());
+
+    expect(result.status).toBe('failed');
+    expect(result.completionReason).toBe('failed_verification');
+    expect(result.error).toContain('recorded exit code "78" did not match "0"');
+  });
 });
 
 // ── 2. Non-interactive agent step ────────────────────────────────────────────
@@ -383,6 +424,27 @@ describe('ProcessSpawner — buildCommand', () => {
 // ── 9. executeAll — DAG orchestration ────────────────────────────────────────
 
 describe('StepExecutor — executeAll', () => {
+  it('runs terminal-capable steps as barriers and skips remaining work on a listed exit', async () => {
+    const spawnShell = vi.fn(async (command: string) =>
+      command === 'gate' ? { output: 'no work', exitCode: 78 } : { output: 'unexpected', exitCode: 0 }
+    );
+    const executor = createExecutor({ processSpawner: mockSpawner({ spawnShell }) });
+    const steps = [
+      makeStep({ name: 'ready-sibling', command: 'sibling' }),
+      makeStep({ name: 'gate', command: 'gate', terminalSuccessExitCodes: [78] }),
+    ];
+
+    const results = await executor.executeAll(steps, new Map());
+
+    expect(spawnShell).toHaveBeenCalledTimes(1);
+    expect(spawnShell).toHaveBeenCalledWith('gate', expect.any(Object));
+    expect(results.get('gate')).toMatchObject({
+      status: 'completed',
+      completionReason: 'completed_early_exit',
+    });
+    expect(results.get('ready-sibling')?.status).toBe('skipped');
+  });
+
   it('executes steps in dependency order', async () => {
     const order: string[] = [];
     const executor = createExecutor({

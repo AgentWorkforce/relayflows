@@ -82,7 +82,7 @@ import {
   StepExecutor as WorkflowStepLifecycleExecutor,
   type StepExecutorDeps as WorkflowStepLifecycleExecutorDeps,
 } from './step-executor.js';
-import { validateHumanAssistanceGates } from './validator.js';
+import { validateHumanAssistanceGates, VALID_ERROR_STRATEGIES } from './validator.js';
 import {
   interpolateStepTask as interpolateStepTaskTemplate,
   resolveDotPath as resolveTemplateDotPath,
@@ -106,6 +106,7 @@ import type {
   DryRunWave,
   ErrorHandlingConfig,
   IdleNudgeConfig,
+  FileHumanAssistanceConfig,
   HumanAssistanceConfig,
   PathDefinition,
   PermissionProfileDefinition,
@@ -126,7 +127,7 @@ import type {
   WorkflowStepStatus,
   ProcessBackend,
   RunnerStepExecutor,
-} from './types.js';
+  ResumeOptions,} from './types.js';
 import { WorkflowTrajectory, type StepOutcome } from './trajectory.js';
 import {
   activateWorkflowPersona,
@@ -299,6 +300,16 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function closeWriteStream(stream: WriteStream): Promise<void> {
+  if (stream.closed) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const settle = () => resolve();
+    stream.once('error', settle);
+    stream.end(settle);
+  });
+}
+
 // ── DB adapter interface ────────────────────────────────────────────────────
 
 /** Minimal DB adapter so the runner is not coupled to a specific driver. */
@@ -347,6 +358,7 @@ interface CompletionDecisionResult {
 export type WorkflowEvent =
   | { type: 'run:started'; runId: string }
   | { type: 'run:completed'; runId: string }
+  | { type: 'run:completed-early'; runId: string; stepName: string }
   | { type: 'run:failed'; runId: string; error: string }
   | { type: 'run:needs-human'; runId: string; error: string; stepName: string }
   | { type: 'run:cancelled'; runId: string }
@@ -562,6 +574,24 @@ type DiagnosticVerificationCheck = VerificationCheck & {
   diagnosticAgent?: string;
   diagnosticTimeout?: number;
 };
+
+/** Fallback bound on how long a pending Slack human question may hold a step
+ *  open once that step is past its own deadline. Only used when the workflow
+ *  declares human assistance without an explicit `slack.timeoutMs`. */
+/**
+ * Default bound on a human question.
+ *
+ * This was 3_600_000 — an hour. An hour is not a bound, it is a night: a run
+ * parked on a question nobody was going to answer for the whole of it, and the
+ * one Slack question that did get this far spent the full 60 minutes timing out
+ * on a question a human had already answered on disk in seconds. Ten minutes is
+ * long enough for a watching human and short enough that an unanswered question
+ * ends the step rather than the shift.
+ */
+const DEFAULT_HUMAN_QUESTION_WAIT_MS = 600_000;
+
+/** How often the on-disk answer loop looks for `<step>.ANSWER.md`. */
+const DEFAULT_ANSWER_FILE_POLL_MS = 5_000;
 
 const DEFAULT_WORKFLOW_MAX_RETRIES = 2;
 const DEFAULT_WORKFLOW_REPAIR_RETRIES = 2;
@@ -847,6 +877,8 @@ export class WorkflowRunner {
   private readonly workspaceId: string;
   private readonly relayOptions: RuntimeSpawnOptions;
   private readonly cwd: string;
+  private workflowFileDir?: string;
+  private cwdResolution: NonNullable<RelayYamlConfig['cwdResolution']> = 'process';
   private readonly summaryDir: string;
   private executor?: RunnerStepExecutor;
   private readonly envSecrets?: Record<string, string>;
@@ -876,7 +908,15 @@ export class WorkflowRunner {
   private readonly activeAgentHandles = new Map<string, WorkflowAgentHandle>();
   /** Pending Slack-backed human questions keyed by runtime agent name. */
   private readonly pendingHumanQuestions = new Map<string, Promise<void>>();
-  /** Debounced Slack human-question drafts keyed by runtime agent name. */
+  /**
+   * Answer files this run has already injected, keyed by path+mtime+size.
+   *
+   * Consumption is tracked rather than the file deleted, so the ruling stays on
+   * disk as the record, and a second question from the same step is not handed
+   * the previous question's answer.
+   */
+  private readonly consumedAnswerFiles = new Set<string>();
+  /** Debounced human-question drafts keyed by runtime agent name. */
   private readonly pendingHumanQuestionDrafts = new Map<
     string,
     {
@@ -988,6 +1028,50 @@ export class WorkflowRunner {
     return p.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_match, varName: string) => {
       return process.env[varName] ?? _match;
     });
+  }
+
+  private resolveConfiguredCwd(configuredCwd: string): string {
+    const base = this.cwdResolution === 'workflow-file' ? this.workflowFileDir : this.cwd;
+    return path.resolve(base ?? this.cwd, configuredCwd);
+  }
+
+  private configureCwdResolution(config: RelayYamlConfig): void {
+    const configuredMode = config.cwdResolution;
+    this.cwdResolution = configuredMode ?? 'process';
+
+    if (this.cwdResolution === 'workflow-file' && !this.workflowFileDir) {
+      throw new Error(
+        'cwdResolution: "workflow-file" requires a workflow loaded from a YAML file so its directory is known'
+      );
+    }
+    if (configuredMode || !this.workflowFileDir) return;
+
+    const candidates: Array<{ label: string; cwd: string }> = [];
+    for (const agent of config.agents ?? []) {
+      if (agent.cwd) candidates.push({ label: `Agent "${agent.name}"`, cwd: agent.cwd });
+    }
+    for (const workflow of config.workflows ?? []) {
+      for (const step of workflow.steps) {
+        if (step.cwd) {
+          candidates.push({
+            label: `Step "${workflow.name}.${step.name}"`,
+            cwd: step.cwd,
+          });
+        }
+      }
+    }
+
+    for (const candidate of candidates) {
+      const processPath = path.resolve(this.cwd, candidate.cwd);
+      const workflowPath = path.resolve(this.workflowFileDir, candidate.cwd);
+      if (processPath === workflowPath) continue;
+      console.warn(
+        `[WorkflowRunner] DEPRECATION WARNING: ${candidate.label} cwd "${candidate.cwd}" ` +
+          `currently resolves from the process cwd to "${processPath}"; workflow-file resolution ` +
+          `would use "${workflowPath}". Set top-level cwdResolution to "process" or ` +
+          `"workflow-file" explicitly. The default will flip to "workflow-file" in a future major release.`
+      );
+    }
   }
 
   /**
@@ -1452,7 +1536,7 @@ export class WorkflowRunner {
       return resolved;
     }
     if (agent.cwd) {
-      return path.resolve(this.cwd, agent.cwd);
+      return this.resolveConfiguredCwd(agent.cwd);
     }
     return this.cwd;
   }
@@ -1474,7 +1558,7 @@ export class WorkflowRunner {
 
   private resolveEffectiveCwd(step: WorkflowStep, agentDef?: AgentDefinition): string {
     if (step.cwd) {
-      return path.resolve(this.cwd, step.cwd);
+      return this.resolveConfiguredCwd(step.cwd);
     }
     return this.resolveStepWorkdir(step) ?? (agentDef ? this.resolveAgentCwd(agentDef) : this.cwd);
   }
@@ -2983,11 +3067,15 @@ export class WorkflowRunner {
   async parseYamlFile(filePath: string): Promise<RelayYamlConfig> {
     const absPath = path.resolve(this.cwd, filePath);
     const raw = await readFile(absPath, 'utf-8');
+    this.workflowFileDir = path.dirname(absPath);
     return this.parseYamlString(raw, absPath);
   }
 
   /** Parse a relay.yaml string. */
   parseYamlString(raw: string, source = '<string>'): RelayYamlConfig {
+    if (source !== '<string>' && path.isAbsolute(source)) {
+      this.workflowFileDir = path.dirname(source);
+    }
     const parsed = parseYaml(raw);
     this.validateConfig(parsed, source);
     const config = this.normalizeLegacyPermissionConfig(parsed as RelayYamlConfig);
@@ -3071,6 +3159,15 @@ export class WorkflowRunner {
     if (c.agents !== undefined && !Array.isArray(c.agents)) {
       throw new Error(`${source}: "agents" must be an array when provided`);
     }
+    if (
+      c.cwdResolution !== undefined &&
+      c.cwdResolution !== 'process' &&
+      c.cwdResolution !== 'workflow-file'
+    ) {
+      throw new Error(
+        `${source}: "cwdResolution" must be either "process" or "workflow-file"`
+      );
+    }
 
     // Approval gates that cannot reach a human fail OPEN, so they must be refused
     // on every path — not only when someone happens to run `--validate` first.
@@ -3089,6 +3186,35 @@ export class WorkflowRunner {
         );
       }
     }
+    // An unknown error strategy is refused on every path, for the same reason
+    // the gate checks above are: `applyReliabilityDefaults()` treats anything
+    // that is not 'fail-fast' or 'continue' as an opt-in to 'retry', which
+    // attaches an LLM repair agent with write access to the workspace. A
+    // plausible-looking `strategy: fail` therefore selects the most permissive
+    // mode when the author asked for the strictest, and validating only under
+    // `--validate` would leave every normal run path — `packages/cli`,
+    // `runWorkflow()`, and resume — still doing it.
+    const errorHandling = c.errorHandling;
+    if (errorHandling !== undefined) {
+      // A non-object shape — `errorHandling: fail`, the most natural way to get
+      // this wrong in YAML — would otherwise skip the strategy check below and
+      // still be coerced to 'retry' by applyReliabilityDefaults().
+      if (typeof errorHandling !== 'object' || errorHandling === null || Array.isArray(errorHandling)) {
+        throw new Error(
+          `${source}: "errorHandling" must be an object when provided. ` +
+            `Did you mean "errorHandling: { strategy: ${JSON.stringify(errorHandling)} }"?`
+        );
+      }
+      const strategy = (errorHandling as Record<string, unknown>).strategy;
+      if (strategy !== undefined && !VALID_ERROR_STRATEGIES.includes(strategy as string)) {
+        throw new Error(
+          `${source}: errorHandling.strategy "${String(strategy)}" is not valid. ` +
+            `Use one of: ${VALID_ERROR_STRATEGIES.join(', ')}. ` +
+            `Any other value is treated as "retry", which assigns a repair agent when a deterministic gate fails.`
+        );
+      }
+    }
+
     const legacyPermissions = c.permissions;
     if (
       legacyPermissions !== undefined &&
@@ -3178,6 +3304,7 @@ export class WorkflowRunner {
       this.validateConfig(config);
       resolved = vars ? this.resolveVariables(config, vars) : config;
       resolved = this.applyPermissionProfiles(resolved);
+      this.configureCwdResolution(resolved);
     } catch (err) {
       errors.push(err instanceof Error ? err.message : String(err));
       return {
@@ -3292,7 +3419,7 @@ export class WorkflowRunner {
     // Validate cwd paths
     for (const agent of resolved.agents) {
       if (agent.cwd) {
-        const resolvedCwd = path.resolve(this.cwd, agent.cwd);
+        const resolvedCwd = this.resolveConfiguredCwd(agent.cwd);
         if (!existsSync(resolvedCwd)) {
           warnings.push(
             `Agent "${agent.name}" cwd "${agent.cwd}" resolves to "${resolvedCwd}" which does not exist`
@@ -3509,10 +3636,33 @@ export class WorkflowRunner {
         throw new Error(`${source}: each step must have a string "name" field`);
       }
 
+      if (s.terminalSuccessExitCodes !== undefined && s.type !== 'deterministic') {
+        throw new Error(
+          `${source}: terminalSuccessExitCodes is only valid on deterministic steps ("${s.name}")`
+        );
+      }
+
       // Deterministic steps require type and command
       if (s.type === 'deterministic') {
         if (typeof s.command !== 'string') {
           throw new Error(`${source}: deterministic step "${s.name}" must have a "command" field`);
+        }
+        if (s.terminalSuccessExitCodes !== undefined) {
+          const codes = s.terminalSuccessExitCodes;
+          if (
+            !Array.isArray(codes) ||
+            codes.length === 0 ||
+            codes.some((code) => !Number.isInteger(code) || (code as number) < 0 || (code as number) > 255)
+          ) {
+            throw new Error(
+              `${source}: deterministic step "${s.name}" terminalSuccessExitCodes must be a non-empty array of integer exit codes from 0 to 255`
+            );
+          }
+          if (new Set(codes).size !== codes.length) {
+            throw new Error(
+              `${source}: deterministic step "${s.name}" terminalSuccessExitCodes must not contain duplicates`
+            );
+          }
         }
       } else if (s.type === 'worktree') {
         if (typeof s.branch !== 'string' || s.branch.trim().length === 0) {
@@ -3777,6 +3927,8 @@ export class WorkflowRunner {
       },
       markDownstreamSkipped: async (failedStepName) =>
         this.markDownstreamSkipped(failedStepName, workflow.steps, stepStates, runId),
+      markRemainingSkipped: async (terminalStepName) =>
+        this.markRemainingStepsSkipped(terminalStepName, workflow.steps, stepStates, runId),
       buildCompletionMode: (stepName, completionReason) =>
         completionReason ? this.buildStepCompletionDecision(stepName, completionReason)?.mode : undefined,
     };
@@ -3802,6 +3954,7 @@ export class WorkflowRunner {
 
     // Validate config (catches cycles, missing deps, invalid steps, etc.)
     this.validateConfig(resolved);
+    this.configureCwdResolution(resolved);
     const runtimeConfig = this.applyReliabilityDefaults(resolved);
 
     const permissionResult = this.validatePermissions(
@@ -3943,7 +4096,13 @@ export class WorkflowRunner {
   }
 
   /** Resume a previously paused or partially completed run. */
-  async resume(runId: string, vars?: VariableContext, config?: RelayYamlConfig): Promise<WorkflowRunRow> {
+  async resume(
+    runId: string,
+    vars?: VariableContext,
+    config?: RelayYamlConfig,
+    options?: ResumeOptions
+  ): Promise<WorkflowRunRow> {
+    const resetRunningSteps = options?.resetRunningSteps ?? false;
     // Set up abort controller early so callers can abort() even during setup
     this.abortController = new AbortController();
     this.paused = false;
@@ -3972,6 +4131,7 @@ export class WorkflowRunner {
     const resolvedConfig = this.applyReliabilityDefaults(
       vars ? this.resolveVariables(run.config, vars) : run.config
     );
+    this.configureCwdResolution(resolvedConfig);
 
     // Resolve path definitions (same as execute()) so workdir lookups work on resume
     const pathResult = this.resolvePathDefinitions(resolvedConfig.paths, this.cwd);
@@ -3993,16 +4153,28 @@ export class WorkflowRunner {
       }
     }
 
-    // Reset failed steps to pending for retry
+    // Reset steps to pending so they are retried.
+    //
+    // `failed` is always safe to requeue. `running` is only safe when no other
+    // process is still executing the step: there is no lease/heartbeat on runs
+    // today, so we cannot detect a live owner. Requeueing blindly would let a
+    // second `resume` re-run steps concurrently with the original process and
+    // duplicate non-idempotent side effects. It is therefore opt-in via
+    // `resetRunningSteps`, which the user-facing resume paths set because
+    // `--resume` explicitly means "the previous process is gone".
     for (const [, state] of stepStates) {
-      if (state.row.status === 'failed') {
+      const isFailed = state.row.status === 'failed';
+      const isStaleRunning = state.row.status === 'running' && resetRunningSteps;
+      if (isFailed || isStaleRunning) {
         state.row.status = 'pending';
         state.row.error = undefined;
         state.row.completionReason = undefined;
+        state.row.retryCount = 0;
         await this.db.updateStep(state.row.id, {
           status: 'pending',
           error: undefined,
           completionReason: undefined,
+          retryCount: 0,
           updatedAt: new Date().toISOString(),
         });
       }
@@ -4152,7 +4324,46 @@ export class WorkflowRunner {
         (s) => s.row.status === 'completed' || s.row.status === 'skipped'
       );
 
-      if (allCompleted) {
+      const completedEarlyStep = [...stepStates.values()].find(
+        (state) => state.row.completionReason === 'completed_early_exit'
+      );
+      const hasFailedStep = [...stepStates.values()].some((state) => state.row.status === 'failed');
+      // "Completed early" is a claim about work that did NOT run, so it has to
+      // be derived from the current step states, not from a stored reason that
+      // outlives the condition it described. A resumed run is the case that
+      // separates them: the terminal step keeps completionReason
+      // 'completed_early_exit' forever, but the resume reset returns failed
+      // steps to pending and they can then all succeed, leaving nothing
+      // skipped. Reporting "completed early ... 0 steps were skipped" there
+      // contradicts itself. No skipped step means nothing was cut short.
+      const hasSkippedStep = [...stepStates.values()].some((state) => state.row.status === 'skipped');
+
+      if (completedEarlyStep && !hasFailedStep && hasSkippedStep) {
+        const terminalStepName = completedEarlyStep.row.stepName;
+        this.log(`Workflow completed early at "${terminalStepName}"`);
+        await this.updateRunStatus(runId, 'completed_early');
+        this.emit({ type: 'run:completed-early', runId, stepName: terminalStepName });
+
+        const outcomes = this.collectOutcomes(stepStates, workflow.steps);
+        const skippedCount = outcomes.filter((outcome) => outcome.status === 'skipped').length;
+        const summary =
+          `Workflow completed early at "${terminalStepName}"; ` +
+          `${skippedCount} not-started step${skippedCount === 1 ? ' was' : 's were'} skipped.`;
+        const confidence = this.trajectory.computeConfidence(outcomes);
+        await this.trajectory.complete(summary, confidence, {
+          learnings: this.trajectory.extractLearnings(outcomes),
+          challenges: this.trajectory.extractChallenges(outcomes),
+        });
+
+        this.channelMessenger.postEarlyCompletionReport(
+          workflow.name,
+          outcomes,
+          terminalStepName,
+          summary,
+          confidence
+        );
+        this.logRunSummary(workflow.name, outcomes, runId, 'completed_early');
+      } else if (allCompleted) {
         this.log('Workflow completed successfully');
         await this.updateRunStatus(runId, 'completed');
         this.emit({ type: 'run:completed', runId });
@@ -4606,8 +4817,9 @@ export class WorkflowRunner {
           lastExitCode = executorResult.exitCode;
           lastExitSignal = undefined;
           lastCommandOutput = executorResult.output;
+          const terminalSuccess = this.isTerminalSuccessExitCode(step, executorResult.exitCode);
           const failOnError = step.failOnError !== false;
-          if (failOnError && executorResult.exitCode !== 0) {
+          if (!terminalSuccess && failOnError && executorResult.exitCode !== 0) {
             this.log(`[${step.name}] Command failed (exit code ${executorResult.exitCode})`);
             if (executorResult.output) {
               this.log(`[${step.name}] Output:\n${executorResult.output}`);
@@ -4626,11 +4838,15 @@ export class WorkflowRunner {
             { exitCode: executorResult.exitCode }
           );
           const verificationResult = step.verification
-            ? this.runVerification(step.verification, output, step.name)
+            ? this.runVerification(step.verification, output, step.name, undefined, {
+                exitCode: executorResult.exitCode,
+              })
             : undefined;
           return {
             output,
-            completionReason: verificationResult?.completionReason,
+            completionReason: terminalSuccess
+              ? ('completed_early_exit' as const)
+              : verificationResult?.completionReason,
           };
         }
 
@@ -4699,8 +4915,9 @@ export class WorkflowRunner {
             lastExitSignal = signal ?? undefined;
             lastCommandOutput = [stdout, stderr].filter(Boolean).join('\n');
 
+            const terminalSuccess = this.isTerminalSuccessExitCode(step, code ?? undefined);
             const failOnError = step.failOnError !== false;
-            if (failOnError && code !== 0 && code !== null) {
+            if (!terminalSuccess && failOnError && code !== 0 && code !== null) {
               this.log(`[${step.name}] Command failed (exit code ${code})`);
               if (stdout) {
                 this.log(`[${step.name}] stdout:\n${stdout}`);
@@ -4737,13 +4954,17 @@ export class WorkflowRunner {
         );
 
         const verificationResult = step.verification
-          ? this.runVerification(step.verification, output, step.name)
+          ? this.runVerification(step.verification, output, step.name, undefined, {
+              exitCode: lastExitCode,
+            })
           : undefined;
         lastCommandOutput = [commandStdout || output, commandStderr].filter(Boolean).join('\n');
 
         return {
           output,
-          completionReason: verificationResult?.completionReason,
+          completionReason: this.isTerminalSuccessExitCode(step, lastExitCode)
+            ? ('completed_early_exit' as const)
+            : verificationResult?.completionReason,
         };
       },
       toCompletionResult: ({ output, completionReason }, attempt) => ({
@@ -4781,6 +5002,10 @@ export class WorkflowRunner {
       this.postToChannel(`**[${step.name}]** Failed: ${result.error ?? 'Unknown error'}`);
       throw new Error(`Step "${step.name}" failed: ${result.error ?? 'Unknown error'}`);
     }
+  }
+
+  private isTerminalSuccessExitCode(step: WorkflowStep, exitCode: number | undefined): boolean {
+    return exitCode !== undefined && step.terminalSuccessExitCodes?.includes(exitCode) === true;
   }
 
   private resolveWorkflowRepairAgent(
@@ -5742,7 +5967,8 @@ export class WorkflowRunner {
             step.verification,
             specialistOutput,
             step.name,
-            promptTaskText
+            promptTaskText,
+            { exitCode: this.getStepCompletionEvidence(step.name)?.process.exitCode }
           );
           completionReason = verificationResult.completionReason;
         }
@@ -6609,6 +6835,7 @@ export class WorkflowRunner {
       ? this.runVerification(step.verification, specialistOutput, step.name, verificationTaskText, {
           allowFailure: true,
           completionMarkerFound: hasMarker,
+          exitCode: this.getStepCompletionEvidence(step.name)?.process.exitCode,
         })
       : { passed: false };
 
@@ -6916,7 +7143,7 @@ export class WorkflowRunner {
         specialistOutput,
         step.name,
         verificationTaskText,
-        { allowFailure: true }
+        { allowFailure: true, exitCode: evidence?.process.exitCode }
       );
       if (!verificationResult.passed) return null;
     }
@@ -7613,7 +7840,7 @@ export class WorkflowRunner {
         combined: combinedOutput,
       });
       stopHeartbeat?.();
-      logStream.end();
+      await closeWriteStream(logStream);
       this.unregisterWorker(agentName);
     }
   }
@@ -7804,52 +8031,16 @@ export class WorkflowRunner {
         }
       }
 
-      // Re-key PTY maps if broker assigned a different name than requested
+      // Re-key PTY maps if broker assigned a different name than requested.
       if (agent.name !== agentName) {
-        const oldName = agentName;
-        this.ptyOutputBuffers.set(agent.name, this.ptyOutputBuffers.get(oldName) ?? []);
-        this.ptyOutputBuffers.delete(oldName);
-
-        // Close old log stream and rename the file to match the new agent name
-        const oldLogPath = path.join(logsDir, `${oldName}.log`);
-        const newLogPath = path.join(logsDir, `${agent.name}.log`);
-        const oldLogStream = this.ptyLogStreams.get(oldName);
-        if (oldLogStream) {
-          oldLogStream.end();
-          this.ptyLogStreams.delete(oldName);
-          try {
-            renameSync(oldLogPath, newLogPath);
-          } catch {
-            // File may not exist yet if no output was written
-          }
-        }
-
-        // Open new log stream with the correct name
-        const newLogStream = createWriteStream(newLogPath, { flags: 'a' });
-        this.ptyLogStreams.set(agent.name, newLogStream);
-
-        // Update listener to use the new log stream
-        const oldListener = this.ptyListeners.get(oldName);
-        if (oldListener) {
-          this.ptyListeners.delete(oldName);
-          const resolvedAgentName = agent.name;
-          this.ptyListeners.set(resolvedAgentName, (chunk: string) => {
-            const stripped = WorkflowRunner.stripAnsi(chunk);
-            const buffer = this.ptyOutputBuffers.get(resolvedAgentName);
-            buffer?.push(stripped);
-            newLogStream.write(chunk);
-            if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
-              this.observeHumanAssistanceOutput({
-                agentName: resolvedAgentName,
-                step,
-                config: humanAssistanceConfig,
-                output: buffer?.join('') ?? stripped,
-              });
-            }
-            options.onChunk?.({ agentName: resolvedAgentName, chunk });
-          });
-        }
-
+        await this.rekeyPtyStreams({
+          oldName: agentName,
+          newName: agent.name,
+          logsDir,
+          step,
+          humanAssistanceConfig,
+          onChunk: options.onChunk,
+        });
         agentName = agent.name;
       }
 
@@ -7940,7 +8131,7 @@ export class WorkflowRunner {
             ptyOutput,
             step.name,
             preparedTask.promptTaskText,
-            { allowFailure: true }
+            { allowFailure: true, exitCode: agent?.exitCode }
           );
           if (verificationResult.passed) {
             this.log(`[${step.name}] Agent timed out but verification passed — treating as complete`);
@@ -8003,7 +8194,7 @@ export class WorkflowRunner {
       this.ptyListeners.delete(agentName);
       const stream = this.ptyLogStreams.get(agentName);
       if (stream) {
-        stream.end();
+        await closeWriteStream(stream);
         this.ptyLogStreams.delete(agentName);
       }
       this.unregisterWorker(agentName);
@@ -8274,6 +8465,7 @@ export class WorkflowRunner {
 
     let handle: Subscription | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cleanupExtra: (() => void) | undefined;
     return await new Promise<NormalizedRelayfileEvent>((resolve, reject) => {
       let settled = false;
       const waiter: RelayfileEventWaiter = {
@@ -8296,10 +8488,58 @@ export class WorkflowRunner {
       };
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
+        cleanupExtra?.();
+        cleanupExtra = undefined;
         const idx = this.relayfileEventWaiters.indexOf(waiter);
         if (idx !== -1) this.relayfileEventWaiters.splice(idx, 1);
         void handle?.unsubscribe().catch(() => undefined);
       };
+
+      // WHY THIS LISTENER EXISTS — the defect that ended two 2-hour runs.
+      //
+      // `client.subscribe` is SYNCHRONOUS and returns a Subscription, but it
+      // kicks off its own setup internally:
+      //
+      //   subscribe(globs, onChange, options) {
+      //     const setup = this.resolveWorkspaceId(options?.aclToken).then(...)
+      //     return { async unsubscribe() { ... } }
+      //   }
+      //
+      // When `resolveWorkspaceId` throws — a Relayfile token refreshed without
+      // a workspace_id claim — `setup` is a REJECTED PROMISE held only in the
+      // SDK's closure. `subscribe` still returns normally, so the try/catch
+      // below catches nothing, this waiter registers, and the timer arms. The
+      // rejection is attached to nothing and Node takes the process down.
+      //
+      // That is why the two failure modes of this one call site behaved so
+      // differently. A subscription that TIMED OUT rejected through the await
+      // chain and was caught, and the run lived. A subscription that FAILED TO
+      // SET UP never entered the await chain at all: no try/catch here, no
+      // .catch() on the caller's promise, and no number of further wrappers
+      // could ever have caught it. It is not our promise.
+      //
+      // So the failure is caught where it actually surfaces. The match is
+      // deliberately narrow — this exact SDK signature — and anything else is
+      // rethrown on the next tick so unrelated unhandled rejections keep
+      // crashing the process exactly as they did before.
+      const onDetachedSubscriptionFailure = (reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        if (!/workspace-scoped JWT|workspace_id claim/i.test(message)) {
+          process.nextTick(() => {
+            throw reason;
+          });
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(reason instanceof Error ? reason : new Error(message));
+      };
+      process.on('unhandledRejection', onDetachedSubscriptionFailure);
+      const removeDetachedListener = () => {
+        process.off('unhandledRejection', onDetachedSubscriptionFailure);
+      };
+      cleanupExtra = removeDetachedListener;
 
       try {
         handle = client.subscribe(
@@ -8548,16 +8788,143 @@ export class WorkflowRunner {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
+  /**
+   * Move the PTY buffer, log stream and output listener from the name we asked
+   * the broker for to the name it actually assigned.
+   *
+   * This is one critical section containing an unavoidable `await`: the old log
+   * stream has to be closed before its file can be renamed. A `worker_stream`
+   * for the old name can arrive inside that window, so nothing the old listener
+   * depends on may be torn down before it. The buffer is therefore captured by
+   * reference rather than looked up by a key that is about to change, chunks
+   * are parked while no log stream exists, and the old listener key is dropped
+   * only once the swap has finished.
+   */
+  private async rekeyPtyStreams(params: {
+    oldName: string;
+    newName: string;
+    logsDir: string;
+    step: WorkflowStep;
+    humanAssistanceConfig: HumanAssistanceConfig | undefined;
+    onChunk?: (info: { agentName: string; chunk: string }) => void;
+  }): Promise<void> {
+    const { oldName, newName, logsDir, step, humanAssistanceConfig, onChunk } = params;
+
+    const buffer = this.ptyOutputBuffers.get(oldName) ?? [];
+    this.ptyOutputBuffers.set(newName, buffer);
+    this.ptyOutputBuffers.delete(oldName);
+
+    const oldLogPath = path.join(logsDir, `${oldName}.log`);
+    const newLogPath = path.join(logsDir, `${newName}.log`);
+    const oldLogStream = this.ptyLogStreams.get(oldName);
+
+    let newLogStream: ReturnType<typeof createWriteStream> | undefined;
+    const parkedChunks: string[] = [];
+    const writeToLog = (chunk: string) => {
+      if (newLogStream) {
+        newLogStream.write(chunk);
+      } else {
+        parkedChunks.push(chunk);
+      }
+    };
+
+    if (this.ptyListeners.has(oldName)) {
+      const rekeyedListener = (chunk: string) => {
+        const stripped = WorkflowRunner.stripAnsi(chunk);
+        buffer.push(stripped);
+        writeToLog(chunk);
+        if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
+          this.observeHumanAssistanceOutput({
+            agentName: newName,
+            step,
+            config: humanAssistanceConfig,
+            output: buffer.join('') || stripped,
+          });
+        }
+        onChunk?.({ agentName: newName, chunk });
+      };
+      // Registered under both names across the await window so a chunk still
+      // addressed to the old name is captured rather than dropped.
+      this.ptyListeners.set(newName, rekeyedListener);
+      this.ptyListeners.set(oldName, rekeyedListener);
+    }
+
+    if (oldLogStream) {
+      await closeWriteStream(oldLogStream);
+      this.ptyLogStreams.delete(oldName);
+      try {
+        renameSync(oldLogPath, newLogPath);
+      } catch {
+        // File may not exist yet if no output was written
+      }
+    }
+
+    newLogStream = createWriteStream(newLogPath, { flags: 'a' });
+    this.ptyLogStreams.set(newName, newLogStream);
+    for (const parked of parkedChunks.splice(0)) {
+      newLogStream.write(parked);
+    }
+
+    this.ptyListeners.delete(oldName);
+  }
+
   private resolveHumanAssistanceConfig(step: WorkflowStep): HumanAssistanceConfig | undefined {
     if (step.humanAssistance === false) return undefined;
     return step.humanAssistance ?? this.currentConfig?.swarm.humanAssistance;
   }
 
+  /**
+   * The on-disk question/answer loop, when the step is configured for it.
+   *
+   * Checked BEFORE Slack everywhere, because a flow that configures both means
+   * "ask on disk"; Slack is the legacy channel, not the preferred one.
+   */
+  private resolveFileHumanAssistanceConfig(
+    config: HumanAssistanceConfig | undefined
+  ): FileHumanAssistanceConfig | undefined {
+    const file = config?.file;
+    if (!file || typeof file.dir !== 'string' || !file.dir.trim()) return undefined;
+    return file;
+  }
+
+  /**
+   * Slack human assistance, which is OFF whenever the on-disk loop is
+   * configured and can additionally be killed outright by the environment.
+   *
+   * The kill switch exists because this path has a failure mode no local guard
+   * can contain: a Relayfile token that comes back without a workspace_id claim
+   * makes `client.subscribe` throw from inside the answer subscription, and two
+   * complete runs died there. A flow that cannot afford that sets
+   * RELAYFLOWS_DISABLE_SLACK_HUMAN_ASSISTANCE=1 and no Slack call is attempted
+   * at all — the only guard that cannot itself be bypassed.
+   */
   private isSlackHumanAssistanceEnabled(config: HumanAssistanceConfig | undefined): boolean {
-    return Boolean(config?.slack);
+    if (!config?.slack) return false;
+    if (this.resolveFileHumanAssistanceConfig(config)) return false;
+    const disabled = process.env.RELAYFLOWS_DISABLE_SLACK_HUMAN_ASSISTANCE;
+    if (disabled && disabled !== '0' && disabled.toLowerCase() !== 'false') return false;
+    return true;
+  }
+
+  /** True when EITHER human-assistance channel is live for this step. */
+  private isHumanAssistanceEnabled(config: HumanAssistanceConfig | undefined): boolean {
+    return Boolean(this.resolveFileHumanAssistanceConfig(config)) || this.isSlackHumanAssistanceEnabled(config);
   }
 
   private buildHumanAssistanceGuidance(config: HumanAssistanceConfig | undefined): string {
+    const file = this.resolveFileHumanAssistanceConfig(config);
+    if (file) {
+      return (
+        '---\n' +
+        'HUMAN ASSISTANCE — on-disk question bridge:\n' +
+        'If you are blocked by a missing decision or clarification, print one line beginning with ' +
+        'HUMAN_QUESTION followed by a colon and your concise question. Then stop and wait.\n' +
+        `The workflow runner will record it under ${file.dir}/<step-name>.md, watch for a human ` +
+        `reply at ${file.dir}/<step-name>.ANSWER.md, and inject a HUMAN_ANSWER line back into your ` +
+        'session. Do not repeat the question while waiting.'
+      );
+    }
+
     if (!this.isSlackHumanAssistanceEnabled(config)) return '';
 
     return (
@@ -8576,7 +8943,7 @@ export class WorkflowRunner {
     config: HumanAssistanceConfig | undefined;
     output: string;
   }): void {
-    if (!this.isSlackHumanAssistanceEnabled(input.config)) return;
+    if (!this.isHumanAssistanceEnabled(input.config)) return;
 
     const renderedQuestion = this.selectBestHumanQuestion(this.extractHumanQuestionCandidates(input.output));
     const declaredQuestion = this.extractDeclaredHumanQuestionFromTask(input.step.task);
@@ -8587,7 +8954,7 @@ export class WorkflowRunner {
     if (!question) return;
     const key = `${input.step.name}:${input.agentName}`;
     if (this.hasAnsweredSimilarHumanQuestion(key, question)) return;
-    this.scheduleSlackHumanQuestion(input.agentName, input.step, input.config!, question);
+    this.scheduleHumanQuestion(input.agentName, input.step, input.config!, question);
   }
 
   private extractDeclaredHumanQuestionFromTask(task: string | undefined): string | undefined {
@@ -8660,7 +9027,7 @@ export class WorkflowRunner {
     return question.length + spaces * 12 + words.length * 3 + punctuation * 2 - Math.max(0, longestWord - 24) * 8;
   }
 
-  private scheduleSlackHumanQuestion(
+  private scheduleHumanQuestion(
     agentName: string,
     step: WorkflowStep,
     config: HumanAssistanceConfig,
@@ -8695,7 +9062,7 @@ export class WorkflowRunner {
           return;
         }
         this.rememberHumanQuestion(key, selected);
-        this.startSlackHumanQuestion(draft.agentName, draft.step, draft.config, selected);
+        this.startHumanQuestion(draft.agentName, draft.step, draft.config, selected);
       }, 1200),
     };
     this.pendingHumanQuestionDrafts.set(agentName, draft);
@@ -8789,7 +9156,7 @@ export class WorkflowRunner {
     return distance <= maxDistance ? distance : undefined;
   }
 
-  private startSlackHumanQuestion(
+  private startHumanQuestion(
     agentName: string,
     step: WorkflowStep,
     config: HumanAssistanceConfig,
@@ -8797,31 +9164,222 @@ export class WorkflowRunner {
   ): void {
     if (this.pendingHumanQuestions.has(agentName)) return;
 
-    const task = this.askSlackAndInjectAnswer(agentName, step, config, question).finally(() => {
-      this.pendingHumanQuestions.delete(agentName);
-    });
+    // The stored promise must NEVER reject. It is awaited by
+    // waitForPendingHumanQuestion, and a rejection there propagates out of the
+    // agent wait loop and terminates the whole run — which is exactly what
+    // happened when a refreshed Relayfile token came back without a
+    // workspace_id claim: "RelayFile proactive-runtime APIs require a
+    // workspace-scoped JWT" killed a 71-minute run outright.
+    //
+    // Attaching .catch() to `task` after storing it does not help: the caught
+    // promise is a NEW one, while the rejecting original is what got stored and
+    // awaited. So the handler goes INLINE, before the promise is stored.
+    //
+    // That inline .catch() is still not enough on its own, and this is the
+    // lesson runs 3 and 4 paid for: ONE call site has TWO failure modes. When
+    // the Slack answer subscription TIMED OUT the rejection travelled the await
+    // chain and was caught here and the run lived; when the same call THREW the
+    // process died anyway. So the failure is also handled at its source, inside
+    // askHumanAndInjectAnswer, which does not rethrow at all — the promise
+    // stored here is non-rejecting by construction and not merely by handler.
+    //
+    // Failing to ask a human is a blocked question, not a dead workflow. The
+    // step falls through to its own deadline and its own verification, and the
+    // run reaches a handled outcome.
+    const task = this.askHumanAndInjectAnswer(agentName, step, config, question)
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log(`[${step.name}] Human question failed: ${message}`);
+        this.postToChannel(`**[${step.name}]** Human question failed: ${message}`);
+      })
+      .finally(() => {
+        this.pendingHumanQuestions.delete(agentName);
+      });
     this.pendingHumanQuestions.set(agentName, task);
-    task.catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      this.log(`[${step.name}] Slack human question failed: ${message}`);
-      this.postToChannel(`**[${step.name}]** Slack human question failed: ${message}`);
-    });
   }
 
-  private async waitForPendingHumanQuestion(agentName: string): Promise<boolean> {
-    const pendingQuestion = this.pendingHumanQuestions.get(agentName);
-    if (pendingQuestion) {
-      await pendingQuestion;
-      return true;
+  /**
+   * Ask a human and inject the answer. NEVER throws, on any channel.
+   *
+   * Every failure here — a Slack bridge with no workspace-scoped token, an
+   * answer file that never appears, an agent whose PTY died before the answer
+   * arrived — is the same thing: a question that did not get answered. That is
+   * a blocked step, and a blocked step is a result. It is never a reason to
+   * take the run down with it.
+   */
+  private async askHumanAndInjectAnswer(
+    agentName: string,
+    step: WorkflowStep,
+    config: HumanAssistanceConfig,
+    question: string
+  ): Promise<void> {
+    try {
+      const file = this.resolveFileHumanAssistanceConfig(config);
+      if (file) {
+        await this.askViaAnswerFileAndInject(agentName, step, file, question);
+        return;
+      }
+      if (this.isSlackHumanAssistanceEnabled(config)) {
+        await this.askSlackAndInjectAnswer(agentName, step, config, question);
+        return;
+      }
+      this.log(`[${step.name}] Human assistance is disabled; recording the question without asking`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[${step.name}] Human question failed: ${message}`);
+      this.postToChannel(`**[${step.name}]** Human question failed: ${message}`);
+    }
+  }
+
+  /**
+   * The on-disk question/answer loop — the half that was never built.
+   *
+   * Blocked steps already wrote `questions/<step>.md` and DM'd chief. Nothing
+   * ever read the reply, so a chief who answered on disk in seconds was
+   * ignored while the run spent an hour on a Slack round trip for the same
+   * question. This writes the question down if the agent has not, then polls
+   * for `<step>.ANSWER.md` and injects it exactly as a Slack answer would be.
+   *
+   * Answers are consumed by (path, mtime, size), not by deletion: the answer
+   * stays on disk as the record of the ruling, a second question from the same
+   * step does not get handed the same stale reply, and a resumed run correctly
+   * re-injects a standing answer.
+   */
+  private async askViaAnswerFileAndInject(
+    agentName: string,
+    step: WorkflowStep,
+    config: FileHumanAssistanceConfig,
+    question: string
+  ): Promise<void> {
+    const dir = path.resolve(this.cwd, config.dir);
+    const questionPath = path.join(dir, `${step.name}.md`);
+    const answerPath = path.join(dir, `${step.name}.ANSWER.md`);
+    const timeoutMs = config.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
+    const pollIntervalMs = Math.max(250, config.pollIntervalMs ?? DEFAULT_ANSWER_FILE_POLL_MS);
+
+    this.log(`[${step.name}] ${agentName} requested human input; watching ${answerPath}`);
+    this.postToChannel(
+      `**[${step.name}]** \`${agentName}\` asked a human question. Answer it at \`${config.dir}/${step.name}.ANSWER.md\`.`
+    );
+
+    await mkdir(dir, { recursive: true }).catch(() => undefined);
+    // Only write the question if the agent has not already written a fuller
+    // one. The agent's own file is the better record; this is the fallback that
+    // guarantees a human can always see what is being asked.
+    const alreadyRecorded = await stat(questionPath).then(() => true).catch(() => false);
+    if (!alreadyRecorded) {
+      await writeFile(
+        questionPath,
+        `# ${step.name} — question for a human\n\nAgent: ${agentName}\n\n## Question\n\n${question}\n\n` +
+          `## How to answer\n\nWrite the answer to \`${step.name}.ANSWER.md\` in this directory.\n`,
+        'utf-8'
+      ).catch(() => undefined);
     }
 
-    const draft = this.pendingHumanQuestionDrafts.get(agentName);
-    if (!draft) return false;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const answer = await this.readUnconsumedAnswerFile(answerPath);
+      if (answer) {
+        this.log(`[${step.name}] Received human answer on disk; injecting into ${agentName}`);
+        this.rememberAnsweredHumanQuestion(`${step.name}:${agentName}`, question);
+        await this.injectAnswerToAgent({
+          agentName,
+          stepName: step.name,
+          source: 'file',
+          text: `HUMAN_ANSWER: ${answer}`,
+        });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        this.log(
+          `[${step.name}] No answer at ${answerPath} within ${timeoutMs}ms; leaving the question outstanding`
+        );
+        return;
+      }
+      // An agent that has gone away cannot be injected into, so stop waiting
+      // for an answer that has nowhere to land.
+      if (!this.activeAgentHandles.has(agentName)) {
+        this.log(`[${step.name}] ${agentName} is no longer active; stopped waiting for a human answer`);
+        return;
+      }
+      await this.delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    }
+  }
 
-    await this.delay(1500);
-    const started = this.pendingHumanQuestions.get(agentName);
-    if (started) await started;
-    return true;
+  /** Read an answer file, unless this run has already injected that exact version. */
+  private async readUnconsumedAnswerFile(answerPath: string): Promise<string | undefined> {
+    const stats = await stat(answerPath).catch(() => undefined);
+    if (!stats || !stats.isFile()) return undefined;
+    const token = `${answerPath}:${stats.mtimeMs}:${stats.size}`;
+    if (this.consumedAnswerFiles.has(token)) return undefined;
+    const raw = await readFile(answerPath, 'utf-8').catch(() => undefined);
+    const text = raw?.trim();
+    if (!text) return undefined;
+    this.consumedAnswerFiles.add(token);
+    return text;
+  }
+
+  /**
+   * Wait for an agent's pending Slack human question to settle.
+   *
+   * `timeoutMs` bounds the wait and MUST be supplied by any caller that is
+   * itself under a deadline. A question's promise settles when the human
+   * answers or the Slack ask fails — but if the agent's PTY dies while the
+   * question is outstanding, nothing is left to settle it, and an unbounded
+   * `await` here silently outlives every step deadline above it. That is not
+   * hypothetical: it hung a run for 34 minutes with no BLOCKED artifact and no
+   * failure, because a deadline checked between calls does not bound the call.
+   *
+   * Returns true if the question settled, false if the budget expired first.
+   */
+  private async waitForPendingHumanQuestion(agentName: string, timeoutMs?: number): Promise<boolean> {
+    const settle = async (): Promise<boolean> => {
+      const pendingQuestion = this.pendingHumanQuestions.get(agentName);
+      if (pendingQuestion) {
+        // Defence in depth. startHumanQuestion stores a non-rejecting
+        // promise, but a rejection reaching here would propagate out of the
+        // agent wait loop and kill the run, so it is absorbed: a question that
+        // failed is a question that did not get answered, not a crash.
+        await pendingQuestion.catch(() => undefined);
+        return true;
+      }
+
+      const draft = this.pendingHumanQuestionDrafts.get(agentName);
+      if (!draft) return false;
+
+      await this.delay(1500);
+      const started = this.pendingHumanQuestions.get(agentName);
+      if (started) await started;
+      return true;
+    };
+
+    if (timeoutMs === undefined) return settle();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+    });
+    try {
+      return await Promise.race([settle(), expiry]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * How long a pending human question may extend a step past its own deadline.
+   *
+   * A human question is a legitimate reason for a step to sit idle, so the step
+   * deadline alone must not kill it. But the extension is bounded by the
+   * configured Slack answer timeout, so a question nobody can ever answer —
+   * including one whose agent has died — ends the step instead of the run.
+   */
+  private resolveHumanQuestionWaitBudgetMs(step: WorkflowStep): number {
+    const config = this.resolveHumanAssistanceConfig(step);
+    const file = this.resolveFileHumanAssistanceConfig(config);
+    if (file) return file.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
+    const slack = config && typeof config.slack === 'object' && config.slack !== null ? config.slack : undefined;
+    return slack?.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
   }
 
   private async askSlackAndInjectAnswer(
@@ -9935,7 +10493,7 @@ export class WorkflowRunner {
     agentName: string;
     text: string;
     stepName: string;
-    source: 'slack';
+    source: 'slack' | 'file';
   }): Promise<void> {
     if (!this.activeAgentHandles.has(input.agentName)) {
       throw new Error(
@@ -10082,7 +10640,20 @@ export class WorkflowRunner {
             this.postToChannel(
               `**[${step.name}]** Agent \`${agent.name}\` is blocked on Slack human input`
             );
-            await this.waitForPendingHumanQuestion(agent.name);
+            // Bounded: the step is already past its deadline, so the question
+            // gets one finite extension. Without a budget this await never
+            // returns when the agent's PTY died holding the question, and the
+            // loop below re-enters this same branch forever.
+            const settled = await this.waitForPendingHumanQuestion(
+              agent.name,
+              this.resolveHumanQuestionWaitBudgetMs(step)
+            );
+            if (!settled) {
+              this.log(
+                `[${step.name}] Agent "${agent.name}" is past its deadline with a human question that never settled — timing out`
+              );
+              return 'timeout';
+            }
             if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
               return 'released';
             }
@@ -10100,7 +10671,16 @@ export class WorkflowRunner {
             this.postToChannel(
               `**[${step.name}]** Agent \`${agent.name}\` is waiting for a Slack human answer`
             );
-            await this.waitForPendingHumanQuestion(agent.name);
+            const answered = await this.waitForPendingHumanQuestion(
+              agent.name,
+              this.resolveHumanQuestionWaitBudgetMs(step)
+            );
+            if (!answered) {
+              this.log(
+                `[${step.name}] Agent "${agent.name}" idled on a human question that never settled — timing out`
+              );
+              return 'timeout';
+            }
             if (await this.releaseAgentIfVerificationPassedAfterHumanInput(agent, step, promptTaskText)) {
               return 'released';
             }
@@ -10431,7 +11011,13 @@ export class WorkflowRunner {
       status,
       updatedAt: new Date().toISOString(),
     };
-    if (status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'needs_human') {
+    if (
+      status === 'completed' ||
+      status === 'completed_early' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'needs_human'
+    ) {
       patch.completedAt = new Date().toISOString();
     }
     if (error) {
@@ -10568,6 +11154,32 @@ export class WorkflowRunner {
     }
   }
 
+  private async markRemainingStepsSkipped(
+    terminalStepName: string,
+    allSteps: WorkflowStep[],
+    stepStates: Map<string, StepState>,
+    runId: string
+  ): Promise<void> {
+    for (const step of allSteps) {
+      const state = stepStates.get(step.name);
+      if (!state || state.row.status !== 'pending') continue;
+
+      const completedAt = new Date().toISOString();
+      state.row.status = 'skipped';
+      state.row.completedAt = completedAt;
+      await this.db.updateStep(state.row.id, {
+        status: 'skipped',
+        completedAt,
+        updatedAt: completedAt,
+      });
+      this.emit({ type: 'step:skipped', runId, stepName: step.name });
+      const reason = `Workflow completed early at "${terminalStepName}"`;
+      this.postToChannel(`**[${step.name}]** Skipped — ${reason}`);
+      await this.trajectory?.stepSkipped(step, reason);
+      await this.trajectory?.decide(`Whether to skip ${step.name}`, 'skip', reason);
+    }
+  }
+
   // ── startFrom dependency resolution ─────────────────────────────────
 
   /**
@@ -10698,7 +11310,7 @@ export class WorkflowRunner {
     workflowName: string,
     outcomes: StepOutcome[],
     runId: string,
-    status: Extract<WorkflowRunStatus, 'completed' | 'failed' | 'needs_human'> = 'failed'
+    status: Extract<WorkflowRunStatus, 'completed' | 'completed_early' | 'failed' | 'needs_human'> = 'failed'
   ): void {
     const completed = outcomes.filter((o) => o.status === 'completed');
     const failed = outcomes.filter((o) => o.status === 'failed');
@@ -10706,6 +11318,8 @@ export class WorkflowRunner {
     const statusLabel =
       status === 'completed'
         ? chalk.green('COMPLETED')
+        : status === 'completed_early'
+          ? chalk.cyan('COMPLETED EARLY')
         : status === 'needs_human'
           ? chalk.yellow('NEEDS HUMAN')
           : chalk.red('FAILED');

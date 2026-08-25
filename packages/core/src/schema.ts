@@ -60,11 +60,12 @@ interface AgentDefinitionBase {
    *  It receives its task as a CLI prompt argument and returns stdout as output.
    *  Default: true (interactive PTY mode). */
   interactive?: boolean;
-  /** Working directory for this agent, resolved relative to the YAML file. */
+  /** Working directory for this agent, resolved according to the top-level
+   *  `cwdResolution` setting. */
   cwd?: string;
   /** Sets this agent's working directory to a named entry from the top-level `paths` array.
    *  Mutually exclusive with `cwd`. If omitted, the agent runs in the runner's
-   *  working directory (the directory containing the workflow YAML file). */
+   *  working directory. */
   workdir?: string;
   /** Additional paths the agent needs read/write access to. */
   additionalPaths?: string[];
@@ -339,9 +340,32 @@ export interface WorkflowIntegrationsConfig {
   subscriptions?: IntegrationSubscriptionConfig[];
 }
 
+/**
+ * File-backed human assistance: the answer half of the question loop.
+ *
+ * Blocked agents already write their question to disk. Nothing ever read the
+ * reply, so a human who answered on disk in seconds was ignored while the run
+ * sat on a Slack round trip for an hour. This channel closes that loop: the
+ * runner writes `<dir>/<step>.md` if the agent has not, then polls
+ * `<dir>/<step>.ANSWER.md` and injects the answer exactly as Slack would.
+ *
+ * It needs no network, no workspace token and no bot, which is why it is the
+ * default channel for flows that must survive an unreachable Slack bridge.
+ */
+export interface FileHumanAssistanceConfig {
+  /** Directory holding `<step>.md` questions and `<step>.ANSWER.md` answers. Relative to the run cwd. */
+  dir: string;
+  /** How often to look for the answer file. Defaults to 5000ms. */
+  pollIntervalMs?: number;
+  /** Bound on the wait for an answer. Defaults to DEFAULT_HUMAN_QUESTION_WAIT_MS. */
+  timeoutMs?: number;
+}
+
 export interface HumanAssistanceConfig {
   /** Enable marker-driven Slack questions for interactive agents. */
   slack?: SlackHumanAssistanceConfig | boolean;
+  /** Enable the on-disk question/answer loop. Takes precedence over `slack`. */
+  file?: FileHumanAssistanceConfig;
 }
 
 /**
@@ -374,7 +398,8 @@ export interface WorkflowStep {
   retries?: number;
   /** Maximum iterations for steps that may need to retry (e.g., fix-failures). */
   maxIterations?: number;
-  /** Explicit working directory for this step. */
+  /** Explicit working directory for this step, resolved according to the
+   *  top-level `cwdResolution` setting. */
   cwd?: string;
   /** Step-level human assistance override. Set false to disable swarm defaults. */
   humanAssistance?: HumanAssistanceConfig | false;
@@ -394,6 +419,11 @@ export interface WorkflowStep {
   failOnError?: boolean;
   /** Capture stdout as step output for downstream steps. Default: true. */
   captureOutput?: boolean;
+  /**
+   * Explicit exit codes that end the workflow successfully without running
+   * remaining work. The run is reported as completed_early, not completed.
+   */
+  terminalSuccessExitCodes?: number[];
 
   // ── Integration step fields ────────────────────────────────────────────────
   /** Integration name: 'github', 'linear', 'slack' (required for integration steps). */
@@ -454,7 +484,7 @@ export interface VerificationCheck {
   /**
    * Type-specific value:
    *  - output_contains: token that must appear in the step's output
-   *  - exit_code: expected exit code (currently informational)
+   *  - exit_code: expected recorded process exit code
    *  - file_exists: path that must exist (relative to cwd or absolute)
    *  - custom: shell command to execute, or `regex:<pattern>` against output
    *  - pr_url: optional `<owner>/<repo>` qualifier to require the discovered
@@ -498,7 +528,7 @@ export interface RunnerStepExecutor {
         agentName: string;
         text: string;
         stepName: string;
-        source: 'slack';
+        source: 'slack' | 'file';
       }) => Promise<void>;
     }
   ): Promise<{ output: string; success: boolean }>;

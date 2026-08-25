@@ -155,6 +155,21 @@ workflows:
 - **Deterministic step**: shell command step with `type: deterministic`
 - **Worktree step**: git worktree management step with `type: worktree`
 
+### Terminal-success deterministic steps
+
+Use `terminalSuccessExitCodes` when a deterministic gate can correctly decide that the run has no work to perform:
+
+```yaml
+- name: claim-work
+  type: deterministic
+  command: node bin/claim-work.mjs
+  terminalSuccessExitCodes: [78]
+```
+
+A listed exit code completes the gate, skips all not-started steps, and ends the run as `completed_early`. The gate acts as a scheduling barrier so other ready steps do not race it. The CLI treats `completed_early` as a successful process outcome while preserving the distinct status in results and events.
+
+The option is explicit: unlisted codes and workflows without `terminalSuccessExitCodes` keep the existing failure behavior. Verification failures also continue to fail. Consumers that exhaustively handle run statuses must add `completed_early` as a distinct terminal status.
+
 ## Completion Signals
 
 The runner can complete a step from several signals:

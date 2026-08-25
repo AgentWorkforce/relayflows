@@ -43,6 +43,7 @@ export async function runInCloud(config: RelayYamlConfig, options: CloudRunOptio
 
     if (
       data.status === 'completed' ||
+      data.status === 'completed_early' ||
       data.status === 'failed' ||
       data.status === 'cancelled' ||
       data.status === 'needs_human'

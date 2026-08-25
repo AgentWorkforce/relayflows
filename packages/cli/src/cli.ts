@@ -84,6 +84,10 @@ program
             console.log('\nWorkflow resumed and completed successfully.');
             return;
           }
+          if (result.status === 'completed_early') {
+            console.log('\nWorkflow resumed and completed early; remaining steps were skipped.');
+            return;
+          }
           if (result.status === 'needs_human') {
             console.log(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`);
             return;
@@ -113,6 +117,10 @@ program
 
         if (result.status === 'completed') {
           console.log('\nWorkflow completed successfully.');
+          return;
+        }
+        if (result.status === 'completed_early') {
+          console.log('\nWorkflow completed early; remaining steps were skipped.');
           return;
         }
         if (result.status === 'needs_human') {

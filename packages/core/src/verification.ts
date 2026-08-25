@@ -48,6 +48,8 @@ export interface VerificationOptions {
   allowFailure?: boolean;
   completionMarkerFound?: boolean;
   cwd?: string;
+  /** Exit code recorded for the process being verified. */
+  exitCode?: number;
 }
 
 export class WorkflowCompletionError extends Error {
@@ -124,8 +126,11 @@ export function runVerification(
     }
 
     case 'exit_code':
-      if (!checkExitCode(check.value)) {
-        return fail(`Verification failed for "${stepName}": exit code did not match "${check.value}"`);
+      if (!checkExitCode(check.value, options.exitCode)) {
+        return fail(
+          `Verification failed for "${stepName}": recorded exit code ` +
+            `"${options.exitCode ?? 'unavailable'}" did not match "${check.value}"`
+        );
       }
       break;
 
@@ -223,10 +228,9 @@ export function stripInjectedTaskEcho(output: string, injectedTaskText?: string)
   return output;
 }
 
-export function checkExitCode(_expectedExitCode: string): boolean {
-  // Existing runner semantics treat process success as established before this
-  // verification hook runs, so this check is currently an unconditional pass.
-  return true;
+export function checkExitCode(expectedExitCode: string, actualExitCode?: number): boolean {
+  const expected = Number(expectedExitCode);
+  return Number.isInteger(expected) && actualExitCode !== undefined && actualExitCode === expected;
 }
 
 export function checkOutputContains(output: string, token: string, injectedTaskText?: string): boolean {

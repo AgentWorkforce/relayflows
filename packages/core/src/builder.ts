@@ -121,6 +121,8 @@ export interface DeterministicStepOptions {
   captureOutput?: boolean;
   /** Fail if command exit code is non-zero. Default: true. */
   failOnError?: boolean;
+  /** Exit codes that end the workflow with the distinct completed_early status. */
+  terminalSuccessExitCodes?: number[];
   dependsOn?: string[];
   verification?: VerificationCheck;
   timeoutMs?: number;
@@ -165,6 +167,8 @@ export interface WorkflowRunOptions {
   dryRun?: boolean;
   /** External step executor (e.g. a sandbox-backed backend). */
   executor?: RunnerStepExecutor;
+  /** Resume a failed run by its ID instead of starting fresh. */
+  resume?: string;
   /** Start from a specific step, skipping all predecessors. */
   startFrom?: string;
   /** Previous run ID whose cached outputs are used with startFrom. */
@@ -423,6 +427,9 @@ export class WorkflowBuilder {
       if (options.cwd !== undefined) step.cwd = options.cwd;
       if (options.captureOutput !== undefined) step.captureOutput = options.captureOutput;
       if (options.failOnError !== undefined) step.failOnError = options.failOnError;
+      if (options.terminalSuccessExitCodes !== undefined) {
+        step.terminalSuccessExitCodes = [...options.terminalSuccessExitCodes];
+      }
       if (options.dependsOn !== undefined) step.dependsOn = options.dependsOn;
       if (options.verification !== undefined) step.verification = options.verification;
       if (options.timeoutMs !== undefined) step.timeoutMs = options.timeoutMs;
@@ -616,7 +623,7 @@ export class WorkflowBuilder {
     }
 
     // Auto-detect RESUME_RUN_ID env var for resuming failed runs
-    const resumeRunId = process.env.RESUME_RUN_ID;
+    const resumeRunId = options.resume ?? process.env.RESUME_RUN_ID;
 
     const startFrom = this._startFrom ?? options.startFrom ?? process.env.START_FROM;
     const previousRunId = this._previousRunId ?? options.previousRunId ?? process.env.PREVIOUS_RUN_ID;
@@ -632,7 +639,7 @@ export class WorkflowBuilder {
       runner.on(renderer.onEvent);
 
       const runPromise = resumeRunId
-        ? runner.resume(resumeRunId, options.vars, config)
+        ? runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true })
         : runner.execute(config, options.workflow, options.vars, executeOptions);
 
       try {
@@ -644,7 +651,7 @@ export class WorkflowBuilder {
     }
 
     if (resumeRunId) {
-      return runner.resume(resumeRunId, options.vars, config);
+      return runner.resume(resumeRunId, options.vars, config, { resetRunningSteps: true });
     }
 
     return runner.execute(config, options.workflow, options.vars, executeOptions);

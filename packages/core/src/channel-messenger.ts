@@ -359,6 +359,34 @@ export class ChannelMessenger {
     this.postFn?.(lines.join('\n'));
   }
 
+  postEarlyCompletionReport(
+    workflowName: string,
+    outcomes: StepOutcome[],
+    terminalStepName: string,
+    summary: string,
+    confidence: number
+  ): void {
+    const completed = outcomes.filter((outcome) => outcome.status === 'completed');
+    const skipped = outcomes.filter((outcome) => outcome.status === 'skipped');
+
+    const lines: string[] = [
+      `## Workflow **${workflowName}** — Completed Early`,
+      '',
+      summary,
+      `Terminal step: **${terminalStepName}**`,
+      `Confidence: ${Math.round(confidence * 100)}%`,
+      '',
+      '### Steps',
+      ...completed.map(
+        (outcome) =>
+          `- **${outcome.name}** (${outcome.agent}) — passed${outcome.name === terminalStepName ? ' (terminal-success exit)' : ''}`
+      ),
+      ...skipped.map((outcome) => `- **${outcome.name}** — skipped`),
+    ];
+
+    this.postFn?.(lines.join('\n'));
+  }
+
   postFailureReport(workflowName: string, outcomes: StepOutcome[], errorMsg: string): void {
     const completed = outcomes.filter((outcome) => outcome.status === 'completed');
     const failed = outcomes.filter((outcome) => outcome.status === 'failed');

@@ -19,6 +19,12 @@
       "type": "string",
       "description": "Optional description of the configuration"
     },
+    "cwdResolution": {
+      "type": "string",
+      "enum": ["workflow-file", "process"],
+      "default": "process",
+      "description": "Base directory for relative agent and step cwd values. process preserves the current behavior; workflow-file resolves from the directory containing this YAML file."
+    },
     "permission_profiles": {
       "type": "object",
       "description": "Reusable permission profiles that agents can reference via permissions.profile.",
@@ -410,7 +416,7 @@
         },
         "cwd": {
           "type": "string",
-          "description": "Working directory for this agent, resolved relative to the YAML file."
+          "description": "Working directory for this agent, resolved according to the top-level cwdResolution setting."
         },
         "workdir": {
           "type": "string",
@@ -487,7 +493,8 @@
         "droid",
         "cursor",
         "cursor-agent",
-        "agent"
+        "agent",
+        "api"
       ]
     },
     "PermissionProfile": {
@@ -835,6 +842,10 @@
           "type": "string",
           "description": "Sets this step's working directory to a named entry from the top-level paths array."
         },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for this step, resolved according to the top-level cwdResolution setting."
+        },
         "humanAssistance": {
           "anyOf": [
             {
@@ -888,9 +899,24 @@
           "default": true,
           "description": "Capture stdout as step output for downstream steps"
         },
+        "terminalSuccessExitCodes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "description": "Explicit exit codes that end the workflow with completed_early and skip remaining work"
+        },
         "workdir": {
           "type": "string",
           "description": "Sets this step's working directory to a named entry from the top-level paths array."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for this step, resolved according to the top-level cwdResolution setting."
         }
       }
     },
@@ -1153,6 +1179,17 @@
           "type": "boolean",
           "default": true,
           "description": "Capture stdout as step output"
+        },
+        "terminalSuccessExitCodes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "description": "Explicit exit codes that end the workflow with completed_early and skip remaining work"
         },
         "timeoutMs": {
           "type": "integer",

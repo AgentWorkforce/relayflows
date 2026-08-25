@@ -26,6 +26,10 @@ export function createDefaultEventLogger(level: LogLevel = 'normal'): WorkflowEv
         console.log(chalk.green(`[workflow] completed`));
         break;
 
+      case 'run:completed-early':
+        console.log(chalk.cyan(`[workflow] completed early at ${event.stepName}`));
+        break;
+
       case 'run:failed':
         console.log(chalk.red(`[workflow] FAILED: ${event.error}`));
         break;

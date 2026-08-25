@@ -49,6 +49,9 @@ export interface RelayYamlConfig {
   version: string;
   name: string;
   description?: string;
+  /** Base directory used to resolve relative agent and step `cwd` values.
+   *  Defaults to `process` for backwards compatibility. */
+  cwdResolution?: 'workflow-file' | 'process';
   /** Reusable permission profiles that agents can reference via permissions.profile. */
   permission_profiles?: Record<string, PermissionProfileDefinition>;
   /** Named paths to external directories used by this workflow.
@@ -278,6 +281,20 @@ export interface PreflightCheck {
   description?: string;
 }
 
+/** Options for {@link WorkflowRunner.resume}. */
+export interface ResumeOptions {
+  /**
+   * Requeue steps left in `running` when the run stopped.
+   *
+   * Off by default. Runs carry no lease or heartbeat, so a live owner cannot be
+   * detected; requeueing blindly lets a second resume re-run steps alongside the
+   * original process and duplicate non-idempotent side effects. The user-facing
+   * resume paths set this because `--resume` explicitly means the previous
+   * process is gone.
+   */
+  resetRunningSteps?: boolean;
+}
+
 /** A named workflow composed of sequential or parallel steps. */
 export interface WorkflowDefinition {
   name: string;
@@ -322,6 +339,8 @@ export interface CustomStepDefinition {
   failOnError?: boolean;
   /** Capture stdout as step output. Default: true. */
   captureOutput?: boolean;
+  /** Exit codes that end the workflow with the distinct completed_early status. */
+  terminalSuccessExitCodes?: number[];
   /** Timeout in milliseconds. */
   timeoutMs?: number;
   /** Human-readable description of this step. */
@@ -565,6 +584,7 @@ export type WorkflowRunStatus =
   | 'pending'
   | 'running'
   | 'completed'
+  | 'completed_early'
   | 'failed'
   | 'cancelled'
   | 'needs_human';
@@ -601,6 +621,7 @@ export type WorkflowStepCompletionReason =
   | 'completed_by_owner_decision'
   | 'completed_by_evidence'
   | 'completed_by_process_exit'
+  | 'completed_early_exit'
   | 'retry_requested_by_owner'
   | 'failed_verification'
   | 'failed_verification_with_diagnostic'
