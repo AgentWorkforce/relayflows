@@ -29,11 +29,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build primitives
-        run: npm run build:primitives
-
-      - name: Test
-        run: npm test
-
+      # `npm run typecheck` already runs `build:primitives` and builds core, and
+      # `npm test` needs the primitives built. Running typecheck first means one
+      # build serves both gates instead of building the primitives twice.
       - name: Typecheck
         run: npm run typecheck
+
+      # Always report the test result, so a typecheck failure does not hide it.
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: npm test

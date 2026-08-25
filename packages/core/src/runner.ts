@@ -7847,52 +7847,16 @@ export class WorkflowRunner {
         }
       }
 
-      // Re-key PTY maps if broker assigned a different name than requested
+      // Re-key PTY maps if broker assigned a different name than requested.
       if (agent.name !== agentName) {
-        const oldName = agentName;
-        this.ptyOutputBuffers.set(agent.name, this.ptyOutputBuffers.get(oldName) ?? []);
-        this.ptyOutputBuffers.delete(oldName);
-
-        // Close old log stream and rename the file to match the new agent name
-        const oldLogPath = path.join(logsDir, `${oldName}.log`);
-        const newLogPath = path.join(logsDir, `${agent.name}.log`);
-        const oldLogStream = this.ptyLogStreams.get(oldName);
-        if (oldLogStream) {
-          await closeWriteStream(oldLogStream);
-          this.ptyLogStreams.delete(oldName);
-          try {
-            renameSync(oldLogPath, newLogPath);
-          } catch {
-            // File may not exist yet if no output was written
-          }
-        }
-
-        // Open new log stream with the correct name
-        const newLogStream = createWriteStream(newLogPath, { flags: 'a' });
-        this.ptyLogStreams.set(agent.name, newLogStream);
-
-        // Update listener to use the new log stream
-        const oldListener = this.ptyListeners.get(oldName);
-        if (oldListener) {
-          this.ptyListeners.delete(oldName);
-          const resolvedAgentName = agent.name;
-          this.ptyListeners.set(resolvedAgentName, (chunk: string) => {
-            const stripped = WorkflowRunner.stripAnsi(chunk);
-            const buffer = this.ptyOutputBuffers.get(resolvedAgentName);
-            buffer?.push(stripped);
-            newLogStream.write(chunk);
-            if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
-              this.observeHumanAssistanceOutput({
-                agentName: resolvedAgentName,
-                step,
-                config: humanAssistanceConfig,
-                output: buffer?.join('') ?? stripped,
-              });
-            }
-            options.onChunk?.({ agentName: resolvedAgentName, chunk });
-          });
-        }
-
+        await this.rekeyPtyStreams({
+          oldName: agentName,
+          newName: agent.name,
+          logsDir,
+          step,
+          humanAssistanceConfig,
+          onChunk: options.onChunk,
+        });
         agentName = agent.name;
       }
 
@@ -8638,6 +8602,86 @@ export class WorkflowRunner {
 
   private static escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Move the PTY buffer, log stream and output listener from the name we asked
+   * the broker for to the name it actually assigned.
+   *
+   * This is one critical section containing an unavoidable `await`: the old log
+   * stream has to be closed before its file can be renamed. A `worker_stream`
+   * for the old name can arrive inside that window, so nothing the old listener
+   * depends on may be torn down before it. The buffer is therefore captured by
+   * reference rather than looked up by a key that is about to change, chunks
+   * are parked while no log stream exists, and the old listener key is dropped
+   * only once the swap has finished.
+   */
+  private async rekeyPtyStreams(params: {
+    oldName: string;
+    newName: string;
+    logsDir: string;
+    step: WorkflowStep;
+    humanAssistanceConfig: HumanAssistanceConfig | undefined;
+    onChunk?: (info: { agentName: string; chunk: string }) => void;
+  }): Promise<void> {
+    const { oldName, newName, logsDir, step, humanAssistanceConfig, onChunk } = params;
+
+    const buffer = this.ptyOutputBuffers.get(oldName) ?? [];
+    this.ptyOutputBuffers.set(newName, buffer);
+    this.ptyOutputBuffers.delete(oldName);
+
+    const oldLogPath = path.join(logsDir, `${oldName}.log`);
+    const newLogPath = path.join(logsDir, `${newName}.log`);
+    const oldLogStream = this.ptyLogStreams.get(oldName);
+
+    let newLogStream: ReturnType<typeof createWriteStream> | undefined;
+    const parkedChunks: string[] = [];
+    const writeToLog = (chunk: string) => {
+      if (newLogStream) {
+        newLogStream.write(chunk);
+      } else {
+        parkedChunks.push(chunk);
+      }
+    };
+
+    if (this.ptyListeners.has(oldName)) {
+      const rekeyedListener = (chunk: string) => {
+        const stripped = WorkflowRunner.stripAnsi(chunk);
+        buffer.push(stripped);
+        writeToLog(chunk);
+        if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
+          this.observeHumanAssistanceOutput({
+            agentName: newName,
+            step,
+            config: humanAssistanceConfig,
+            output: buffer.join('') || stripped,
+          });
+        }
+        onChunk?.({ agentName: newName, chunk });
+      };
+      // Registered under both names across the await window so a chunk still
+      // addressed to the old name is captured rather than dropped.
+      this.ptyListeners.set(newName, rekeyedListener);
+      this.ptyListeners.set(oldName, rekeyedListener);
+    }
+
+    if (oldLogStream) {
+      await closeWriteStream(oldLogStream);
+      this.ptyLogStreams.delete(oldName);
+      try {
+        renameSync(oldLogPath, newLogPath);
+      } catch {
+        // File may not exist yet if no output was written
+      }
+    }
+
+    newLogStream = createWriteStream(newLogPath, { flags: 'a' });
+    this.ptyLogStreams.set(newName, newLogStream);
+    for (const parked of parkedChunks.splice(0)) {
+      newLogStream.write(parked);
+    }
+
+    this.ptyListeners.delete(oldName);
   }
 
   private resolveHumanAssistanceConfig(step: WorkflowStep): HumanAssistanceConfig | undefined {
