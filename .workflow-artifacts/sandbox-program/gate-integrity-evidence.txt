@@ -1,0 +1,16 @@
+gate: gate-integrity
+phase: verify
+timestamp: 2026-08-25T06:31:54Z
+---
+GATE_INTEGRITY_UNCHANGED exit=0  # 11 files
+# run_id: manual
+# taken: 2026-08-25T06:31:54Z
+fb9bf861461144adc8ac6871213ef186b0bb3186a808627cd4f0a40118da1081  workflows/sandbox-program-drive.ts
+3b2c172325bbd913fe71ce6f5da91cd0e1e44f8216091faabe6f5b2ebf68e0ea  workflows/sandbox-program/gate-integrity.sh
+b76261c7eda5d7aacd9563255f5807e91c3906f223029342aca179ff7f2667cc  workflows/sandbox-program/gates/_lib.sh
+32de2e8a7c56068f8c95ef3a440b0f3722b28db1b2ee25467ab67daf8b927705  workflows/sandbox-program/gates/lane-reconcile.sh
+9196e81ab42f721e1773dea6f4419682751a41766315c459b81c9aab2d4e3a4e  workflows/sandbox-program/gates/program-acceptance.sh
+1826e75158d0fdb105569af2a708f74ec8d1fa17f306c026c5e241e90641da72  workflows/sandbox-program/gates/stage1-provisioning.sh
+95e444c0e7e4fde6f66e104020cd8d481acee4560435a088cce2d5b95fafc16a  workflows/sandbox-program/gates/stage2-sandbox30.sh
+7ca093cad1621a00a546ccd9563665354e78c4078f14c03f1e5ab4f9da5488b6  workflows/sandbox-program/gates/stage3-longrun-reconcile.sh
+714005c38caff242f65d7fa747e0bf94a6db733e60455be68fe9759e9106f3c2  workflows/sandbox-program/gates/stage4-capability-routing.sh

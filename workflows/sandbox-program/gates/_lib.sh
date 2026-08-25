@@ -101,16 +101,28 @@ file_check() {
   record "$name" "$rc" "$path"
 }
 
-# ci_check <name> <repo-slug> <branch>
+# ci_check <name> <repo-slug> <branch> [repo-dir]
 # CI is read with `gh run list --branch`, never `--commit`: the commit filter
 # has returned empty for commits with green workflows, and statusCheckRollup
 # has hidden failing workflows. An EMPTY result is a FAIL, not a pass, and the
 # latest run of EVERY workflow name must have conclusion "success".
+#
+# The run must also correspond to the lane clone's actual HEAD (claude-review.md
+# F-06): `headSha` was already requested in the `--json` field list and written
+# to the artifact but never checked, so a lane that commits locally without
+# pushing — or is read before CI starts on a fresh push — could score green
+# off a stale run for an older commit. If <repo-dir> is given, its
+# `git rev-parse HEAD` must match the scored run's headSha or the check fails
+# with a distinct note, rather than silently trusting whatever `gh` returns.
 ci_check() {
-  local name="$1" slug="$2" branch="$3"
+  local name="$1" slug="$2" branch="$3" repo_dir="${4:-}"
   local rc=0
+  # Overridable (claude-review-final.md F-23): fail-closed on truncation is
+  # right, but a branch that legitimately accumulates 100+ runs needs an
+  # escape hatch rather than a permanently red gate.
+  local limit="${CI_RUN_LIMIT:-100}"
   local json="$ARTIFACTS_ROOT/${GATE_NAME}-${name}-ci.json"
-  gh run list --repo "$slug" --branch "$branch" --limit 100 \
+  gh run list --repo "$slug" --branch "$branch" --limit "$limit" \
     --json name,status,conclusion,headSha,createdAt > "$json" 2>> "$LOG" || rc=$?
   if [ "$rc" -ne 0 ]; then
     record "$name" "$rc" "gh run list failed for $slug@$branch"
@@ -122,6 +134,31 @@ ci_check() {
     record "$name" 1 "no workflow runs on $slug@$branch — empty is NOT a pass"
     return 0
   fi
+  if [ "${count:-0}" -eq "$limit" ]; then
+    record "$name" 1 "gh run list returned exactly --limit $limit results for $slug@$branch — possible truncation, a workflow name may be silently missing from the scored set"
+    return 0
+  fi
+
+  local head_sha="" head_unresolved=0
+  if [ -n "$repo_dir" ]; then
+    if [ -d "$repo_dir" ]; then
+      head_sha="$(cd "$repo_dir" && git rev-parse HEAD 2>> "$LOG")" || head_sha=""
+      [ -n "$head_sha" ] || head_unresolved=1
+    else
+      head_unresolved=1
+    fi
+  fi
+  # A check that could not run is a FAIL, not a skip (_lib.sh's own
+  # discipline, claude-review-final.md F-18): a repo_dir that is missing, a
+  # plain directory, or has a detached/unborn HEAD used to fall through to
+  # the unbound green below, scoring exactly as it did before HEAD binding
+  # existed and with no note distinguishing "HEAD-verified green" from
+  # "HEAD check silently unavailable".
+  if [ -n "$repo_dir" ] && [ "$head_unresolved" -eq 1 ]; then
+    record "$name" 1 "could not resolve HEAD for $repo_dir — workdir missing, not a git repo, or detached/unborn HEAD; HEAD-bound CI scoring requires it"
+    return 0
+  fi
+
   # Latest run per workflow name. Three outcomes, kept apart on purpose:
   #
   #   success  — green.
@@ -157,7 +194,79 @@ ci_check() {
     record "$name" 1 "NOT-RUN workflows on $slug@$branch: $skipped — skipped is neither pass nor fail; an owner must rule whether the skip is correct for this change"
     return 0
   fi
+
+  if [ -n "$head_sha" ]; then
+    local stale
+    stale=$(jq -r --arg sha "$head_sha" '
+      group_by(.name)
+      | map(sort_by(.createdAt) | last)
+      | map(select(.headSha != $sha))
+      | map("\(.name)@\(.headSha)")
+      | join(", ")
+    ' < "$json" 2>> "$LOG")
+    if [ -n "$stale" ] && [ "$stale" != "null" ]; then
+      record "$name" 1 "runs exist and are green but not for HEAD ($head_sha) on $slug@$branch: $stale"
+      return 0
+    fi
+    record "$name" 0 "all $count runs green per workflow on $slug@$branch, matching HEAD $head_sha"
+    return 0
+  fi
+
   record "$name" 0 "all $count runs green per workflow on $slug@$branch"
+}
+
+# run_check_tap <name> <dir> <allow-skip-pattern> <command...>
+# Like run_check, but a "full test suite green" claim (e.g. contract B4) is
+# not proven if the suite's exit code was 0 only because some tests were
+# skipped (claude-review.md F-10). `ci_check` already refuses to treat a
+# skipped workflow as a pass; `run_check` had no equivalent for a TAP-style
+# test runner where `npm test` exits 0 whether 784 tests ran or 9 were
+# env-gated out. This records the base check exactly like run_check, then a
+# second `<name>_NO_UNALLOWED_SKIPS` check: PASS only if there were no skips,
+# or every skip line matches <allow-skip-pattern> (an extended regex; pass ''
+# to allow none). A skip that does not match the pattern is a FAIL — the same
+# treatment `ci_check` gives a workflow that didn't run.
+run_check_tap() {
+  local name="$1" dir="$2" allow="$3"
+  shift 3
+  local rc=0
+  if [ ! -d "$dir" ]; then
+    record "$name" 1 "workdir missing: $dir"
+    record "${name}_NO_UNALLOWED_SKIPS" 1 "workdir missing: $dir"
+    return 0
+  fi
+  local outfile
+  outfile="$(mktemp)"
+  {
+    echo ""
+    echo "=== $name :: (cd $dir && $*) ==="
+  } >> "$LOG"
+  ( cd "$dir" && "$@" ) > "$outfile" 2>&1 || rc=$?
+  cat "$outfile" >> "$LOG"
+  record "$name" "$rc"
+
+  # Only per-test TAP annotations ("ok N - name # SKIP reason"), never the
+  # summary "# skipped N" line — that line has no reason text to match
+  # against the allow-pattern and would otherwise always count as unallowed.
+  local skip_lines
+  skip_lines=$(grep -E '^[[:space:]]*(ok|not ok)[[:space:]]+[0-9]+.*#[[:space:]]*SKIP' "$outfile" || true)
+  if [ -z "$skip_lines" ]; then
+    record "${name}_NO_UNALLOWED_SKIPS" 0 "no skips"
+    rm -f "$outfile"
+    return 0
+  fi
+  local unallowed=""
+  if [ -n "$allow" ]; then
+    unallowed=$(printf '%s\n' "$skip_lines" | grep -Eiv "$allow" || true)
+  else
+    unallowed="$skip_lines"
+  fi
+  rm -f "$outfile"
+  if [ -n "$unallowed" ]; then
+    record "${name}_NO_UNALLOWED_SKIPS" 1 "skipped test(s) not on the allow-list: $(printf '%s' "$unallowed" | tr '\n' '|')"
+  else
+    record "${name}_NO_UNALLOWED_SKIPS" 0 "all skips matched allow-pattern: $allow"
+  fi
 }
 
 gate_finish() {

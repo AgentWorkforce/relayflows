@@ -1,0 +1,7 @@
+PENDING: awaiting fresh-box run from sbx-provisioning-0824
+
+mount_relayfile exit=1
+gh_version exit=1
+gh_auth_status exit=1
+roster_present exit=1
+workspace_is_mount exit=1

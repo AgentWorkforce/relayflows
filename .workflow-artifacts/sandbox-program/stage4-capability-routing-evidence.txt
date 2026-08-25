@@ -1,0 +1,15 @@
+gate: stage4-capability-routing
+timestamp: 2026-08-25T06:29:33Z
+host_cwd: /Users/khaliqgant/Projects/AgentWorkforce/relayflows
+aw_root: /Users/khaliqgant/Projects/AgentWorkforce
+---
+S4_ROUTER_TYPECHECK exit=0
+S4_ROUTER_TESTS exit=0
+S4_ROUTER_BUILD exit=0
+S4_ROUTING_BY_CAPABILITY exit=0  # pattern: requiredCapabilities|forbiddenCapabilities|provider\.capabilities
+S4_ROUTING_TEST_BY_CAPABILITY exit=0  # pattern: requiredCapabilities|forbiddenCapabilities|provider\.capabilities
+S4_CLOUD_CONSUMES_ROUTER exit=1  # call sites recorded in /Users/khaliqgant/Projects/AgentWorkforce/relayflows/.workflow-artifacts/sandbox-program/stage4-cloud-consumer.txt
+S4_ROUTER_CI exit=1  # no workflow runs on AgentWorkforce/sandbox-router@agent/process-manifest-0820 — empty is NOT a pass
+---
+checks: 7
+failed: 2

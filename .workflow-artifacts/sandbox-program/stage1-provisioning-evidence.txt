@@ -1,0 +1,20 @@
+gate: stage1-provisioning
+timestamp: 2026-08-25T06:29:17Z
+host_cwd: /Users/khaliqgant/Projects/AgentWorkforce/relayflows
+aw_root: /Users/khaliqgant/Projects/AgentWorkforce
+---
+S1_SNAPSHOT_TESTS exit=0
+S1_GH_IN_LIVE_SNAPSHOT exit=0  # pattern: apt-get install.*--no-install-recommends.*gh|command -v gh|gh --version
+S1_RELAYFILE_MOUNT_IN_SNAPSHOT exit=0  # pattern: /usr/local/bin/relayfile-mount
+S1_ROSTER_IN_SNAPSHOT exit=1  # pattern: (writeFileSync|appendFileSync|fs\.write|cat[[:space:]]*>|<<[[:space:]]*.?EOF).{0,80}[Rr]oster|[Rr]oster.{0,80}(writeFileSync|appendFileSync|fs\.write|cat[[:space:]]*>|<<[[:space:]]*.?EOF)
+S1_PROBE_PRESENT exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/relayflows/.workflow-artifacts/sandbox-program/stage1-freshbox-probe.txt
+S1_PROBE_PROVENANCE exit=1  # missing provenance header — need sandbox_id:, provider:, timestamp: (ISO-8601), mount_output: lines
+S1_PROBE_MOUNT exit=1  # pattern: mount_relayfile exit=0
+S1_PROBE_GH_VERSION exit=1  # pattern: gh_version exit=0
+S1_PROBE_GH_AUTH exit=1  # pattern: gh_auth_status exit=0
+S1_PROBE_ROSTER exit=1  # pattern: roster_present exit=0
+S1_PROBE_WORKSPACE_IS_MOUNT exit=1  # pattern: workspace_is_mount exit=0
+S1_CI exit=1  # NOT-RUN workflows on AgentWorkforce/cloud@fix/snapshot-gh-cli: Preview — skipped is neither pass nor fail; an owner must rule whether the skip is correct for this change
+---
+checks: 12
+failed: 8

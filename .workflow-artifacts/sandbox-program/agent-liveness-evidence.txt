@@ -1,0 +1,7 @@
+gate: agent-liveness
+timestamp: 2026-08-25T03:54:38Z
+---
+AGENT_repair-preflight_PRODUCED exit=0  # .workflow-artifacts/sandbox-program/preflight-repair.md
+AGENT_repair-lane-reconcile_PRODUCED exit=0  # .workflow-artifacts/sandbox-program/reconcile-repair.md
+---
+failed: 0

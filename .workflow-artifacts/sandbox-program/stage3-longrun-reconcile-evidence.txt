@@ -1,0 +1,23 @@
+gate: stage3-longrun-reconcile
+timestamp: 2026-08-25T06:29:33Z
+host_cwd: /Users/khaliqgant/Projects/AgentWorkforce/relayflows
+aw_root: /Users/khaliqgant/Projects/AgentWorkforce
+---
+S3_DOC_PRESENT exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/sandbox-router-longrun-0824/docs/PRIVATE-longrun-provider-reconciliation-2026-08-24.md
+S3_AXIS_INDEFINITE exit=0  # heading at line 89, labelled evidence within 40 lines
+S3_AXIS_IDLE_COST exit=0  # heading at line 196, labelled evidence within 40 lines
+S3_AXIS_RESTART exit=0  # heading at line 509, labelled evidence within 40 lines
+S3_AXIS_OUR_STACK exit=0  # heading at line 338, labelled evidence within 40 lines
+S3_LABEL_OBSERVED exit=0  # pattern: OBSERVED
+S3_LABEL_DOCUMENTED exit=0  # pattern: DOCUMENTED
+S3_LABEL_INFERRED exit=0  # pattern: INFERRED
+S3_UNKNOWN_LIST exit=0  # pattern: UNKNOWN
+S3_DAYTONA_CAP_RULING exit=0  # pattern: DAYTONA_CAP_RULING
+S3_CROSSOVER exit=0  # heading at line 223, labelled evidence within 60 lines
+S3_RECOMMENDATION exit=0  # heading at line 48, labelled evidence within 40 lines
+S3_SUPERSEDES_BOTH_PRS exit=0  # pattern: #16
+S3_SUPERSEDES_17 exit=0  # pattern: #17
+S3_NO_RAW_TOKENS exit=0  # must-not-match: (gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|xox[baprs]-)
+---
+checks: 15
+failed: 0

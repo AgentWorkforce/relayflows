@@ -1,0 +1,69 @@
+gate: lane-reconcile
+timestamp: 2026-08-25T05:41:25Z
+host_cwd: /Users/khaliqgant/Projects/AgentWorkforce/relayflows
+aw_root: /Users/khaliqgant/Projects/AgentWorkforce
+---
+
+## lane: STAGE1_PROVISIONING
+RECON_STAGE1_PROVISIONING_CLONE exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/cloud-provisioning-0824
+branch: fix/snapshot-gh-cli
+head:   5e7cf0a2 fix(snapshot): install gh in the live Daytona snapshot
+status --short (scoped):
+diff --stat vs origin/main:
+   scripts/create-snapshot.ts      | 31 ++++++++++++++++++++++++
+   scripts/smoke-sandbox-image.mjs | 15 +++++++++++-
+   tests/snapshot-shell.test.ts    | 53 +++++++++++++++++++++++++++++++++++++++++
+   3 files changed, 98 insertions(+), 1 deletion(-)
+RECON_STAGE1_PROVISIONING_MATERIALIZED exit=0
+RECON_STAGE1_PROVISIONING_UNPUSHED exit=0  # 0 unpushed commit(s) vs origin/fix/snapshot-gh-cli
+RECON_STAGE1_PROVISIONING_UNTRACKED_CI exit=0  # no untracked/changed files under .github/
+RECON_STAGE1_PROVISIONING_VISIBILITY exit=0  # AgentWorkforce/cloud is PRIVATE
+
+## lane: STAGE2_SANDBOX30
+RECON_STAGE2_SANDBOX30_CLONE exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/sandbox-sec30-0824
+branch: fix/sandbox-30-initial-sync-script-mode-0824
+head:   ad7fc6f fix(mount): keep the initial-sync completion window out of the failure path
+status --short (scoped):
+diff --stat vs origin/main:
+   src/mount-script.test.ts | 622 +++++++++++++++++++++++++++++++++++++++++++++++
+   src/mount-script.ts      | 107 +++++++-
+   2 files changed, 716 insertions(+), 13 deletions(-)
+RECON_STAGE2_SANDBOX30_MATERIALIZED exit=0
+RECON_STAGE2_SANDBOX30_UNPUSHED exit=0  # 0 unpushed commit(s) vs origin/fix/sandbox-30-initial-sync-script-mode-0824
+RECON_STAGE2_SANDBOX30_UNTRACKED_CI exit=0  # no untracked/changed files under .github/
+RECON_STAGE2_SANDBOX30_VISIBILITY exit=0  # AgentWorkforce/sandbox is PUBLIC
+
+## lane: STAGE3_LONGRUN
+RECON_STAGE3_LONGRUN_CLONE exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/sandbox-router-longrun-0824
+branch: docs/longrun-provider-reconciliation-0824
+head:   52f05d7 docs: rename reconciliation doc to gate-expected filename, add explicit ruling markers
+status --short (scoped):
+diff --stat vs origin/main:
+   ...E-longrun-provider-reconciliation-2026-08-24.md | 751 +++++++++++++++++++++
+   1 file changed, 751 insertions(+)
+RECON_STAGE3_LONGRUN_MATERIALIZED exit=0
+RECON_STAGE3_LONGRUN_UNPUSHED exit=0  # 1 unpushed commit(s) vs origin/docs/longrun-provider-reconciliation-0824
+RECON_STAGE3_LONGRUN_UNTRACKED_CI exit=0  # no untracked/changed files under .github/
+RECON_STAGE3_LONGRUN_VISIBILITY exit=0  # AgentWorkforce/sandbox-router is PRIVATE
+
+## lane: STAGE4_ROUTING
+RECON_STAGE4_ROUTING_CLONE exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/sandbox-router
+branch: agent/process-manifest-0820
+head:   839182b feat: implement process manifest v2 scaffold
+status --short (scoped):
+diff --stat vs origin/main:
+   docs/process-manifest-design.md |  567 +++++++++++++++++
+   src/errors.ts                   |   73 +++
+   src/index.ts                    |    1 +
+   src/process-manifest.test.ts    |  782 ++++++++++++++++++++++++
+   src/process-manifest.ts         | 1275 +++++++++++++++++++++++++++++++++++++++
+   5 files changed, 2698 insertions(+)
+RECON_STAGE4_ROUTING_MATERIALIZED exit=0
+RECON_STAGE4_ROUTING_UNPUSHED exit=0  # 0 unpushed commit(s) vs origin/agent/process-manifest-0820
+RECON_STAGE4_ROUTING_UNTRACKED_CI exit=0  # untracked/changed under .github/: ?? .github/
+RECON_STAGE4_ROUTING_VISIBILITY exit=0  # AgentWorkforce/sandbox-router is PRIVATE
+RECON_STAGE1_PROBE exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/relayflows/.workflow-artifacts/sandbox-program/stage1-freshbox-probe.txt
+RECON_STAGE3_DOC exit=0  # /Users/khaliqgant/Projects/AgentWorkforce/sandbox-router-longrun-0824/docs/PRIVATE-longrun-provider-reconciliation-2026-08-24.md
+---
+checks: 22
+failed: 0

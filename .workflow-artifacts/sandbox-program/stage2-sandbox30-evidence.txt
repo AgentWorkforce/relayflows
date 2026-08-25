@@ -1,0 +1,19 @@
+gate: stage2-sandbox30
+timestamp: 2026-08-25T06:29:21Z
+host_cwd: /Users/khaliqgant/Projects/AgentWorkforce/relayflows
+aw_root: /Users/khaliqgant/Projects/AgentWorkforce
+---
+S2_MOUNT_SCRIPT_TESTS_UMASK022 exit=0
+S2_MODE_0600_IN_SOURCE exit=0  # pattern: 0o600|0600
+S2_TEST_ASSERTS_MODE exit=0  # pattern: 0o600|0600|384
+S2_TEST_ASSERTS_UMASK exit=0  # pattern: umask
+S2_CREDS_FILE_INGRESS_DEFINED exit=0  # pattern: tokenIngress.*creds-file|creds-file.*tokenIngress
+S2_TEST_PROVES_CREDS_FILE_TOKEN_ABSENT exit=0  # pattern: tokenIngress:\s*"creds-file"
+S2_ORCHESTRATOR_PINS_TOKEN_FREE_INGRESS exit=1  # pattern: tokenIngress
+S2_TYPECHECK exit=0
+S2_FULL_TESTS exit=0
+S2_FULL_TESTS_NO_UNALLOWED_SKIPS exit=0  # all skips matched allow-pattern: DAYTONA_API_KEY is not set|AGENT37_LIVE_SMOKE is not 1|MICROSANDBOX_SMOKE_IMAGE is not set|MODAL_LIVE_BENCH is not 1
+S2_CI exit=0  # all 3 runs green per workflow on AgentWorkforce/sandbox@fix/sandbox-30-initial-sync-script-mode-0824, matching HEAD ad7fc6f7e0f6bbf5ef2e0d9210c858796d7ed612
+---
+checks: 11
+failed: 1
