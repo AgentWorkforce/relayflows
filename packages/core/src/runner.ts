@@ -8808,15 +8808,30 @@ export class WorkflowRunner {
   ): void {
     if (this.pendingHumanQuestions.has(agentName)) return;
 
-    const task = this.askSlackAndInjectAnswer(agentName, step, config, question).finally(() => {
-      this.pendingHumanQuestions.delete(agentName);
-    });
+    // The stored promise must NEVER reject. It is awaited by
+    // waitForPendingHumanQuestion, and a rejection there propagates out of the
+    // agent wait loop and terminates the whole run — which is exactly what
+    // happened when a refreshed Relayfile token came back without a
+    // workspace_id claim: "RelayFile proactive-runtime APIs require a
+    // workspace-scoped JWT" killed a 71-minute run outright.
+    //
+    // Attaching .catch() to `task` after storing it does not help: the caught
+    // promise is a NEW one, while the rejecting original is what got stored and
+    // awaited. So the handler goes INLINE, before the promise is stored.
+    //
+    // Failing to ask a human is a blocked question, not a dead workflow. The
+    // step falls through to its own deadline and its own verification, and the
+    // run reaches a handled outcome.
+    const task = this.askSlackAndInjectAnswer(agentName, step, config, question)
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log(`[${step.name}] Slack human question failed: ${message}`);
+        this.postToChannel(`**[${step.name}]** Slack human question failed: ${message}`);
+      })
+      .finally(() => {
+        this.pendingHumanQuestions.delete(agentName);
+      });
     this.pendingHumanQuestions.set(agentName, task);
-    task.catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      this.log(`[${step.name}] Slack human question failed: ${message}`);
-      this.postToChannel(`**[${step.name}]** Slack human question failed: ${message}`);
-    });
   }
 
   /**
@@ -8836,7 +8851,11 @@ export class WorkflowRunner {
     const settle = async (): Promise<boolean> => {
       const pendingQuestion = this.pendingHumanQuestions.get(agentName);
       if (pendingQuestion) {
-        await pendingQuestion;
+        // Defence in depth. startSlackHumanQuestion stores a non-rejecting
+        // promise, but a rejection reaching here would propagate out of the
+        // agent wait loop and kill the run, so it is absorbed: a question that
+        // failed is a question that did not get answered, not a crash.
+        await pendingQuestion.catch(() => undefined);
         return true;
       }
 

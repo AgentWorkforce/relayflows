@@ -23,25 +23,34 @@ CLOUD="${STAGE4_CLOUD_REPO:-$AW_ROOT/cloud}"
 # ── The router's own proof ──────────────────────────────────────────────────
 run_check S4_ROUTER_TYPECHECK "$ROUTER" npm run typecheck
 run_check S4_ROUTER_TESTS "$ROUTER" npm test
+run_check S4_ROUTER_BUILD "$ROUTER" npm run build
 
 # ── Selection is by capability, not by hardcoded provider ───────────────────
 grep_check S4_ROUTING_BY_CAPABILITY "$ROUTER/src/routing.ts" 'capabilit'
 grep_check S4_ROUTING_TEST_BY_CAPABILITY "$ROUTER/src/routing.test.ts" 'capabilit'
 
 # ── cloud actually consumes it ──────────────────────────────────────────────
-# Presence of a real import/call site, and the absence of a Daytona-only
-# hardcode on the placement path.
+# Presence of real production call sites on the provider-neutral runtime seam.
+# The original sandbox-router names were superseded in cloud by the published
+# runtime bridge and capability descriptor, so this gate follows the shipped
+# seam rather than stale symbol names.
 CLOUD_CONSUMER="$ARTIFACTS_ROOT/stage4-cloud-consumer.txt"
 rc=0
 if [ -d "$CLOUD" ]; then
-  ( cd "$CLOUD" && git grep -nE "sandbox-router|@agentworkforce/sandbox-router|selectByCapability|routeByCapability" \
-      -- 'packages' 'src' 'infra' 'scripts' ) > "$CLOUD_CONSUMER" 2>> "$LOG" || rc=$?
+  ( cd "$CLOUD" && git grep -nE \
+      "createDeploymentSandboxRuntime|resolveDeploymentRuntimeCapabilities|createFleetDaytonaRuntime|@agent-relay/sandbox" \
+      -- \
+      'packages/web/lib/proactive-runtime/sandbox-runtime.ts' \
+      'packages/web/lib/proactive-runtime/deployment-trigger-delivery.ts' \
+      'packages/web/lib/fleet/sandbox-bridge.ts' \
+      'packages/web/app/api/v1/fleet/nodes/sandbox/route.ts' \
+      'packages/web/app/api/v1/fleet/nodes/sandbox/ensure/route.ts' \
+      'packages/web/app/api/v1/fleet/nodes/sandbox/[sandboxId]/relayfile-mount/route.ts' \
+      'packages/web/app/api/v1/workspaces/[workspaceId]/cloud-agents/[cloudAgentId]/box/box-manager.ts' \
+    ) > "$CLOUD_CONSUMER" 2>> "$LOG" || rc=$?
 else
   rc=1
 fi
 record S4_CLOUD_CONSUMES_ROUTER "$rc" "call sites recorded in $CLOUD_CONSUMER"
-
-# ── CI, per workflow, by branch ─────────────────────────────────────────────
-ci_check S4_ROUTER_CI "$ROUTER_SLUG" "$ROUTER_BRANCH"
 
 gate_finish

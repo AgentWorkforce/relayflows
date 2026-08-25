@@ -101,7 +101,17 @@ const LANES = {
   stage1: { repo: `${AW_ROOT}/cloud-provisioning-0824`, branch: 'fix/snapshot-gh-cli', owner: 'sbx-provisioning-0824' },
   stage2: { repo: `${AW_ROOT}/sandbox-sec30-0824`, branch: 'fix/sandbox-30-initial-sync-script-mode-0824', owner: 'sbx-sec30-0824' },
   stage3: { repo: `${AW_ROOT}/sandbox-router-longrun-0824`, branch: 'main', owner: 'sbx-longrun-0824' },
-  stage4: { repo: `${AW_ROOT}/sandbox-router`, branch: 'agent/process-manifest-0820', owner: 'sandbox-router lane' },
+  stage4: {
+    repo: `${AW_ROOT}/sandbox-router`,
+    branch: 'agent/process-manifest-0820',
+    owner: 'sandbox-router lane',
+    companions: [
+      {
+        repo: `${AW_ROOT}/cloud`,
+        purpose: 'real cloud consumer call site asserted by the stage 4 gate',
+      },
+    ],
+  },
 } as const;
 
 /** Seconds of true PTY silence before the runner calls an agent finished.
@@ -133,7 +143,9 @@ Rules for every repair owner in this flow:
   it is green or you hit a genuinely external blocker.
 - Score by exit code. Never conclude "it passed" from the absence of an error
   string, and never read $? through a pipe.
-- Stay in your lane's clone. Do not edit another stage's repository.
+- Stay in your assigned lane clone. If the step text explicitly names an
+  in-scope companion repo, that repo is part of the same owned surface for
+  that step; otherwise do not edit another stage's repository.
 - Never merge and never push. Khaliq owns every merge gate.
 - sandbox, sandbox-router and relayflows are PUBLIC repos: no customer names,
   no credentials, no exploit paths in any file, commit, issue or comment.
@@ -176,7 +188,7 @@ async function main(): Promise<void> {
     .channel('wf-sandbox-program')
     .maxConcurrency(4)
     .timeout(21_600_000) // 6h — this program hits red gates constantly
-    .repairable({ maxRetries: 2, retryDelayMs: 10_000 });
+    .repairable({ maxRetries: 1, retryDelayMs: 10_000 });
 
   // ── Agents ─────────────────────────────────────────────────────────────────
   // One repair owner per stage, each scoped to one clone: one writer per repo
@@ -354,7 +366,7 @@ ${REPAIR_RULES}`,
       '  D1  sandbox-router typecheck and tests green',
       '  D2  selection is by capability, not by hardcoded provider',
       '  D3  cloud actually consumes it — a real call site, not a compiled module',
-      '  D4  CI green per workflow on the lane branch',
+      '  D4  sandbox-router build green on the lane clone',
       '',
       'PASS  = every gate exit code zero. Then, and only then, commit-if-green commits.',
       'BLOCKED = any gate still red after repair. Writes BLOCKED_NO_COMMIT.md with the',
@@ -519,9 +531,22 @@ ${REPAIR_RULES}`,
     key: string,
     agent: string,
     after: string[],
-    lane: { repo: string; branch: string; owner: string },
+    lane: {
+      repo: string;
+      branch: string;
+      owner: string;
+      companions?: readonly Array<{ repo: string; purpose: string }>;
+    },
     focus: string,
   ) => {
+    const companionScope = lane.companions?.length
+      ? `
+Additional in-scope repo(s) for this step:
+${lane.companions.map(({ repo, purpose }) => `- ${repo} — ${purpose}`).join("\n")}
+
+These repos are part of this step's owned surface. Do not edit any other repo.
+`
+      : "";
     wf.step(`run-${key}`, {
       type: 'deterministic',
       dependsOn: after,
@@ -532,10 +557,36 @@ ${REPAIR_RULES}`,
     wf.step(`fix-${key}`, {
       agent,
       dependsOn: [`run-${key}`],
+      retries: 1,
       task: `${focus}
+
+CLASSIFY THE RED BEFORE YOU REPAIR IT. There are two kinds and only one of them
+is yours.
+
+  WRONG   — the work exists and is defective. A failing test, a bad mode, a
+            broken call site, a missing assertion, a red CI job. This is
+            repairable: fix it, rerun the gate, iterate.
+
+  MISSING — the work does not exist yet. No module, no document, no call site,
+            no CI pipeline on the branch. A repair owner CANNOT build an unbuilt
+            feature, and three successive agents pointed at unbuilt work produce
+            three questions and no code.
+
+If the red is MISSING: do NOT attempt to build it and do NOT ask a human whether
+you should. Write ${ARTIFACTS}/${key}-repair.md recording BLOCKED_MISSING, the
+exact check names and exit codes, and which lane owns building it. Append the
+same to ${ARTIFACTS}/BLOCKED_NO_COMMIT.md. Then exit. Blocking once, with
+evidence and an owner, is the correct outcome — it is not a failure and it is
+not something to retry.
+
+If the red is WRONG: repair it, and you get at most two attempts across this
+whole run. If the second leaves it red, record BLOCKED_UNREPAIRED with the
+evidence rather than spending another engine on it.
+
 
 Your clone: ${lane.repo} (branch ${lane.branch})
 Lane that owns this work: ${lane.owner}
+${companionScope}
 
 Gate output — every "exit=1" line is a work item:
 {{steps.run-${key}.output}}

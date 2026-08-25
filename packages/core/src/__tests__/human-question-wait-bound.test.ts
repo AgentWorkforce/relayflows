@@ -47,6 +47,21 @@ describe('waitForPendingHumanQuestion', () => {
     await expect(r.waitForPendingHumanQuestion('live-agent', 5_000)).resolves.toBe(true);
   });
 
+  it('absorbs a rejecting question instead of propagating it into the run', async () => {
+    // A Slack ask that throws — a Relayfile token refreshed without a
+    // workspace_id claim, say — must not take the workflow with it. This
+    // rejection killed a 71-minute run outright before the fix.
+    const runner = new WorkflowRunner({ cwd: process.cwd() });
+    const r = internals(runner);
+
+    r.pendingHumanQuestions.set(
+      'exploding-agent',
+      Promise.reject(new Error('RelayFile proactive-runtime APIs require a workspace-scoped JWT'))
+    );
+
+    await expect(r.waitForPendingHumanQuestion('exploding-agent', 5_000)).resolves.toBe(true);
+  });
+
   it('reports false when the agent has no question pending at all', async () => {
     const runner = new WorkflowRunner({ cwd: process.cwd() });
     const r = internals(runner);
