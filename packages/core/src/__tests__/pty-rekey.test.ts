@@ -100,6 +100,28 @@ describe('PTY re-key when the broker renames an agent', () => {
     expect(runner.ptyListeners.has('new-name')).toBe(true);
   });
 
+  it('does not rename the log until the old stream is really closed', async () => {
+    // closeWriteStream used to resolve from the end() callback, which fires at
+    // 'finish' — data flushed, file descriptor still open. The rename that
+    // follows throws EPERM on Windows against a live handle, and the caller's
+    // best-effort catch swallows it, losing everything written before the
+    // re-key. The stream must be fully closed before rekeyPtyStreams returns.
+    const { runner, logsDir } = setup();
+    const oldStream = (runner as any).ptyLogStreams.get('old-name');
+
+    await runner.rekeyPtyStreams({
+      oldName: 'old-name',
+      newName: 'new-name',
+      logsDir,
+      step,
+      humanAssistanceConfig: undefined,
+    });
+
+    expect(oldStream.closed).toBe(true);
+    await flush(runner, 'new-name');
+    expect(readFileSync(path.join(logsDir, 'new-name.log'), 'utf8')).toBe('before\n');
+  });
+
   it('keeps the earlier buffer contents and routes chunks after the swap', async () => {
     const { runner, logsDir } = setup();
 

@@ -298,10 +298,22 @@ function sleepMs(ms: number): Promise<void> {
 function closeWriteStream(stream: WriteStream): Promise<void> {
   if (stream.closed) return Promise.resolve();
 
+  // Resolve on 'close', not on the end() callback. end() fires at 'finish',
+  // when the data has been flushed but the file descriptor is still open.
+  // Callers close a log stream precisely so they can rename the file, and on
+  // Windows renaming a file with a live handle throws EPERM — which the
+  // caller's best-effort catch would swallow, silently losing everything
+  // written before the rename. 'error' stays a settle path: this is
+  // best-effort cleanup and must never hang the run.
   return new Promise((resolve) => {
-    const settle = () => resolve();
+    const settle = () => {
+      stream.removeListener('close', settle);
+      stream.removeListener('error', settle);
+      resolve();
+    };
+    stream.once('close', settle);
     stream.once('error', settle);
-    stream.end(settle);
+    stream.end();
   });
 }
 
