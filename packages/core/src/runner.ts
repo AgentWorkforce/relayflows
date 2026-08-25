@@ -295,6 +295,16 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function closeWriteStream(stream: WriteStream): Promise<void> {
+  if (stream.closed) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const settle = () => resolve();
+    stream.once('error', settle);
+    stream.end(settle);
+  });
+}
+
 // ── DB adapter interface ────────────────────────────────────────────────────
 
 /** Minimal DB adapter so the runner is not coupled to a specific driver. */
@@ -7646,7 +7656,7 @@ export class WorkflowRunner {
         combined: combinedOutput,
       });
       stopHeartbeat?.();
-      logStream.end();
+      await closeWriteStream(logStream);
       this.unregisterWorker(agentName);
     }
   }
@@ -7848,7 +7858,7 @@ export class WorkflowRunner {
         const newLogPath = path.join(logsDir, `${agent.name}.log`);
         const oldLogStream = this.ptyLogStreams.get(oldName);
         if (oldLogStream) {
-          oldLogStream.end();
+          await closeWriteStream(oldLogStream);
           this.ptyLogStreams.delete(oldName);
           try {
             renameSync(oldLogPath, newLogPath);
@@ -8036,7 +8046,7 @@ export class WorkflowRunner {
       this.ptyListeners.delete(agentName);
       const stream = this.ptyLogStreams.get(agentName);
       if (stream) {
-        stream.end();
+        await closeWriteStream(stream);
         this.ptyLogStreams.delete(agentName);
       }
       this.unregisterWorker(agentName);
