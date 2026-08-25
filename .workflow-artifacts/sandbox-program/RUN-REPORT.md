@@ -340,3 +340,21 @@ died at step 2 with no artifact.** Confirmed live before the fix.
   decision from Khaliq on rotation as well as code.
 - **F-16 follow-on:** the driver now has 5 parallel steps in wave 3 against
   `maxConcurrency: 4`, so one queues. Harmless, worth tidying.
+
+## Status 2026-08-25 evening — substrate partially unblocked
+
+Recording rulings that changed what "BLOCKED_NO_COMMIT" means today. **The run itself is not being restaged** on this branch; this note tracks what the substrate looks like now so a future rerun does not re-litigate what was already answered.
+
+**Stage 4 has a real path to green.** Khaliq ruled (in-session, relayed by `chief-r2`) *"the sandbox-router↔cloud integration is a must, how else would this work?"*, so `sandbox-router#22`'s finding closes as **build the integration**, not change the gate. Follow-up filed as `AgentWorkforce/cloud#3184`. Stage 4 stays red until that ships; the gate itself is now known-correct.
+
+**Router type widening is on.** `sandbox-router#20` (the detached-launch blocker) got B1 explicitly confirmed by Khaliq — `ProvisionedSandbox.status` will widen to `"pending" | "running"`, and the box path routes through `SandboxRouter.provision` per the #22 ruling. B2 (exclude box from provision) is off the table. The router-side widening lands in sandbox-router; the cloud change waits on it.
+
+**Stage 1 still needs the fresh-box probe.** `sbx-freshbox-probe-0825` is unrun; that is what moves stage 1 from PENDING to a measured verdict. Held until `sandbox#42` (bootstrap snippets) lands, because the probe wants those snippets in the tarball it exercises.
+
+**Stage 2 stayed red on final scoring** and is unchanged by today's rulings.
+
+**Acceptance stays MISSING** until stages 1 and 4 clear.
+
+So the block is no longer "we do not know what to do next" — it is now a work queue: (a) sandbox-router widens `status`, (b) cloud consumes it and routes the box path, (c) fresh-box probe runs, (d) rerun the flow on v1.1.0 (or successor) to confirm the runner scores it green.
+
+Recorded by `sandbox-lead-0825-r4`.
