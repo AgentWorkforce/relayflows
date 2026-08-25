@@ -101,6 +101,7 @@ import type {
   DryRunWave,
   ErrorHandlingConfig,
   IdleNudgeConfig,
+  FileHumanAssistanceConfig,
   HumanAssistanceConfig,
   PathDefinition,
   PermissionProfileDefinition,
@@ -550,7 +551,20 @@ type DiagnosticVerificationCheck = VerificationCheck & {
 /** Fallback bound on how long a pending Slack human question may hold a step
  *  open once that step is past its own deadline. Only used when the workflow
  *  declares human assistance without an explicit `slack.timeoutMs`. */
-const DEFAULT_HUMAN_QUESTION_WAIT_MS = 3_600_000;
+/**
+ * Default bound on a human question.
+ *
+ * This was 3_600_000 — an hour. An hour is not a bound, it is a night: a run
+ * parked on a question nobody was going to answer for the whole of it, and the
+ * one Slack question that did get this far spent the full 60 minutes timing out
+ * on a question a human had already answered on disk in seconds. Ten minutes is
+ * long enough for a watching human and short enough that an unanswered question
+ * ends the step rather than the shift.
+ */
+const DEFAULT_HUMAN_QUESTION_WAIT_MS = 600_000;
+
+/** How often the on-disk answer loop looks for `<step>.ANSWER.md`. */
+const DEFAULT_ANSWER_FILE_POLL_MS = 5_000;
 
 const DEFAULT_WORKFLOW_MAX_RETRIES = 2;
 const DEFAULT_WORKFLOW_REPAIR_RETRIES = 2;
@@ -865,7 +879,15 @@ export class WorkflowRunner {
   private readonly activeAgentHandles = new Map<string, WorkflowAgentHandle>();
   /** Pending Slack-backed human questions keyed by runtime agent name. */
   private readonly pendingHumanQuestions = new Map<string, Promise<void>>();
-  /** Debounced Slack human-question drafts keyed by runtime agent name. */
+  /**
+   * Answer files this run has already injected, keyed by path+mtime+size.
+   *
+   * Consumption is tracked rather than the file deleted, so the ruling stays on
+   * disk as the record, and a second question from the same step is not handed
+   * the previous question's answer.
+   */
+  private readonly consumedAnswerFiles = new Set<string>();
+  /** Debounced human-question drafts keyed by runtime agent name. */
   private readonly pendingHumanQuestionDrafts = new Map<
     string,
     {
@@ -8285,6 +8307,7 @@ export class WorkflowRunner {
 
     let handle: Subscription | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cleanupExtra: (() => void) | undefined;
     return await new Promise<NormalizedRelayfileEvent>((resolve, reject) => {
       let settled = false;
       const waiter: RelayfileEventWaiter = {
@@ -8307,10 +8330,58 @@ export class WorkflowRunner {
       };
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
+        cleanupExtra?.();
+        cleanupExtra = undefined;
         const idx = this.relayfileEventWaiters.indexOf(waiter);
         if (idx !== -1) this.relayfileEventWaiters.splice(idx, 1);
         void handle?.unsubscribe().catch(() => undefined);
       };
+
+      // WHY THIS LISTENER EXISTS — the defect that ended two 2-hour runs.
+      //
+      // `client.subscribe` is SYNCHRONOUS and returns a Subscription, but it
+      // kicks off its own setup internally:
+      //
+      //   subscribe(globs, onChange, options) {
+      //     const setup = this.resolveWorkspaceId(options?.aclToken).then(...)
+      //     return { async unsubscribe() { ... } }
+      //   }
+      //
+      // When `resolveWorkspaceId` throws — a Relayfile token refreshed without
+      // a workspace_id claim — `setup` is a REJECTED PROMISE held only in the
+      // SDK's closure. `subscribe` still returns normally, so the try/catch
+      // below catches nothing, this waiter registers, and the timer arms. The
+      // rejection is attached to nothing and Node takes the process down.
+      //
+      // That is why the two failure modes of this one call site behaved so
+      // differently. A subscription that TIMED OUT rejected through the await
+      // chain and was caught, and the run lived. A subscription that FAILED TO
+      // SET UP never entered the await chain at all: no try/catch here, no
+      // .catch() on the caller's promise, and no number of further wrappers
+      // could ever have caught it. It is not our promise.
+      //
+      // So the failure is caught where it actually surfaces. The match is
+      // deliberately narrow — this exact SDK signature — and anything else is
+      // rethrown on the next tick so unrelated unhandled rejections keep
+      // crashing the process exactly as they did before.
+      const onDetachedSubscriptionFailure = (reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        if (!/workspace-scoped JWT|workspace_id claim/i.test(message)) {
+          process.nextTick(() => {
+            throw reason;
+          });
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(reason instanceof Error ? reason : new Error(message));
+      };
+      process.on('unhandledRejection', onDetachedSubscriptionFailure);
+      const removeDetachedListener = () => {
+        process.off('unhandledRejection', onDetachedSubscriptionFailure);
+      };
+      cleanupExtra = removeDetachedListener;
 
       try {
         handle = client.subscribe(
@@ -8564,11 +8635,58 @@ export class WorkflowRunner {
     return step.humanAssistance ?? this.currentConfig?.swarm.humanAssistance;
   }
 
+  /**
+   * The on-disk question/answer loop, when the step is configured for it.
+   *
+   * Checked BEFORE Slack everywhere, because a flow that configures both means
+   * "ask on disk"; Slack is the legacy channel, not the preferred one.
+   */
+  private resolveFileHumanAssistanceConfig(
+    config: HumanAssistanceConfig | undefined
+  ): FileHumanAssistanceConfig | undefined {
+    const file = config?.file;
+    if (!file || typeof file.dir !== 'string' || !file.dir.trim()) return undefined;
+    return file;
+  }
+
+  /**
+   * Slack human assistance, which is OFF whenever the on-disk loop is
+   * configured and can additionally be killed outright by the environment.
+   *
+   * The kill switch exists because this path has a failure mode no local guard
+   * can contain: a Relayfile token that comes back without a workspace_id claim
+   * makes `client.subscribe` throw from inside the answer subscription, and two
+   * complete runs died there. A flow that cannot afford that sets
+   * RELAYFLOWS_DISABLE_SLACK_HUMAN_ASSISTANCE=1 and no Slack call is attempted
+   * at all — the only guard that cannot itself be bypassed.
+   */
   private isSlackHumanAssistanceEnabled(config: HumanAssistanceConfig | undefined): boolean {
-    return Boolean(config?.slack);
+    if (!config?.slack) return false;
+    if (this.resolveFileHumanAssistanceConfig(config)) return false;
+    const disabled = process.env.RELAYFLOWS_DISABLE_SLACK_HUMAN_ASSISTANCE;
+    if (disabled && disabled !== '0' && disabled.toLowerCase() !== 'false') return false;
+    return true;
+  }
+
+  /** True when EITHER human-assistance channel is live for this step. */
+  private isHumanAssistanceEnabled(config: HumanAssistanceConfig | undefined): boolean {
+    return Boolean(this.resolveFileHumanAssistanceConfig(config)) || this.isSlackHumanAssistanceEnabled(config);
   }
 
   private buildHumanAssistanceGuidance(config: HumanAssistanceConfig | undefined): string {
+    const file = this.resolveFileHumanAssistanceConfig(config);
+    if (file) {
+      return (
+        '---\n' +
+        'HUMAN ASSISTANCE — on-disk question bridge:\n' +
+        'If you are blocked by a missing decision or clarification, print one line beginning with ' +
+        'HUMAN_QUESTION followed by a colon and your concise question. Then stop and wait.\n' +
+        `The workflow runner will record it under ${file.dir}/<step-name>.md, watch for a human ` +
+        `reply at ${file.dir}/<step-name>.ANSWER.md, and inject a HUMAN_ANSWER line back into your ` +
+        'session. Do not repeat the question while waiting.'
+      );
+    }
+
     if (!this.isSlackHumanAssistanceEnabled(config)) return '';
 
     return (
@@ -8587,7 +8705,7 @@ export class WorkflowRunner {
     config: HumanAssistanceConfig | undefined;
     output: string;
   }): void {
-    if (!this.isSlackHumanAssistanceEnabled(input.config)) return;
+    if (!this.isHumanAssistanceEnabled(input.config)) return;
 
     const renderedQuestion = this.selectBestHumanQuestion(this.extractHumanQuestionCandidates(input.output));
     const declaredQuestion = this.extractDeclaredHumanQuestionFromTask(input.step.task);
@@ -8598,7 +8716,7 @@ export class WorkflowRunner {
     if (!question) return;
     const key = `${input.step.name}:${input.agentName}`;
     if (this.hasAnsweredSimilarHumanQuestion(key, question)) return;
-    this.scheduleSlackHumanQuestion(input.agentName, input.step, input.config!, question);
+    this.scheduleHumanQuestion(input.agentName, input.step, input.config!, question);
   }
 
   private extractDeclaredHumanQuestionFromTask(task: string | undefined): string | undefined {
@@ -8671,7 +8789,7 @@ export class WorkflowRunner {
     return question.length + spaces * 12 + words.length * 3 + punctuation * 2 - Math.max(0, longestWord - 24) * 8;
   }
 
-  private scheduleSlackHumanQuestion(
+  private scheduleHumanQuestion(
     agentName: string,
     step: WorkflowStep,
     config: HumanAssistanceConfig,
@@ -8706,7 +8824,7 @@ export class WorkflowRunner {
           return;
         }
         this.rememberHumanQuestion(key, selected);
-        this.startSlackHumanQuestion(draft.agentName, draft.step, draft.config, selected);
+        this.startHumanQuestion(draft.agentName, draft.step, draft.config, selected);
       }, 1200),
     };
     this.pendingHumanQuestionDrafts.set(agentName, draft);
@@ -8800,7 +8918,7 @@ export class WorkflowRunner {
     return distance <= maxDistance ? distance : undefined;
   }
 
-  private startSlackHumanQuestion(
+  private startHumanQuestion(
     agentName: string,
     step: WorkflowStep,
     config: HumanAssistanceConfig,
@@ -8819,19 +8937,148 @@ export class WorkflowRunner {
     // promise is a NEW one, while the rejecting original is what got stored and
     // awaited. So the handler goes INLINE, before the promise is stored.
     //
+    // That inline .catch() is still not enough on its own, and this is the
+    // lesson runs 3 and 4 paid for: ONE call site has TWO failure modes. When
+    // the Slack answer subscription TIMED OUT the rejection travelled the await
+    // chain and was caught here and the run lived; when the same call THREW the
+    // process died anyway. So the failure is also handled at its source, inside
+    // askHumanAndInjectAnswer, which does not rethrow at all — the promise
+    // stored here is non-rejecting by construction and not merely by handler.
+    //
     // Failing to ask a human is a blocked question, not a dead workflow. The
     // step falls through to its own deadline and its own verification, and the
     // run reaches a handled outcome.
-    const task = this.askSlackAndInjectAnswer(agentName, step, config, question)
+    const task = this.askHumanAndInjectAnswer(agentName, step, config, question)
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        this.log(`[${step.name}] Slack human question failed: ${message}`);
-        this.postToChannel(`**[${step.name}]** Slack human question failed: ${message}`);
+        this.log(`[${step.name}] Human question failed: ${message}`);
+        this.postToChannel(`**[${step.name}]** Human question failed: ${message}`);
       })
       .finally(() => {
         this.pendingHumanQuestions.delete(agentName);
       });
     this.pendingHumanQuestions.set(agentName, task);
+  }
+
+  /**
+   * Ask a human and inject the answer. NEVER throws, on any channel.
+   *
+   * Every failure here — a Slack bridge with no workspace-scoped token, an
+   * answer file that never appears, an agent whose PTY died before the answer
+   * arrived — is the same thing: a question that did not get answered. That is
+   * a blocked step, and a blocked step is a result. It is never a reason to
+   * take the run down with it.
+   */
+  private async askHumanAndInjectAnswer(
+    agentName: string,
+    step: WorkflowStep,
+    config: HumanAssistanceConfig,
+    question: string
+  ): Promise<void> {
+    try {
+      const file = this.resolveFileHumanAssistanceConfig(config);
+      if (file) {
+        await this.askViaAnswerFileAndInject(agentName, step, file, question);
+        return;
+      }
+      if (this.isSlackHumanAssistanceEnabled(config)) {
+        await this.askSlackAndInjectAnswer(agentName, step, config, question);
+        return;
+      }
+      this.log(`[${step.name}] Human assistance is disabled; recording the question without asking`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(`[${step.name}] Human question failed: ${message}`);
+      this.postToChannel(`**[${step.name}]** Human question failed: ${message}`);
+    }
+  }
+
+  /**
+   * The on-disk question/answer loop — the half that was never built.
+   *
+   * Blocked steps already wrote `questions/<step>.md` and DM'd chief. Nothing
+   * ever read the reply, so a chief who answered on disk in seconds was
+   * ignored while the run spent an hour on a Slack round trip for the same
+   * question. This writes the question down if the agent has not, then polls
+   * for `<step>.ANSWER.md` and injects it exactly as a Slack answer would be.
+   *
+   * Answers are consumed by (path, mtime, size), not by deletion: the answer
+   * stays on disk as the record of the ruling, a second question from the same
+   * step does not get handed the same stale reply, and a resumed run correctly
+   * re-injects a standing answer.
+   */
+  private async askViaAnswerFileAndInject(
+    agentName: string,
+    step: WorkflowStep,
+    config: FileHumanAssistanceConfig,
+    question: string
+  ): Promise<void> {
+    const dir = path.resolve(this.cwd, config.dir);
+    const questionPath = path.join(dir, `${step.name}.md`);
+    const answerPath = path.join(dir, `${step.name}.ANSWER.md`);
+    const timeoutMs = config.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
+    const pollIntervalMs = Math.max(250, config.pollIntervalMs ?? DEFAULT_ANSWER_FILE_POLL_MS);
+
+    this.log(`[${step.name}] ${agentName} requested human input; watching ${answerPath}`);
+    this.postToChannel(
+      `**[${step.name}]** \`${agentName}\` asked a human question. Answer it at \`${config.dir}/${step.name}.ANSWER.md\`.`
+    );
+
+    await mkdir(dir, { recursive: true }).catch(() => undefined);
+    // Only write the question if the agent has not already written a fuller
+    // one. The agent's own file is the better record; this is the fallback that
+    // guarantees a human can always see what is being asked.
+    const alreadyRecorded = await stat(questionPath).then(() => true).catch(() => false);
+    if (!alreadyRecorded) {
+      await writeFile(
+        questionPath,
+        `# ${step.name} — question for a human\n\nAgent: ${agentName}\n\n## Question\n\n${question}\n\n` +
+          `## How to answer\n\nWrite the answer to \`${step.name}.ANSWER.md\` in this directory.\n`,
+        'utf-8'
+      ).catch(() => undefined);
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const answer = await this.readUnconsumedAnswerFile(answerPath);
+      if (answer) {
+        this.log(`[${step.name}] Received human answer on disk; injecting into ${agentName}`);
+        this.rememberAnsweredHumanQuestion(`${step.name}:${agentName}`, question);
+        await this.injectAnswerToAgent({
+          agentName,
+          stepName: step.name,
+          source: 'file',
+          text: `HUMAN_ANSWER: ${answer}`,
+        });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        this.log(
+          `[${step.name}] No answer at ${answerPath} within ${timeoutMs}ms; leaving the question outstanding`
+        );
+        return;
+      }
+      // An agent that has gone away cannot be injected into, so stop waiting
+      // for an answer that has nowhere to land.
+      if (!this.activeAgentHandles.has(agentName)) {
+        this.log(`[${step.name}] ${agentName} is no longer active; stopped waiting for a human answer`);
+        return;
+      }
+      await this.delay(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    }
+  }
+
+  /** Read an answer file, unless this run has already injected that exact version. */
+  private async readUnconsumedAnswerFile(answerPath: string): Promise<string | undefined> {
+    const stats = await stat(answerPath).catch(() => undefined);
+    if (!stats || !stats.isFile()) return undefined;
+    const token = `${answerPath}:${stats.mtimeMs}:${stats.size}`;
+    if (this.consumedAnswerFiles.has(token)) return undefined;
+    const raw = await readFile(answerPath, 'utf-8').catch(() => undefined);
+    const text = raw?.trim();
+    if (!text) return undefined;
+    this.consumedAnswerFiles.add(token);
+    return text;
   }
 
   /**
@@ -8851,7 +9098,7 @@ export class WorkflowRunner {
     const settle = async (): Promise<boolean> => {
       const pendingQuestion = this.pendingHumanQuestions.get(agentName);
       if (pendingQuestion) {
-        // Defence in depth. startSlackHumanQuestion stores a non-rejecting
+        // Defence in depth. startHumanQuestion stores a non-rejecting
         // promise, but a rejection reaching here would propagate out of the
         // agent wait loop and kill the run, so it is absorbed: a question that
         // failed is a question that did not get answered, not a crash.
@@ -8891,6 +9138,8 @@ export class WorkflowRunner {
    */
   private resolveHumanQuestionWaitBudgetMs(step: WorkflowStep): number {
     const config = this.resolveHumanAssistanceConfig(step);
+    const file = this.resolveFileHumanAssistanceConfig(config);
+    if (file) return file.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
     const slack = config && typeof config.slack === 'object' && config.slack !== null ? config.slack : undefined;
     return slack?.timeoutMs ?? DEFAULT_HUMAN_QUESTION_WAIT_MS;
   }
@@ -10006,7 +10255,7 @@ export class WorkflowRunner {
     agentName: string;
     text: string;
     stepName: string;
-    source: 'slack';
+    source: 'slack' | 'file';
   }): Promise<void> {
     if (!this.activeAgentHandles.has(input.agentName)) {
       throw new Error(

@@ -339,9 +339,32 @@ export interface WorkflowIntegrationsConfig {
   subscriptions?: IntegrationSubscriptionConfig[];
 }
 
+/**
+ * File-backed human assistance: the answer half of the question loop.
+ *
+ * Blocked agents already write their question to disk. Nothing ever read the
+ * reply, so a human who answered on disk in seconds was ignored while the run
+ * sat on a Slack round trip for an hour. This channel closes that loop: the
+ * runner writes `<dir>/<step>.md` if the agent has not, then polls
+ * `<dir>/<step>.ANSWER.md` and injects the answer exactly as Slack would.
+ *
+ * It needs no network, no workspace token and no bot, which is why it is the
+ * default channel for flows that must survive an unreachable Slack bridge.
+ */
+export interface FileHumanAssistanceConfig {
+  /** Directory holding `<step>.md` questions and `<step>.ANSWER.md` answers. Relative to the run cwd. */
+  dir: string;
+  /** How often to look for the answer file. Defaults to 5000ms. */
+  pollIntervalMs?: number;
+  /** Bound on the wait for an answer. Defaults to DEFAULT_HUMAN_QUESTION_WAIT_MS. */
+  timeoutMs?: number;
+}
+
 export interface HumanAssistanceConfig {
   /** Enable marker-driven Slack questions for interactive agents. */
   slack?: SlackHumanAssistanceConfig | boolean;
+  /** Enable the on-disk question/answer loop. Takes precedence over `slack`. */
+  file?: FileHumanAssistanceConfig;
 }
 
 /**
@@ -498,7 +521,7 @@ export interface RunnerStepExecutor {
         agentName: string;
         text: string;
         stepName: string;
-        source: 'slack';
+        source: 'slack' | 'file';
       }) => Promise<void>;
     }
   ): Promise<{ output: string; success: boolean }>;
