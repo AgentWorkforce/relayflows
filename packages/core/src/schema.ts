@@ -477,7 +477,7 @@ export interface VerificationCheck {
   /**
    * Type-specific value:
    *  - output_contains: token that must appear in the step's output
-   *  - exit_code: expected exit code (currently informational)
+   *  - exit_code: expected recorded process exit code
    *  - file_exists: path that must exist (relative to cwd or absolute)
    *  - custom: shell command to execute, or `regex:<pattern>` against output
    *  - pr_url: optional `<owner>/<repo>` qualifier to require the discovered

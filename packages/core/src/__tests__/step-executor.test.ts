@@ -94,6 +94,47 @@ describe('StepExecutor — deterministic steps', () => {
     const result = await executor.executeOne(step, new Map());
     expect(result.status).toBe('completed');
   });
+
+  it('processSpawner path runs exit_code verification before accepting terminal success', async () => {
+    const executor = createExecutor({
+      processSpawner: mockSpawner({
+        spawnShell: vi.fn(async () => ({ output: 'claim already taken', exitCode: 78 })),
+      }),
+    });
+    const step = makeStep({
+      command: 'claim-work',
+      failOnError: false,
+      verification: { type: 'exit_code', value: '0' },
+      ...({ terminalSuccessExitCodes: [78] } as Partial<WorkflowStep>),
+    });
+
+    const result = await executor.executeOne(step, new Map());
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('recorded exit code "78" did not match "0"');
+  });
+
+  it('injected executeStep path runs exit_code verification before accepting terminal success', async () => {
+    const executor = createExecutor({
+      executeStep: vi.fn(async () => ({
+        status: 'completed',
+        output: 'claim already taken',
+        exitCode: 78,
+        completionReason: 'completed_early_exit' as any,
+      })),
+    });
+    const step = makeStep({
+      command: 'claim-work',
+      verification: { type: 'exit_code', value: '0' },
+      ...({ terminalSuccessExitCodes: [78] } as Partial<WorkflowStep>),
+    });
+
+    const result = await executor.executeOne(step, new Map());
+
+    expect(result.status).toBe('failed');
+    expect(result.completionReason).toBe('failed_verification');
+    expect(result.error).toContain('recorded exit code "78" did not match "0"');
+  });
 });
 
 // ── 2. Non-interactive agent step ────────────────────────────────────────────

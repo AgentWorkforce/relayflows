@@ -44,18 +44,25 @@ describe('verification logic', () => {
     vi.clearAllMocks();
   });
 
-  // 1. exit_code — pass on exit 0 (implicit success)
+  // 1. exit_code — compare the recorded exit against the expected value
   describe('exit_code', () => {
-    it('should pass when agent exited successfully (exit 0 implicit)', () => {
-      const result = run({ type: 'exit_code', value: '0' }, 'some output');
+    it('should pass when the recorded exit code matches', () => {
+      const result = run({ type: 'exit_code', value: '0' }, 'some output', 'test-step', {
+        exitCode: 0,
+      });
       expect(result.passed).toBe(true);
       expect(result.completionReason).toBe('completed_verified');
     });
 
-    it('should still pass for non-zero value (exit_code is implicitly satisfied)', () => {
-      // per existing logic, exit_code case is a no-op — always passes if we reach it
-      const result = run({ type: 'exit_code', value: '1' }, 'output');
-      expect(result.passed).toBe(true);
+    it('should fail when the recorded exit code does not match', () => {
+      expect(() =>
+        run({ type: 'exit_code', value: '0' }, 'output', 'test-step', { exitCode: 78 })
+      ).toThrow('recorded exit code "78" did not match "0"');
+
+      const missing = run({ type: 'exit_code', value: '0' }, 'output', 'test-step', {
+        allowFailure: true,
+      });
+      expect(missing.passed).toBe(false);
     });
   });
 
@@ -227,6 +234,7 @@ describe('verification logic', () => {
     it('should log legacy marker message when completionMarkerFound is false', () => {
       const result = run({ type: 'exit_code', value: '0' }, 'output', 'my-step', {
         completionMarkerFound: false,
+        exitCode: 0,
       });
       expect(result.passed).toBe(true);
       expect(noopSideEffects.log).toHaveBeenCalledWith(
