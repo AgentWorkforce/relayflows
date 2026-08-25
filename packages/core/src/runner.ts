@@ -4749,7 +4749,9 @@ export class WorkflowRunner {
             { exitCode: executorResult.exitCode }
           );
           const verificationResult = step.verification
-            ? this.runVerification(step.verification, output, step.name)
+            ? this.runVerification(step.verification, output, step.name, undefined, {
+                exitCode: executorResult.exitCode,
+              })
             : undefined;
           return {
             output,
@@ -4860,7 +4862,9 @@ export class WorkflowRunner {
         );
 
         const verificationResult = step.verification
-          ? this.runVerification(step.verification, output, step.name)
+          ? this.runVerification(step.verification, output, step.name, undefined, {
+              exitCode: lastExitCode,
+            })
           : undefined;
         lastCommandOutput = [commandStdout || output, commandStderr].filter(Boolean).join('\n');
 
@@ -5865,7 +5869,8 @@ export class WorkflowRunner {
             step.verification,
             specialistOutput,
             step.name,
-            promptTaskText
+            promptTaskText,
+            { exitCode: this.getStepCompletionEvidence(step.name)?.process.exitCode }
           );
           completionReason = verificationResult.completionReason;
         }
@@ -6732,6 +6737,7 @@ export class WorkflowRunner {
       ? this.runVerification(step.verification, specialistOutput, step.name, verificationTaskText, {
           allowFailure: true,
           completionMarkerFound: hasMarker,
+          exitCode: this.getStepCompletionEvidence(step.name)?.process.exitCode,
         })
       : { passed: false };
 
@@ -7039,7 +7045,7 @@ export class WorkflowRunner {
         specialistOutput,
         step.name,
         verificationTaskText,
-        { allowFailure: true }
+        { allowFailure: true, exitCode: evidence?.process.exitCode }
       );
       if (!verificationResult.passed) return null;
     }
@@ -8027,7 +8033,7 @@ export class WorkflowRunner {
             ptyOutput,
             step.name,
             preparedTask.promptTaskText,
-            { allowFailure: true }
+            { allowFailure: true, exitCode: agent?.exitCode }
           );
           if (verificationResult.passed) {
             this.log(`[${step.name}] Agent timed out but verification passed — treating as complete`);

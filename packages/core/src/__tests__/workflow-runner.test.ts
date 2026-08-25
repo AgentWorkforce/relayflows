@@ -68,6 +68,7 @@ vi.mock('@relaycast/sdk', () => ({
 let waitForExitFn: (ms?: number) => Promise<'exited' | 'timeout' | 'released'>;
 let waitForIdleFn: (ms?: number) => Promise<'idle' | 'timeout' | 'exited'>;
 let mockSpawnOutputs: string[] = [];
+let mockSpawnExitCodes: Array<number | undefined> = [];
 const mockHarnessDriverSpawn = vi.fn(async () => mockRelayInstance);
 
 // Spawned-agent handle shaped like harness-driver's SpawnedAgentHandle, but
@@ -76,7 +77,7 @@ function makeMockHandle(name: string) {
   return {
     name,
     runtime: 'pty' as const,
-    exitCode: undefined as number | undefined,
+    exitCode: mockSpawnExitCodes.shift(),
     exitSignal: undefined as string | undefined,
     waitForExit: (ms?: number) => waitForExitFn(ms).then((reason) => ({ reason })),
     waitForIdle: (ms?: number) => waitForIdleFn(ms).then((reason) => ({ reason })),
@@ -317,6 +318,7 @@ describe('WorkflowRunner', () => {
     waitForExitFn = vi.fn().mockResolvedValue('exited');
     waitForIdleFn = vi.fn().mockImplementation(() => never());
     mockSpawnOutputs = [];
+    mockSpawnExitCodes = [];
     mockHarnessDriverSpawn.mockImplementation(async () => mockRelayInstance);
     mockRelayInstance.spawnPty.mockImplementation(defaultSpawnPtyImplementation);
     eventListeners.clear();
@@ -1005,6 +1007,48 @@ agents:
       expect(run.status, run.error).toBe('completed');
     });
 
+    it('WorkflowRunner deterministic executor path rejects terminal success when exit_code verification disagrees', async () => {
+      const executeDeterministicStep = vi.fn(async () => ({
+        output: 'claim already taken',
+        exitCode: 78,
+      }));
+      runner = new WorkflowRunner({
+        db,
+        workspaceId: 'ws-test',
+        executor: {
+          executeAgentStep: vi.fn(async () => ''),
+          executeDeterministicStep,
+        },
+      });
+
+      const run = await runner.execute(
+        makeConfig({
+          errorHandling: { strategy: 'fail-fast' },
+          agents: [],
+          workflows: [
+            {
+              name: 'default',
+              steps: [
+                {
+                  name: 'claim-gate',
+                  type: 'deterministic',
+                  command: 'claim-work',
+                  failOnError: false,
+                  verification: { type: 'exit_code', value: '0' },
+                  terminalSuccessExitCodes: [78],
+                } as any,
+              ],
+            },
+          ],
+        }),
+        'default'
+      );
+
+      expect(executeDeterministicStep).toHaveBeenCalledTimes(1);
+      expect(run.status).toBe('failed');
+      expect(run.error).toContain('recorded exit code "78" did not match "0"');
+    });
+
     it('repairs a failed deterministic gate with a workflow agent before retrying', async () => {
       const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relay-deterministic-repair-'));
       const stepDir = path.join(tmpDir, 'step-cwd');
@@ -1140,6 +1184,7 @@ agents:
 
     it('should apply verification fallback for self-owned interactive steps', async () => {
       mockSpawnOutputs = ['LEAD_DONE\n', 'REVIEW_DECISION: APPROVE\nREVIEW_REASON: verified\n'];
+      mockSpawnExitCodes = [0];
 
       const run = await runner.execute(
         makeConfig({
@@ -1237,6 +1282,7 @@ agents:
 
       try {
         mockSpawnOutputs = ['LEAD_DONE\n'];
+        mockSpawnExitCodes = [0];
 
         const run = await runner.execute(
           makeConfig({
@@ -1281,6 +1327,7 @@ agents:
 
     it('should pass canonical bypass args to interactive codex PTY spawns', async () => {
       mockSpawnOutputs = ['LEAD_DONE\n', 'REVIEW_DECISION: APPROVE\nREVIEW_REASON: verified\n'];
+      mockSpawnExitCodes = [0];
 
       const run = await runner.execute(
         makeConfig({
@@ -1441,6 +1488,10 @@ agents:
     it('should not double release the worker when the owner fails after worker completion', async () => {
       const workerRelease = vi.fn().mockResolvedValue(undefined);
       const ownerRelease = vi.fn().mockResolvedValue(undefined);
+      let markWorkerReleased!: () => void;
+      const workerReleasedSignal = new Promise<void>((resolve) => {
+        markWorkerReleased = resolve;
+      });
 
       mockRelayInstance.spawnPty.mockImplementation(
         async ({ name, task }: { name: string; task?: string }) => {
@@ -1461,7 +1512,10 @@ agents:
               // WorkflowAgentHandle destructures `reason`, so raw strings would
               // map to `undefined` and the timeout would go undetected.
               waitForExit: vi.fn().mockImplementation(async () => {
-                await Promise.resolve();
+                // Model the test's stated ordering explicitly: the worker's
+                // completion promise settles before the owner timeout fires.
+                await workerReleasedSignal;
+                await new Promise((resolve) => setTimeout(resolve, 0));
                 return { reason: 'timeout' };
               }),
               waitForIdle: vi.fn().mockResolvedValue({ reason: 'timeout' }),
@@ -1476,6 +1530,7 @@ agents:
             exitSignal: undefined,
             waitForExit: vi.fn().mockImplementation(async () => {
               await workerRelease();
+              markWorkerReleased();
               return { reason: 'released' };
             }),
             waitForIdle: vi.fn().mockImplementation(() => never()),

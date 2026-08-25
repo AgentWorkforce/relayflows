@@ -34,9 +34,11 @@ workflows:
         task: 'Verify you have read access. Check RELAY_AGENT_TOKEN is set.'
         verification:
           type: exit_code
+          value: '0'
       - name: write-step
         agent: writer
         dependsOn: [check-env]
         task: 'Verify you can write to src/tests/. Check RELAY_AGENT_TOKEN is set.'
         verification:
           type: exit_code
+          value: '0'
