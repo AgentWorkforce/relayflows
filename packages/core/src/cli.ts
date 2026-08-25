@@ -284,6 +284,12 @@ async function runWithListr(
         break;
       }
 
+      case 'run:completed-early': {
+        setHeader(chalk.cyan(`Workflow completed early at ${event.stepName}`));
+        resolveWorkflow();
+        break;
+      }
+
       case 'run:failed': {
         setHeader(chalk.red(`Workflow failed: ${event.error}`));
         rejectWorkflow(new Error(event.error ?? 'Workflow failed'));
@@ -417,6 +423,9 @@ async function main(): Promise<void> {
     if (result.status === 'completed') {
       console.log(chalk.green('\nWorkflow completed successfully.'));
       process.exit(0);
+    } else if (result.status === 'completed_early') {
+      console.log(chalk.cyan('\nWorkflow completed early; remaining steps were skipped.'));
+      process.exit(0);
     } else if (result.status === 'needs_human') {
       console.log(chalk.yellow(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`));
       process.exit(0);
@@ -477,6 +486,9 @@ async function main(): Promise<void> {
 
   if (result.status === 'completed') {
     console.log(chalk.green('\nWorkflow completed successfully.'));
+    process.exit(0);
+  } else if (result.status === 'completed_early') {
+    console.log(chalk.cyan('\nWorkflow completed early; remaining steps were skipped.'));
     process.exit(0);
   } else if (result.status === 'needs_human') {
     console.log(chalk.yellow(`\nWorkflow needs human input${result.error ? `: ${result.error}` : ''}`));

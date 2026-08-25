@@ -164,6 +164,31 @@ describe('ChannelMessenger', () => {
     });
   });
 
+  describe('postEarlyCompletionReport', () => {
+    it('keeps an early completion distinct from a normal completion', () => {
+      const postSpy = vi.fn();
+      const messenger = new ChannelMessenger({ postFn: postSpy });
+      const outcomes = [
+        { name: 'gate', agent: 'deterministic', status: 'completed', attempts: 1 },
+        { name: 'work', agent: 'worker', status: 'skipped', attempts: 0 },
+      ];
+
+      messenger.postEarlyCompletionReport(
+        'scheduled-workflow',
+        outcomes as any,
+        'gate',
+        'Nothing to do',
+        0.9
+      );
+
+      const text = postSpy.mock.calls[0][0];
+      expect(text).toContain('Completed Early');
+      expect(text).toContain('Terminal step: **gate**');
+      expect(text).toContain('terminal-success exit');
+      expect(text).toContain('work** — skipped');
+    });
+  });
+
   describe('postFailureReport', () => {
     it('formats a failure report with error details', () => {
       const postSpy = vi.fn();

@@ -736,6 +736,18 @@ describe('SwarmCoordinator', () => {
       expect(spy).toHaveBeenCalledWith(run);
     });
 
+    it('should transition a run to completed_early and emit the distinct event', async () => {
+      const run = makeRunRow({ status: 'completed_early' });
+      vi.mocked(db.query).mockResolvedValueOnce({ rows: [run] });
+
+      const spy = vi.fn();
+      coordinator.on('run:completed_early', spy);
+
+      const result = await coordinator.completeRunEarly('run_test_1');
+      expect(result.status).toBe('completed_early');
+      expect(spy).toHaveBeenCalledWith(run);
+    });
+
     it('should throw when run not found', async () => {
       vi.mocked(db.query).mockResolvedValueOnce({ rows: [] });
       await expect(coordinator.completeRun('nonexistent')).rejects.toThrow('not found');

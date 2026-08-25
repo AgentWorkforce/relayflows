@@ -86,6 +86,7 @@ export interface StepExecutorDeps<TState extends StateLike = StateLike> {
   onBeginTrack?: (steps: WorkflowStep[]) => Promise<void> | void;
   onConverge?: (steps: WorkflowStep[], outcomes: StepOutcome[]) => Promise<void> | void;
   markDownstreamSkipped?: (failedStepName: string) => Promise<void>;
+  markRemainingSkipped?: (terminalStepName: string) => Promise<void>;
   buildCompletionMode?: (
     stepName: string,
     completionReason?: WorkflowStepCompletionReason
@@ -286,8 +287,15 @@ export class StepExecutor<TState extends StateLike = StateLike> {
       this.deps.checkAborted?.();
       await this.deps.waitIfPaused?.();
 
-      const readySteps = this.findReady(steps, states);
-      if (readySteps.length === 0) break;
+      const allReadySteps = this.findReady(steps, states);
+      if (allReadySteps.length === 0) break;
+
+      // A step that can terminate the workflow is a scheduling barrier. Run it
+      // alone so a root no-op/claim gate cannot race other ready work.
+      const terminalBarrier = allReadySteps.find(
+        (step) => step.type === 'deterministic' && (step.terminalSuccessExitCodes?.length ?? 0) > 0
+      );
+      const readySteps = terminalBarrier ? [terminalBarrier] : allReadySteps;
 
       const schedules = readySteps.map((step, index) =>
         this.scheduleStep(step, {
@@ -310,6 +318,7 @@ export class StepExecutor<TState extends StateLike = StateLike> {
       );
 
       const batchOutcomes: StepOutcome[] = [];
+      let completedEarlyAt: string | undefined;
 
       for (let index = 0; index < settled.length; index += 1) {
         const settledResult = settled[index];
@@ -340,6 +349,9 @@ export class StepExecutor<TState extends StateLike = StateLike> {
             if (strategy === 'fail-fast') {
               throw new Error(`Step "${step.name}" failed: ${result.error ?? 'unknown error'}`);
             }
+          }
+          if (result.completionReason === 'completed_early_exit') {
+            completedEarlyAt = step.name;
           }
           continue;
         }
@@ -380,6 +392,15 @@ export class StepExecutor<TState extends StateLike = StateLike> {
 
       if (readySteps.length > 1 && batchOutcomes.length > 0) {
         await this.deps.onConverge?.(readySteps, batchOutcomes);
+      }
+
+      if (completedEarlyAt) {
+        if (this.deps.markRemainingSkipped) {
+          await this.deps.markRemainingSkipped(completedEarlyAt);
+        } else {
+          await this.skipRemainingSteps(states, results);
+        }
+        break;
       }
     }
 
@@ -527,8 +548,13 @@ export class StepExecutor<TState extends StateLike = StateLike> {
         return spawner.spawnInteractive(agent, task, { cwd: this.deps.cwd, timeoutMs: step.timeoutMs });
       },
       toCompletionResult: (spawnResult, attempt) => {
+        const terminalSuccess =
+          step.type === 'deterministic' &&
+          spawnResult.exitCode !== undefined &&
+          step.terminalSuccessExitCodes?.includes(spawnResult.exitCode) === true;
         const failOnError = step.failOnError !== false;
         const failed =
+          !terminalSuccess &&
           failOnError &&
           ((spawnResult.exitCode ?? 0) !== 0 ||
             (spawnResult.exitCode === undefined && spawnResult.exitSignal !== undefined));
@@ -560,10 +586,39 @@ export class StepExecutor<TState extends StateLike = StateLike> {
           exitCode: spawnResult.exitCode,
           exitSignal: spawnResult.exitSignal,
           retries: attempt,
-          completionReason: verificationResult?.completionReason,
+          // Verification has already run and thrown on failure, so a terminal
+          // exit here has satisfied its contract. It then wins the
+          // classification: the run ended early, which is the more specific
+          // fact than "verified".
+          completionReason: terminalSuccess
+            ? 'completed_early_exit'
+            : verificationResult?.completionReason,
         };
       },
     });
+  }
+
+  private async skipRemainingSteps(
+    states: Map<string, TState>,
+    results: Map<string, StepResult>
+  ): Promise<void> {
+    for (const [stepName, state] of states) {
+      if (state.row.status !== 'pending') continue;
+      const completedAt = new Date().toISOString();
+      state.row.status = 'skipped';
+      state.row.completedAt = completedAt;
+      await this.deps.persistStepRow?.(state.row.id, {
+        status: 'skipped',
+        completedAt,
+        updatedAt: completedAt,
+      });
+      results.set(stepName, {
+        status: 'skipped',
+        output: '',
+        duration: 0,
+        retries: state.row.retryCount,
+      });
+    }
   }
 
   private createEphemeralStates(steps: WorkflowStep[]): Map<string, TState> {

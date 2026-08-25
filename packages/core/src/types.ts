@@ -339,6 +339,8 @@ export interface CustomStepDefinition {
   failOnError?: boolean;
   /** Capture stdout as step output. Default: true. */
   captureOutput?: boolean;
+  /** Exit codes that end the workflow with the distinct completed_early status. */
+  terminalSuccessExitCodes?: number[];
   /** Timeout in milliseconds. */
   timeoutMs?: number;
   /** Human-readable description of this step. */
@@ -582,6 +584,7 @@ export type WorkflowRunStatus =
   | 'pending'
   | 'running'
   | 'completed'
+  | 'completed_early'
   | 'failed'
   | 'cancelled'
   | 'needs_human';
@@ -618,6 +621,7 @@ export type WorkflowStepCompletionReason =
   | 'completed_by_owner_decision'
   | 'completed_by_evidence'
   | 'completed_by_process_exit'
+  | 'completed_early_exit'
   | 'retry_requested_by_owner'
   | 'failed_verification'
   | 'failed_verification_with_diagnostic'

@@ -170,6 +170,7 @@ export interface SwarmCoordinatorEvents {
   'run:created': (run: WorkflowRunRow) => void;
   'run:started': (run: WorkflowRunRow) => void;
   'run:completed': (run: WorkflowRunRow) => void;
+  'run:completed_early': (run: WorkflowRunRow) => void;
   'run:failed': (run: WorkflowRunRow) => void;
   'run:cancelled': (run: WorkflowRunRow) => void;
   'run:needs_human': (run: WorkflowRunRow) => void;
@@ -564,6 +565,13 @@ export class SwarmCoordinator extends EventEmitter {
     stateSnapshot?: Record<string, unknown>,
   ): Promise<WorkflowRunRow> {
     return this.transitionRun(runId, 'completed', undefined, stateSnapshot);
+  }
+
+  async completeRunEarly(
+    runId: string,
+    stateSnapshot?: Record<string, unknown>,
+  ): Promise<WorkflowRunRow> {
+    return this.transitionRun(runId, 'completed_early', undefined, stateSnapshot);
   }
 
   async failRun(runId: string, error: string): Promise<WorkflowRunRow> {

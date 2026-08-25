@@ -41,7 +41,7 @@ export interface RunWorkflowOptions {
  * import { runWorkflow } from "@relayflows/core";
  *
  * const result = await runWorkflow("workflows/daytona-migration.yaml");
- * console.log(result.status); // "completed" | "failed" | "cancelled" | "needs_human"
+ * console.log(result.status); // "completed" | "completed_early" | "failed" | "cancelled" | "needs_human"
  * ```
  */
 export async function runWorkflow(

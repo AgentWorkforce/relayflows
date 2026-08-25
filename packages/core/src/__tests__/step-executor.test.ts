@@ -424,6 +424,27 @@ describe('ProcessSpawner — buildCommand', () => {
 // ── 9. executeAll — DAG orchestration ────────────────────────────────────────
 
 describe('StepExecutor — executeAll', () => {
+  it('runs terminal-capable steps as barriers and skips remaining work on a listed exit', async () => {
+    const spawnShell = vi.fn(async (command: string) =>
+      command === 'gate' ? { output: 'no work', exitCode: 78 } : { output: 'unexpected', exitCode: 0 }
+    );
+    const executor = createExecutor({ processSpawner: mockSpawner({ spawnShell }) });
+    const steps = [
+      makeStep({ name: 'ready-sibling', command: 'sibling' }),
+      makeStep({ name: 'gate', command: 'gate', terminalSuccessExitCodes: [78] }),
+    ];
+
+    const results = await executor.executeAll(steps, new Map());
+
+    expect(spawnShell).toHaveBeenCalledTimes(1);
+    expect(spawnShell).toHaveBeenCalledWith('gate', expect.any(Object));
+    expect(results.get('gate')).toMatchObject({
+      status: 'completed',
+      completionReason: 'completed_early_exit',
+    });
+    expect(results.get('ready-sibling')?.status).toBe('skipped');
+  });
+
   it('executes steps in dependency order', async () => {
     const order: string[] = [];
     const executor = createExecutor({
