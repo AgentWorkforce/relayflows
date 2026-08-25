@@ -8,16 +8,16 @@
  * string contract the workflow runner has always used (`'exited'` / `'timeout'`
  * / `'idle'`), so `runner.ts` keeps consuming handles unchanged.
  */
-import type { SpawnedAgentHandle } from '@agent-relay/harness-driver';
+import type { BrokerAgentHandle } from './broker-transport.js';
 
 export class WorkflowAgentHandle {
-  constructor(private readonly inner: SpawnedAgentHandle) {}
+  constructor(private readonly inner: BrokerAgentHandle) {}
 
   get name(): string {
     return this.inner.name;
   }
 
-  get runtime(): SpawnedAgentHandle['runtime'] {
+  get runtime(): BrokerAgentHandle['runtime'] {
     return this.inner.runtime;
   }
 

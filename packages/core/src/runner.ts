@@ -14,9 +14,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  rmSync,
   statSync,
-  unlinkSync,
   watch,
   writeFileSync,
 } from 'node:fs';
@@ -144,12 +142,16 @@ import {
 
 // ── Broker client / messaging imports ───────────────────────────────────────
 
-// Broker / PTY / lifecycle is driven by the harness-driver client; messaging
-// uses @relaycast/sdk (below).
-import { HarnessDriverClient } from '@agent-relay/harness-driver';
-import type { RuntimeSpawnOptions, SpawnPtyInput } from '@agent-relay/harness-driver';
+// Broker / PTY / Relaycast lifecycle is isolated behind BrokerTransportPort.
+import type { RuntimeSpawnOptions } from '@agent-relay/harness-driver';
 import { WorkflowAgentHandle } from './agent-handle.js';
-import { RelayCast, RelayError, type AgentClient } from '@relaycast/sdk';
+import {
+  HarnessBrokerTransport,
+  resolveBrokerTransportMode,
+  type BrokerRunContext,
+  type BrokerTransportMode,
+  type BrokerTransportPort,
+} from './broker-transport.js';
 import { SlackClient } from '@relayflows/slack-primitive';
 import { RelayfileSetup, RelayFileClient, type ChangeEvent, type FilesystemEvent, type Subscription } from '@relayfile/sdk';
 
@@ -228,72 +230,6 @@ function filteredEnv(extra?: Record<string, string | undefined>): Record<string,
     Object.assign(env, extra);
   }
   return env;
-}
-
-// ── Shared broker coordination ──────────────────────────────────────────────
-
-const BROKER_CONNECTION_FILENAME = 'connection.json';
-const SHARED_BROKER_LOCK_DIRNAME = '.relayflows-start.lock';
-const SHARED_BROKER_LEASE_DIRNAME = 'relayflows-runs';
-const SHARED_BROKER_OWNER_FILENAME = 'relayflows-owner.json';
-const SHARED_BROKER_LOCK_POLL_MS = 200;
-const SHARED_BROKER_DEFAULT_STARTUP_TIMEOUT_MS = 45_000;
-
-interface BrokerConnectionFile {
-  url: string;
-  api_key: string;
-  pid: number;
-  port?: number;
-}
-
-interface SharedBrokerLease {
-  stateDir: string;
-  connectionPath: string;
-  ownerPath: string;
-  leasePath: string;
-  startedBroker: boolean;
-}
-
-function parseBrokerConnectionFile(raw: string): BrokerConnectionFile | null {
-  try {
-    const conn = JSON.parse(raw);
-    if (
-      typeof conn.url === 'string' &&
-      typeof conn.api_key === 'string' &&
-      typeof conn.pid === 'number' &&
-      conn.pid > 0
-    ) {
-      return conn as BrokerConnectionFile;
-    }
-  } catch {
-    // Invalid JSON is handled as no reusable broker.
-  }
-  return null;
-}
-
-function readBrokerConnectionFile(connectionPath: string): BrokerConnectionFile | null {
-  try {
-    return parseBrokerConnectionFile(readFileSync(connectionPath, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-function isPidRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function safeUnlinkSync(filePath: string): void {
-  try {
-    unlinkSync(filePath);
-  } catch {
-    // Best-effort cleanup.
-  }
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -409,6 +345,10 @@ export interface WorkflowRunnerOptions {
   db?: WorkflowDb;
   workspaceId?: string;
   relay?: RuntimeSpawnOptions;
+  /** Explicit broker transport. Takes precedence over the rollout selector. */
+  brokerTransport?: BrokerTransportPort;
+  /** Per-run rollout selector; falls back to RELAYFLOWS_INTEGRATION_TRANSPORT. */
+  brokerTransportMode?: BrokerTransportMode;
   cwd?: string;
   summaryDir?: string;
   executor?: RunnerStepExecutor;
@@ -596,8 +536,6 @@ const DEFAULT_ANSWER_FILE_POLL_MS = 5_000;
 const DEFAULT_WORKFLOW_MAX_RETRIES = 2;
 const DEFAULT_WORKFLOW_REPAIR_RETRIES = 2;
 const DEFAULT_WORKFLOW_RETRY_DELAY_MS = 1000;
-const BROKER_OPERATION_MAX_ATTEMPTS = 3;
-const BROKER_OPERATION_RETRY_DELAY_MS = 1_000;
 const AGENT_TRANSIENT_NETWORK_MAX_ATTEMPTS = 3;
 const AGENT_TRANSIENT_NETWORK_RETRY_DELAY_MS = 1_000;
 
@@ -834,13 +772,6 @@ interface ChannelEvidenceOptions {
   origin?: CompletionEvidenceChannelOrigin;
 }
 
-interface BrokerRunContext {
-  runId: string;
-  brokerName: string;
-  channel: string;
-  relaycastDisabled: boolean;
-}
-
 // ── CLI resolution ───────────────────────────────────────────────────────────
 
 /**
@@ -884,15 +815,7 @@ export class WorkflowRunner {
   private readonly envSecrets?: Record<string, string>;
   private readonly templateResolver: TemplateResolver;
   private readonly channelMessenger: ChannelMessenger;
-
-  /** @internal exposed for CLI signal-handler shutdown only */
-  relay?: HarnessDriverClient;
-  private currentBrokerContext?: BrokerRunContext;
-  private brokerRecoveryPromise?: Promise<void>;
-  private relaycast?: RelayCast;
-  private relaycastAgent?: AgentClient;
-  private relayApiKey?: string;
-  private relayApiKeyAutoCreated = false;
+  private readonly brokerTransport: BrokerTransportPort;
   private channel?: string;
   private trajectory?: WorkflowTrajectory;
   private abortController?: AbortController;
@@ -965,11 +888,6 @@ export class WorkflowRunner {
   private workersFileLock: Promise<void> = Promise.resolve();
   /** Timestamp when the current workflow run started, for elapsed-time logging. */
   private runStartTime?: number;
-  /** Unsubscribe handle for broker stderr listener wired during a run. */
-  private unsubBrokerStderr?: () => void;
-  private unsubRelayListeners: Array<() => void> = [];
-  /** Local lease metadata for the shared workflow broker, when broker init was needed. */
-  private sharedBrokerLease?: SharedBrokerLease;
   /** Tracks last idle log time per agent to debounce idle warnings (30s multiples). */
   private readonly lastIdleLog = new Map<string, number>();
   /** Tracks last logged activity type per agent to avoid duplicate status lines. */
@@ -1005,6 +923,17 @@ export class WorkflowRunner {
     this.executor = options.executor;
     this.processBackend = options.processBackend;
     this.envSecrets = options.envSecrets;
+    this.brokerTransport =
+      options.brokerTransport ??
+      new HarnessBrokerTransport({
+        cwd: this.cwd,
+        relay: this.relayOptions,
+        mode: resolveBrokerTransportMode(options.brokerTransportMode, {
+          ...process.env,
+          ...(this.relayOptions.env ?? {}),
+        }),
+        resolveRelayEnv: () => this.getRelayEnv() ?? filteredEnv(),
+      });
     if (!this.executor && !this.processBackend) {
       // Only reached when the caller injected neither an executor nor a
       // backend. The config's provider defaults to `none`, which yields
@@ -2255,183 +2184,12 @@ export class WorkflowRunner {
     };
   }
 
-  private clearRelayListeners(): void {
-    for (const off of this.unsubRelayListeners) {
-      try {
-        off();
-      } catch {
-        /* ignore */
-      }
-    }
-    this.unsubRelayListeners = [];
-  }
-
-  private wireRelayClient(runId: string): void {
-    if (!this.relay) return;
-
-    this.clearRelayListeners();
-    this.unsubRelayListeners.push(this.relay.onEvent(this.createBrokerEventHandler(runId)));
-    const unsubBrokerExit = this.relay.onBrokerExit?.((info) => {
-      if (this.relay?.brokerPid === info.pid) {
-        this.relay = undefined;
-      }
-      this.log(
-        `Broker exited (pid: ${info.pid ?? '?'}, code: ${info.code ?? '?'}, signal: ${info.signal ?? '?'})`
-      );
-    });
-    if (unsubBrokerExit) {
-      this.unsubRelayListeners.push(unsubBrokerExit);
-    }
-    this.relay.connectEvents();
-  }
-
-  private async startBroker(context: BrokerRunContext): Promise<void> {
-    await this.startOrReuseSharedBroker(context.runId, context.channel, context.relaycastDisabled);
-    if (!this.relay) {
-      throw new Error('Broker client was not initialized');
-    }
-    this.wireRelayClient(context.runId);
-  }
-
-  private isRetryableProtocolError(error: unknown): boolean {
-    const candidate = error as { retryable?: unknown; status?: unknown; message?: unknown } | undefined;
-    if (candidate?.retryable === true) return true;
-    if (typeof candidate?.status === 'number' && candidate.status >= 500) return true;
-    const message = typeof candidate?.message === 'string' ? candidate.message : '';
-    return /\b(fetch failed|econn|enotfound|eai_again|socket hang up|network|service unavailable|timed out)\b/i.test(
-      message
-    );
-  }
-
   private isTransientAgentNetworkError(error: unknown): boolean {
     const candidate = error as { retryable?: unknown; status?: unknown; message?: unknown } | undefined;
     if (candidate?.retryable === true) return true;
     if (typeof candidate?.status === 'number' && candidate.status >= 500) return true;
     const message = error instanceof Error ? error.message : String(error);
     return /\b(fetch failed|econn|enotfound|eai_again|socket hang up|network error|connection reset|connection refused|service unavailable)\b/i.test(message);
-  }
-
-  private async recoverBroker(reason: string): Promise<void> {
-    if (!this.currentBrokerContext) {
-      throw new Error(`Broker unavailable and no recovery context exists (${reason})`);
-    }
-    if (this.brokerRecoveryPromise) {
-      await this.brokerRecoveryPromise;
-      return;
-    }
-    if (this.activeAgentHandles.size > 0) {
-      const activeAgents = [...this.activeAgentHandles.keys()];
-      throw new Error(
-        `Broker recovery is unsafe while ${activeAgents.length} agent${activeAgents.length === 1 ? ' is' : 's are'} still active: ${activeAgents.slice(0, 3).join(', ')}`
-      );
-    }
-
-    this.brokerRecoveryPromise = (async () => {
-      this.log(`Broker unavailable (${reason}); restarting...`);
-      this.clearRelayListeners();
-      await this.shutdownRelay().catch(() => undefined);
-      await this.startBroker(this.currentBrokerContext!);
-      this.log('Broker restarted');
-    })();
-
-    try {
-      await this.brokerRecoveryPromise;
-    } finally {
-      this.brokerRecoveryPromise = undefined;
-    }
-  }
-
-  private async withBrokerRecovery<T>(operation: string, work: (relay: HarnessDriverClient) => Promise<T>): Promise<T> {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= BROKER_OPERATION_MAX_ATTEMPTS; attempt++) {
-      const relay = this.relay;
-      if (!relay) {
-        lastError = new Error(`Broker unavailable while ${operation}`);
-      } else {
-        try {
-          return await work(relay);
-        } catch (error) {
-          lastError = error;
-          if (!this.isRetryableProtocolError(error)) {
-            throw error;
-          }
-        }
-      }
-
-      if (attempt >= BROKER_OPERATION_MAX_ATTEMPTS) {
-        break;
-      }
-      await this.recoverBroker(`${operation} failed`);
-      await this.delay(BROKER_OPERATION_RETRY_DELAY_MS * attempt);
-    }
-
-    const message = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(`Broker operation failed during ${operation}: ${message}`);
-  }
-
-  // ── Relaycast auto-provisioning ────────────────────────────────────────
-
-  /**
-   * Ensure a Relaycast workspace API key is available for the broker.
-   * Resolution order:
-   *   1. RELAY_API_KEY environment variable (explicit override)
-   *   2. Auto-create a fresh workspace via the Relaycast API
-   *
-   * Each workflow run gets its own isolated workspace — no caching, no sharing.
-   */
-  private async ensureRelaycastApiKey(channel: string): Promise<void> {
-    if (this.relayApiKey) return;
-
-    // Explicit override from relayOptions or environment takes priority.
-    const envKey = this.relayOptions.env?.RELAY_API_KEY ?? process.env.RELAY_API_KEY;
-    if (envKey) {
-      this.relayApiKey = envKey;
-      return;
-    }
-
-    // Always create a fresh workspace — each run gets full isolation.
-    const workspaceName = `relay-${channel}-${randomBytes(4).toString('hex')}`;
-    const baseUrl =
-      this.relayOptions.env?.RELAYCAST_BASE_URL ??
-      process.env.RELAYCAST_BASE_URL ??
-      'https://api.relaycast.dev';
-    const res = await fetch(`${baseUrl}/v1/workspaces`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: workspaceName }),
-    });
-
-    if (!res.ok) {
-      throw new Error(`Failed to auto-create Relaycast workspace: ${res.status} ${await res.text()}`);
-    }
-
-    const body = (await res.json()) as Record<string, any>;
-    const data = (body.data ?? body) as Record<string, any>;
-    const apiKey = data.api_key as string;
-
-    if (!apiKey) {
-      throw new Error('Relaycast workspace response missing api_key');
-    }
-
-    this.relayApiKey = apiKey;
-    this.relayApiKeyAutoCreated = true;
-
-    // Best-effort: push the key to a co-running dashboard (agent-relay up) so it
-    // can make Relaycast API calls without any file or manual env var setup.
-    const dashboardPort = process.env.AGENT_RELAY_DASHBOARD_PORT || '3888';
-    fetch(`http://127.0.0.1:${dashboardPort}/api/relay-config`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ apiKey }),
-    })
-      .then((res) => {
-        if (!res.ok) {
-          console.warn(`[WorkflowRunner] dashboard key push failed: HTTP ${res.status}`);
-        }
-      })
-      .catch(() => {
-        // Dashboard not running — silently ignore.
-      });
   }
 
   private async loadCredentialProxyModule(): Promise<CredentialProxyModule | null> {
@@ -2613,7 +2371,7 @@ export class WorkflowRunner {
     return {
       ...process.env,
       ...(this.relayOptions.env ?? {}),
-      ...(this.relayApiKey ? { RELAY_API_KEY: this.relayApiKey } : {}),
+      ...(this.brokerTransport.apiKey ? { RELAY_API_KEY: this.brokerTransport.apiKey } : {}),
     };
   }
 
@@ -2623,7 +2381,7 @@ export class WorkflowRunner {
     const inheritedProxyToken = resolveProxyTokenFromEnv(env);
 
     if (
-      !this.relayApiKey &&
+      !this.brokerTransport.apiKey &&
       !this.relayOptions.env &&
       !proxyMode &&
       !(inheritedProxyUrl && inheritedProxyToken)
@@ -2648,267 +2406,8 @@ export class WorkflowRunner {
     return env;
   }
 
-  private getBrokerCwd(): string {
-    return this.relayOptions.cwd ?? this.cwd;
-  }
-
-  private getBrokerStateDir(brokerCwd: string): string {
-    const configured =
-      this.relayOptions.binaryArgs?.stateDir ??
-      this.relayOptions.env?.AGENT_RELAY_STATE_DIR ??
-      process.env.AGENT_RELAY_STATE_DIR;
-    return path.resolve(configured ?? path.join(brokerCwd, '.agentworkforce', 'relay'));
-  }
-
-  private async tryConnectSharedBroker(
-    connectionPath: string,
-    brokerCwd: string
-  ): Promise<HarnessDriverClient | null> {
-    const conn = readBrokerConnectionFile(connectionPath);
-    if (!conn) {
-      return null;
-    }
-
-    if (!isPidRunning(conn.pid)) {
-      safeUnlinkSync(connectionPath);
-      return null;
-    }
-
-    try {
-      const client = HarnessDriverClient.connect({ cwd: brokerCwd, connectionPath });
-      await client.getStatus();
-      return client;
-    } catch {
-      return null;
-    }
-  }
-
-  private async acquireSharedBrokerStartLock(
-    stateDir: string,
-    startupTimeoutMs: number
-  ): Promise<() => void> {
-    mkdirSync(stateDir, { recursive: true });
-    const lockDir = path.join(stateDir, SHARED_BROKER_LOCK_DIRNAME);
-    const deadline = Date.now() + Math.max(startupTimeoutMs + 5_000, 10_000);
-    const staleAfterMs = Math.max(startupTimeoutMs * 2, 30_000);
-
-    for (;;) {
-      try {
-        mkdirSync(lockDir);
-        writeFileSync(
-          path.join(lockDir, 'owner.json'),
-          JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }),
-          'utf-8'
-        );
-        return () => {
-          rmSync(lockDir, { recursive: true, force: true });
-        };
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw err;
-        }
-      }
-
-      try {
-        const stat = statSync(lockDir);
-        if (Date.now() - stat.mtimeMs > staleAfterMs) {
-          rmSync(lockDir, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for shared broker startup lock at ${lockDir}`);
-      }
-      await sleepMs(SHARED_BROKER_LOCK_POLL_MS);
-    }
-  }
-
-  private createSharedBrokerLease(
-    stateDir: string,
-    connectionPath: string,
-    runId: string,
-    startedBroker: boolean
-  ): SharedBrokerLease {
-    const leaseDir = path.join(stateDir, SHARED_BROKER_LEASE_DIRNAME);
-    const ownerPath = path.join(stateDir, SHARED_BROKER_OWNER_FILENAME);
-    mkdirSync(leaseDir, { recursive: true });
-    const leasePath = path.join(
-      leaseDir,
-      `${process.pid}-${runId}-${randomBytes(4).toString('hex')}.json`
-    );
-    writeFileSync(
-      leasePath,
-      JSON.stringify({
-        pid: process.pid,
-        runId,
-        startedBroker,
-        createdAt: new Date().toISOString(),
-      }),
-      'utf-8'
-    );
-    return { stateDir, connectionPath, ownerPath, leasePath, startedBroker };
-  }
-
-  private writeSharedBrokerOwner(lease: SharedBrokerLease): void {
-    const conn = readBrokerConnectionFile(lease.connectionPath);
-    writeFileSync(
-      lease.ownerPath,
-      JSON.stringify({
-        pid: conn?.pid,
-        createdByPid: process.pid,
-        createdAt: new Date().toISOString(),
-      }),
-      'utf-8'
-    );
-  }
-
-  private isWorkflowOwnedSharedBroker(lease: SharedBrokerLease): boolean {
-    const conn = readBrokerConnectionFile(lease.connectionPath);
-    if (!conn) {
-      return false;
-    }
-    try {
-      const owner = JSON.parse(readFileSync(lease.ownerPath, 'utf-8')) as { pid?: unknown };
-      return owner.pid === conn.pid;
-    } catch {
-      return false;
-    }
-  }
-
-  private disconnectRelayClient(relay: HarnessDriverClient): void {
-    const disconnect = (relay as { disconnect?: () => void }).disconnect;
-    if (typeof disconnect === 'function') {
-      disconnect.call(relay);
-    }
-  }
-
-  private countLiveSharedBrokerLeases(stateDir: string): number {
-    const leaseDir = path.join(stateDir, SHARED_BROKER_LEASE_DIRNAME);
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(leaseDir, { withFileTypes: true });
-    } catch {
-      return 0;
-    }
-
-    let live = 0;
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const leasePath = path.join(leaseDir, entry.name);
-      try {
-        const lease = JSON.parse(readFileSync(leasePath, 'utf-8')) as { pid?: unknown };
-        if (typeof lease.pid === 'number' && lease.pid > 0 && isPidRunning(lease.pid)) {
-          live += 1;
-        } else {
-          safeUnlinkSync(leasePath);
-        }
-      } catch {
-        safeUnlinkSync(leasePath);
-      }
-    }
-    return live;
-  }
-
-  private async startOrReuseSharedBroker(
-    runId: string,
-    channel: string,
-    relaycastDisabled: boolean
-  ): Promise<void> {
-    const brokerCwd = this.getBrokerCwd();
-    const stateDir = this.getBrokerStateDir(brokerCwd);
-    const connectionPath = path.join(stateDir, BROKER_CONNECTION_FILENAME);
-    const startupTimeoutMs =
-      this.relayOptions.startupTimeoutMs ?? SHARED_BROKER_DEFAULT_STARTUP_TIMEOUT_MS;
-    const lease = this.createSharedBrokerLease(stateDir, connectionPath, runId, false);
-    this.sharedBrokerLease = lease;
-
-    const existing = await this.tryConnectSharedBroker(connectionPath, brokerCwd);
-    if (existing) {
-      this.log('Reusing shared broker...');
-      this.relay = existing;
-      return;
-    }
-
-    const releaseLock = await this.acquireSharedBrokerStartLock(stateDir, startupTimeoutMs);
-    try {
-      const lockedExisting = await this.tryConnectSharedBroker(connectionPath, brokerCwd);
-      if (lockedExisting) {
-        this.log('Reusing shared broker...');
-        this.relay = lockedExisting;
-        return;
-      }
-
-      this.log('Starting broker...');
-      // Include a short run ID suffix in the broker name so a newly-created
-      // broker keeps the same Relaycast identity behavior as previous runs.
-      const brokerBaseName = path.basename(this.cwd) || 'workflow';
-      const brokerName = `${brokerBaseName}-${runId.slice(0, 8)}`;
-      const relayEnv = {
-        ...(this.getRelayEnv() ?? filteredEnv()),
-        AGENT_RELAY_STATE_DIR: stateDir,
-      };
-      this.relay = await HarnessDriverClient.spawn({
-        ...this.relayOptions,
-        cwd: brokerCwd,
-        brokerName,
-        channels: relaycastDisabled ? [] : [channel],
-        binaryArgs: {
-          ...(this.relayOptions.binaryArgs ?? {}),
-          persist: true,
-          stateDir,
-        },
-        env: relayEnv,
-        // Workflows spawn agents across multiple waves; each spawn requires a PTY +
-        // Relaycast registration. 60s is too tight when the broker is saturated with
-        // long-running PTY processes from earlier steps. 120s gives room to breathe.
-        requestTimeoutMs: this.relayOptions.requestTimeoutMs ?? 120_000,
-        // Wire broker stderr to console for observability — skip empty and
-        // JSON event lines (already surfaced via the broker:event emitter).
-        onStderr: (line: string) => {
-          const trimmed = line.trim();
-          if (!trimmed) return;
-          if (trimmed.startsWith('{') && trimmed.endsWith('}')) return;
-          console.log(`${chalk.dim.yellow('[broker]')} ${line}`);
-        },
-      });
-      lease.startedBroker = true;
-      this.writeSharedBrokerOwner(lease);
-    } finally {
-      releaseLock();
-    }
-  }
-
   async shutdownRelay(): Promise<void> {
-    const relay = this.relay;
-    const lease = this.sharedBrokerLease;
-    this.sharedBrokerLease = undefined;
-
-    if (!relay) {
-      if (lease) {
-        safeUnlinkSync(lease.leasePath);
-      }
-      return;
-    }
-
-    this.relay = undefined;
-
-    if (!lease) {
-      await relay.shutdown();
-      return;
-    }
-
-    safeUnlinkSync(lease.leasePath);
-    const liveLeases = this.countLiveSharedBrokerLeases(lease.stateDir);
-    if (liveLeases === 0 && (lease.startedBroker || this.isWorkflowOwnedSharedBroker(lease))) {
-      await relay.shutdown();
-      safeUnlinkSync(lease.connectionPath);
-      safeUnlinkSync(lease.ownerPath);
-    } else {
-      this.disconnectRelayClient(relay);
-    }
+    await this.brokerTransport.shutdown();
   }
 
   private async provisionAgents(config: RelayYamlConfig): Promise<void> {
@@ -2962,88 +2461,6 @@ export class WorkflowRunner {
     this.log(
       `Provisioned workflow tokens for ${result.tokens.size} agent${result.tokens.size === 1 ? '' : 's'}`
     );
-  }
-
-  private getRelaycastBaseUrl(): string {
-    return (
-      this.relayOptions.env?.RELAYCAST_BASE_URL ??
-      process.env.RELAYCAST_BASE_URL ??
-      'https://api.relaycast.dev'
-    );
-  }
-
-  private getRelaycastClient(): RelayCast {
-    if (!this.relayApiKey) {
-      throw new Error('No Relaycast API key available');
-    }
-    if (!this.relaycast) {
-      this.relaycast = new RelayCast({
-        apiKey: this.relayApiKey,
-        baseUrl: this.getRelaycastBaseUrl(),
-      });
-    }
-    return this.relaycast;
-  }
-
-  private async ensureRelaycastRunnerAgent(): Promise<AgentClient> {
-    if (this.relaycastAgent) return this.relaycastAgent;
-
-    const rc = this.getRelaycastClient();
-    let registration;
-    try {
-      registration = await rc.agents.register({ name: 'WorkflowRunner', type: 'agent' });
-    } catch (err) {
-      if (err instanceof RelayError && err.code === 'name_conflict') {
-        registration = await rc.agents.register({
-          name: `WorkflowRunner-${randomBytes(4).toString('hex')}`,
-          type: 'agent',
-        });
-      } else {
-        throw err;
-      }
-    }
-
-    this.relaycastAgent = rc.as(registration.token);
-    return this.relaycastAgent;
-  }
-
-  private async createAndJoinRelaycastChannel(channel: string, topic?: string): Promise<void> {
-    const agent = await this.ensureRelaycastRunnerAgent();
-    try {
-      await agent.channels.create({ name: channel, ...(topic ? { topic } : {}) });
-    } catch (err) {
-      if (!(err instanceof RelayError && err.code === 'name_conflict')) {
-        throw err;
-      }
-    }
-    await agent.channels.join(channel);
-  }
-
-  private async registerRelaycastExternalAgent(name: string, persona?: string): Promise<AgentClient | null> {
-    const rc = this.getRelaycastClient();
-    try {
-      const registration = await rc.agents.register({
-        name,
-        type: 'agent',
-        ...(persona ? { persona } : {}),
-      });
-      return rc.as(registration.token);
-    } catch (err) {
-      if (err instanceof RelayError && err.code === 'name_conflict') {
-        return null;
-      }
-      throw err;
-    }
-  }
-
-  private startRelaycastHeartbeat(agent: AgentClient, intervalMs = 30_000): () => void {
-    const beat = () => {
-      agent.heartbeat().catch(() => {});
-    };
-    const timer = setInterval(beat, intervalMs);
-    timer.unref();
-    beat();
-    return () => clearInterval(timer);
   }
 
   // ── Event subscription ──────────────────────────────────────────────────
@@ -4258,32 +3675,33 @@ export class WorkflowRunner {
       if (requiresBroker) {
         if (!relaycastDisabled) {
           this.log('Resolving Relaycast API key...');
-          await this.ensureRelaycastApiKey(channel);
+          await this.brokerTransport.ensureApiKey(channel);
           this.log('API key resolved');
-          if (this.relayApiKeyAutoCreated) {
+          if (this.brokerTransport.apiKeyAutoCreated) {
             for (const line of formatObserverGuidance(channel)) {
               this.log(line);
             }
           }
         }
 
-        this.currentBrokerContext = {
+        const brokerContext: BrokerRunContext = {
           runId,
           brokerName: this.buildBrokerName(runId),
           channel,
           relaycastDisabled,
         };
-        await this.startBroker(this.currentBrokerContext);
-
-        this.relaycast = undefined;
-        this.relaycastAgent = undefined;
+        await this.brokerTransport.start(brokerContext, {
+          onEvent: this.createBrokerEventHandler(runId),
+          onLog: (message) => this.log(message),
+          getActiveAgentNames: () => [...this.activeAgentHandles.keys()],
+        });
 
         if (!relaycastDisabled) {
           this.log(`Creating channel: ${channel}...`);
           if (isResume) {
-            await this.createAndJoinRelaycastChannel(channel);
+            await this.brokerTransport.createAndJoinChannel(channel);
           } else {
-            await this.createAndJoinRelaycastChannel(channel, workflow.description);
+            await this.brokerTransport.createAndJoinChannel(channel, workflow.description);
           }
           this.log('Channel ready');
 
@@ -4453,10 +3871,6 @@ export class WorkflowRunner {
       this.ptyOutputBuffers.clear();
       this.ptyListeners.clear();
 
-      this.unsubBrokerStderr?.();
-      this.unsubBrokerStderr = undefined;
-
-      this.clearRelayListeners();
       this.lastIdleLog.clear();
       this.lastActivity.clear();
       this.clearPendingHumanQuestionDrafts();
@@ -4471,11 +3885,7 @@ export class WorkflowRunner {
 
       this.log('Shutting down broker...');
       await this.shutdownRelay();
-      this.currentBrokerContext = undefined;
-      this.brokerRecoveryPromise = undefined;
       this.runStartTime = undefined;
-      this.relaycast = undefined;
-      this.relaycastAgent = undefined;
       this.channel = undefined;
       this.trajectory = undefined;
       this.abortController = undefined;
@@ -6378,14 +5788,12 @@ export class WorkflowRunner {
   }
 
   private async releaseStaleRetryAgents(baseRequestedName: string, stepName: string): Promise<void> {
-    if (!this.relay) {
+    if (!this.brokerTransport.connected) {
       return;
     }
 
     const staleAgents = (
-      await this.withBrokerRecovery(`listing stale retry agents for step "${stepName}"`, (relay) =>
-        relay.listAgents()
-      )
+      await this.brokerTransport.listAgents(`listing stale retry agents for step "${stepName}"`)
     ).filter((agent) => agent.name === baseRequestedName || agent.name.startsWith(`${baseRequestedName}-r`));
     if (staleAgents.length === 0) {
       return;
@@ -6395,17 +5803,17 @@ export class WorkflowRunner {
     this.log(`[${stepName}] Releasing stale retry agent(s): ${staleNames.join(', ')}`);
 
     for (const name of staleNames) {
-      await this.withBrokerRecovery(`releasing stale retry agent "${name}"`, (relay) =>
-        relay.release(name, `workflow retry cleanup for step "${stepName}"`)
+      await this.brokerTransport.release(
+        name,
+        `workflow retry cleanup for step "${stepName}"`,
+        `releasing stale retry agent "${name}"`
       );
     }
 
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const remaining = (
-        await this.withBrokerRecovery(`confirming retry cleanup for step "${stepName}"`, (relay) =>
-          relay.listAgents()
-        )
+        await this.brokerTransport.listAgents(`confirming retry cleanup for step "${stepName}"`)
       )
         .map((agent) => agent.name)
         .filter((name) => staleNames.includes(name));
@@ -6646,6 +6054,14 @@ export class WorkflowRunner {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // A worker can settle on the same turn that the owner fails. Give its
+      // completion handler one turn to mark the handle released before issuing
+      // cleanup, otherwise the transport boundary can observe a duplicate
+      // release under scheduler contention.
+      await Promise.race([
+        workerSettled,
+        new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      ]);
       if (!workerReleased && workerHandle) {
         await workerHandle.release().catch(() => undefined);
       }
@@ -7280,6 +6696,13 @@ export class WorkflowRunner {
         logicalName: reviewerDef.name,
         onSpawned: ({ agent }) => {
           reviewerHandle = agent;
+          // A fast broker can stream the decision before the spawn response
+          // reaches this callback. Complete the deferred release once the
+          // handle becomes available so the review cannot wait forever.
+          if (completedReview && !reviewerReleased) {
+            reviewerReleased = true;
+            void agent.release().catch(() => undefined);
+          }
         },
         onChunk: ({ chunk }) => {
           const nextOutput = reviewOutput + WorkflowRunner.stripAnsi(chunk);
@@ -7661,17 +7084,14 @@ export class WorkflowRunner {
 
     // Register agent in Relaycast for observability
     let stopHeartbeat: (() => void) | undefined;
-    if (this.relayApiKey) {
-      const agentClient = await this.registerRelaycastExternalAgent(
+    if (this.brokerTransport.apiKey) {
+      stopHeartbeat = await this.brokerTransport.startExternalAgentHeartbeat(
         agentName,
         `Non-interactive workflow agent for step "${step.name}" (${agentCli})`
       ).catch((err) => {
         console.warn(`[WorkflowRunner] Failed to register ${agentName} in Relaycast:`, err?.message ?? err);
-        return null;
+        return undefined;
       });
-      if (agentClient) {
-        stopHeartbeat = this.startRelaycastHeartbeat(agentClient);
-      }
     }
 
     // Post assignment notification (no task content — task arrives via direct broker injection)
@@ -7964,7 +7384,7 @@ export class WorkflowRunner {
       const interactiveSpawnPolicy = resolveSpawnPolicy({
         AGENT_NAME: agentName,
         AGENT_CLI: agentCli,
-        RELAY_API_KEY: this.relayApiKey ?? 'workflow-runner',
+        RELAY_API_KEY: this.brokerTransport.apiKey ?? 'workflow-runner',
         AGENT_CHANNELS: (agentChannels ?? []).join(','),
       });
       const proxyMode = await this.resolveAgentProxyMode(agentDef, this.currentConfig);
@@ -8000,11 +7420,12 @@ export class WorkflowRunner {
         `[${step.name}] Spawning ${personaResolution ? `persona ${personaResolution.resolved.spec.id}` : agentCli} (pty)`
       );
       agent = new WorkflowAgentHandle(
-        await this.withBrokerRecovery(`spawning agent for step "${step.name}"`, (relay) =>
-          relay.spawnPty({
+        await this.brokerTransport.spawnPty(
+          {
             ...(spawnOptions as Record<string, unknown>),
             cli: agentCli,
-          } as SpawnPtyInput)
+          } as import('@agent-relay/harness-driver').SpawnPtyInput,
+          `spawning agent for step "${step.name}"`
         )
       );
 
@@ -8020,9 +7441,8 @@ export class WorkflowRunner {
             `Persona "${personaResolution.resolved.spec.id}" failed harness readiness (${ready})`
           );
         }
-        const registered = await this.withBrokerRecovery(
-          `verifying broker registration for persona step "${step.name}"`,
-          (relay) => relay.listAgents()
+        const registered = await this.brokerTransport.listAgents(
+          `verifying broker registration for persona step "${step.name}"`
         );
         if (!registered.some((candidate) => candidate.name === agent?.name)) {
           throw new Error(
@@ -8066,8 +7486,8 @@ export class WorkflowRunner {
       // Register in workers.json so `agents:kill` can find this agent
       let workerPid: number | undefined;
       try {
-        const rawAgents = await this.withBrokerRecovery(`listing spawned agents for step "${step.name}"`, (relay) =>
-          relay.listAgents()
+        const rawAgents = await this.brokerTransport.listAgents(
+          `listing spawned agents for step "${step.name}"`
         );
         workerPid = rawAgents.find((a) => a.name === agentName)?.pid ?? undefined;
       } catch {
@@ -8076,8 +7496,8 @@ export class WorkflowRunner {
       this.registerWorker(agentName, agentCli, step.task ?? '', workerPid);
 
       // Register the spawned agent in Relaycast for observability + start heartbeat
-      if (this.relayApiKey) {
-        const agentClient = await this.registerRelaycastExternalAgent(
+      if (this.brokerTransport.apiKey) {
+        stopHeartbeat = await this.brokerTransport.startExternalAgentHeartbeat(
           liveAgent.name,
           `Workflow agent for step "${step.name}" (${agentCli})`
         ).catch((err) => {
@@ -8085,19 +7505,13 @@ export class WorkflowRunner {
             `[WorkflowRunner] Failed to register ${liveAgent.name} in Relaycast:`,
             err?.message ?? err
           );
-          return null;
+          return undefined;
         });
-
-        // Keep the agent online in the dashboard while it's working
-        if (agentClient) {
-          stopHeartbeat = this.startRelaycastHeartbeat(agentClient);
-        }
       }
 
       // Invite the spawned agent to the workflow channel
-      if (this.channel && this.relayApiKey) {
-        const channelAgent = await this.ensureRelaycastRunnerAgent().catch(() => null);
-        await channelAgent?.channels.invite(this.channel, agent.name).catch(() => {});
+      if (this.channel && this.brokerTransport.apiKey) {
+        await this.brokerTransport.inviteAgent(this.channel, agent.name).catch(() => {});
       }
 
       // Keep operational assignment chatter out of the agent coordination channel.
@@ -8720,12 +8134,13 @@ export class WorkflowRunner {
       .join('\n');
 
     for (const agentName of targets) {
-      await this.withBrokerRecovery(`injecting Relayfile event into "${agentName}"`, (relay) =>
-        relay.sendMessage({
+      await this.brokerTransport.sendMessage(
+        {
           from: 'workflow-runner',
           to: agentName,
           text,
-        })
+        },
+        `injecting Relayfile event into "${agentName}"`
       );
     }
   }
@@ -10500,34 +9915,25 @@ export class WorkflowRunner {
         `Cannot inject ${input.source} answer into "${input.agentName}" because that agent is not active`
       );
     }
-    if (!this.relay) {
+    if (!this.brokerTransport.connected) {
       throw new Error('Cannot inject human answer because the workflow broker is not connected');
     }
 
     this.log(`[${input.stepName}] Injecting ${input.source} answer into ${input.agentName}`);
-    if (typeof this.relay.sendInput === 'function') {
-      void this.relay.sendInput(input.agentName, `${input.text}\r`).catch((err: unknown) => {
+    void this.brokerTransport
+      .sendInput(
+        input.agentName,
+        input.text,
+        `injecting ${input.source} answer into "${input.agentName}"`
+      )
+      .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         if (/aborted due to timeout|operation was aborted|timeout/i.test(message)) return;
         this.log(`[${input.stepName}] PTY input dispatch reported an error for ${input.agentName}: ${message}`);
       });
-      // The current broker writes PTY input before replying, but does not ack the
-      // successful write. Give the dispatch a moment to leave this process.
-      await this.delay(500);
-    } else {
-      await Promise.race([
-        this.withBrokerRecovery(`injecting ${input.source} answer into "${input.agentName}"`, (relay) =>
-          relay.sendMessage({
-            from: 'workflow-runner',
-            to: input.agentName,
-            text: input.text,
-          })
-        ),
-        this.delay(20_000).then(() => {
-          throw new Error(`Timed out injecting ${input.source} answer into "${input.agentName}"`);
-        }),
-      ]);
-    }
+    // The current broker writes PTY input before replying, but does not ack the
+    // successful write. Give the dispatch a moment to leave this process.
+    await this.delay(500);
     this.log(`[${input.stepName}] Injected ${input.source} answer into ${input.agentName}`);
     this.postToChannel(`**[${input.stepName}]** Injected ${input.source} answer into \`${input.agentName}\``);
   }
@@ -10822,18 +10228,19 @@ export class WorkflowRunner {
     agentDef: AgentDefinition,
     step: WorkflowStep
   ): Promise<void> {
-    if (!this.relay) return;
+    if (!this.brokerTransport.connected) return;
     const hubAgent = this.resolveHubForNudge(agentDef);
 
     if (hubAgent) {
       // Hub-mediated: tell the hub to check on the idle agent (sent as the hub).
       try {
-        await this.withBrokerRecovery(`nudging idle agent "${agent.name}" via hub`, (relay) =>
-          relay.sendMessage({
+        await this.brokerTransport.sendMessage(
+          {
             from: hubAgent.name,
             to: agent.name,
             text: `Agent ${agent.name} appears idle on step "${step.name}". Check on them and remind them to /exit when done.`,
-          })
+          },
+          `nudging idle agent "${agent.name}" via hub`
         );
         return; // Hub nudge succeeded
       } catch {
@@ -10842,13 +10249,15 @@ export class WorkflowRunner {
     }
 
     // Direct system injection from the workflow runner.
-    await this.withBrokerRecovery(`nudging idle agent "${agent.name}" directly`, (relay) =>
-      relay.sendMessage({
-        from: 'workflow-runner',
-        to: agent.name,
-        text: "You appear idle. If you've completed your task, output /exit. If still working, continue.",
-      })
-    )
+    await this.brokerTransport
+      .sendMessage(
+        {
+          from: 'workflow-runner',
+          to: agent.name,
+          text: "You appear idle. If you've completed your task, output /exit. If still working, continue.",
+        },
+        `nudging idle agent "${agent.name}" directly`
+      )
       .catch(() => {
         // Non-critical — don't break workflow
       });
@@ -11263,7 +10672,7 @@ export class WorkflowRunner {
 
   /** Post a message to the workflow channel. Fire-and-forget — never throws or blocks. */
   private postToChannel(text: string, options: ChannelEvidenceOptions = {}): void {
-    if (!this.relayApiKey || !this.channel) return;
+    if (!this.brokerTransport.apiKey || !this.channel) return;
     this.recordChannelEvidence(text, options);
 
     const stepName = options.stepName ?? this.inferStepNameFromChannelText(text);
@@ -11280,8 +10689,8 @@ export class WorkflowRunner {
       });
     }
 
-    this.ensureRelaycastRunnerAgent()
-      .then((agent) => agent.send(this.channel!, text))
+    this.brokerTransport
+      .postToChannel(this.channel, text)
       .catch(() => {
         // Non-critical — don't break workflow execution
       });

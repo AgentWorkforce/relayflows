@@ -650,14 +650,28 @@ agents:
 
         await Promise.all(
           runners.map((candidate, index) =>
-            (candidate as any).startOrReuseSharedBroker(`run-${index}`, `wf-${index}`, true)
+            (candidate as any).brokerTransport.start(
+              {
+                runId: `run-${index}`,
+                brokerName: `relayflows-run-${index}`,
+                channel: `wf-${index}`,
+                relaycastDisabled: true,
+              },
+              {
+                onEvent: vi.fn(),
+                onLog: vi.fn(),
+                getActiveAgentNames: () => [],
+              }
+            )
           )
         );
 
         expect(HarnessDriverClient.spawn).toHaveBeenCalledTimes(1);
         expect(HarnessDriverClient.connect).toHaveBeenCalledTimes(3);
 
-        const starter = runners.find((candidate) => (candidate as any).sharedBrokerLease?.startedBroker);
+        const starter = runners.find(
+          (candidate) => (candidate as any).brokerTransport.sharedBrokerLease?.startedBroker
+        );
         expect(starter).toBeDefined();
         const attached = runners.filter((candidate) => candidate !== starter);
 
@@ -810,15 +824,20 @@ agents:
 
     it('refuses broker recovery while workflow agents are still active', async () => {
       const candidate = new WorkflowRunner({ db, workspaceId: 'ws-test' });
-      (candidate as any).currentBrokerContext = {
+      const transport = (candidate as any).brokerTransport;
+      transport.context = {
         runId: 'run-active',
         brokerName: 'relayflows-run-active',
         channel: 'wf-active',
         relaycastDisabled: true,
       };
-      (candidate as any).activeAgentHandles.set('active-agent', { name: 'active-agent' });
+      transport.hooks = {
+        onEvent: vi.fn(),
+        onLog: vi.fn(),
+        getActiveAgentNames: () => ['active-agent'],
+      };
 
-      await expect((candidate as any).recoverBroker('spawn failed')).rejects.toThrow(
+      await expect(transport.recoverBroker('spawn failed')).rejects.toThrow(
         'Broker recovery is unsafe while 1 agent is still active: active-agent'
       );
       expect(mockHarnessDriverSpawn).not.toHaveBeenCalled();
