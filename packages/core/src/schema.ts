@@ -60,11 +60,12 @@ interface AgentDefinitionBase {
    *  It receives its task as a CLI prompt argument and returns stdout as output.
    *  Default: true (interactive PTY mode). */
   interactive?: boolean;
-  /** Working directory for this agent, resolved relative to the YAML file. */
+  /** Working directory for this agent, resolved according to the top-level
+   *  `cwdResolution` setting. */
   cwd?: string;
   /** Sets this agent's working directory to a named entry from the top-level `paths` array.
    *  Mutually exclusive with `cwd`. If omitted, the agent runs in the runner's
-   *  working directory (the directory containing the workflow YAML file). */
+   *  working directory. */
   workdir?: string;
   /** Additional paths the agent needs read/write access to. */
   additionalPaths?: string[];
@@ -397,7 +398,8 @@ export interface WorkflowStep {
   retries?: number;
   /** Maximum iterations for steps that may need to retry (e.g., fix-failures). */
   maxIterations?: number;
-  /** Explicit working directory for this step. */
+  /** Explicit working directory for this step, resolved according to the
+   *  top-level `cwdResolution` setting. */
   cwd?: string;
   /** Step-level human assistance override. Set false to disable swarm defaults. */
   humanAssistance?: HumanAssistanceConfig | false;

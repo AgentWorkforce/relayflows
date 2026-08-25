@@ -49,6 +49,9 @@ export interface RelayYamlConfig {
   version: string;
   name: string;
   description?: string;
+  /** Base directory used to resolve relative agent and step `cwd` values.
+   *  Defaults to `process` for backwards compatibility. */
+  cwdResolution?: 'workflow-file' | 'process';
   /** Reusable permission profiles that agents can reference via permissions.profile. */
   permission_profiles?: Record<string, PermissionProfileDefinition>;
   /** Named paths to external directories used by this workflow.
