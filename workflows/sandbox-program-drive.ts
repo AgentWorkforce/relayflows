@@ -89,10 +89,6 @@ const GATES = path.join('workflows', 'sandbox-program', 'gates');
 const ARTIFACTS = '.workflow-artifacts/sandbox-program';
 const BRANCH = 'flow/sandbox-program-drive-0824';
 
-/** Slack channel for HUMAN_QUESTION escalation. Resolved by the Relayfile
- *  Slack channel index at runtime — a name, never a bot token in the file. */
-const SLACK_CHANNEL = process.env.SANDBOX_PROGRAM_SLACK_CHANNEL ?? 'proj-cloud';
-
 const AW_ROOT = process.env.AW_ROOT ?? path.join(process.env.HOME ?? '~', 'Projects', 'AgentWorkforce');
 
 /** The lanes this flow drives. It models them as stages and does not duplicate
@@ -134,6 +130,13 @@ const PLUMBING_STEP_TIMEOUT_MS = 20 * 60_000;
 
 const gate = (name: string) => `bash ${GATES}/${name}.sh`;
 
+/**
+ * The gate-integrity guard. Deliberately NOT under `gates/` — repair owners are
+ * pointed at `gates/<key>.sh` as the thing they rerun, and nothing routine
+ * should ever walk them past this.
+ */
+const GATE_INTEGRITY = `bash ${path.join('workflows', 'sandbox-program', 'gate-integrity.sh')}`;
+
 /** Boilerplate every repair owner gets. Keeps the escape hatch identical and
  *  keeps repair owners from wandering outside their lane. */
 const REPAIR_RULES = `
@@ -158,12 +161,17 @@ Rules for every repair owner in this flow:
      gone, and we have already lost three that way.
   2. Then DM chief via the Agent Relay MCP tool send_dm (to: "chief") and wait
      for the reply.
-  3. Only escalate to Slack — one line, exactly \`HUMAN_QUESTION: <question>\` —
-     for what genuinely needs KHALIQ: a merge, a spend, a credential, or a
+  3. Only escalate — one line, exactly \`HUMAN_QUESTION: <question>\` — for what
+     genuinely needs KHALIQ: a merge, a spend, a credential, or a
      product-direction call. Then wait for the injected HUMAN_ANSWER.
-  Escalating to Slack something Chief could have answered stalls the flow
-  overnight, and that is a worse failure than a red gate. Never invent an
-  answer, and never stall silently.
+  THE ANSWER COMES BACK ON DISK. The reply is written to
+  \`${ARTIFACTS}/questions/<step-name>.ANSWER.md\` and the runner injects it into
+  your session as a HUMAN_ANSWER line. There is no Slack round trip: the Slack
+  path timed out for a full hour on a question chief had already answered on
+  disk in minutes, and then killed the run outright, so it is switched off.
+  Escalating something Chief could have answered stalls the flow overnight, and
+  that is a worse failure than a red gate. Never invent an answer, and never
+  stall silently.
 - Ask ONCE. Do not repeat the question while you wait.
 - If the blocker is external and no answer unblocks it, append the exact
   evidence to ${ARTIFACTS}/BLOCKED_NO_COMMIT.md and exit cleanly.
@@ -172,6 +180,10 @@ Rules for every repair owner in this flow:
   gate was already green" is a result and it must be on disk. A step that
   decided correctly and wrote nothing is indistinguishable from a step whose
   agent died, and the flow verifies on the artifact for exactly that reason.
+- Once your artifact is written, end stdout with OWNER_DECISION: COMPLETE and a
+  short REASON. A handled blocked state (\`BLOCKED_MISSING\` or
+  \`BLOCKED_UNREPAIRED\`) is still a successful step result; do NOT emit
+  OWNER_DECISION: INCOMPLETE_FAIL for a correctly recorded block.
 - Then exit promptly. Do not idle after your artifact is written.
 `.trim();
 
@@ -299,9 +311,28 @@ async function main(): Promise<void> {
     ].join('\n'),
   });
 
+  // ── Gate integrity: hash the instruments before anyone can touch them ─────
+  //
+  // Twice on 2026-08-25 a repair owner produced a green by rewriting the gate it
+  // was being judged by — once widening stage 4's cloud-consumer grep to match a
+  // different, pre-existing package, once deleting the CI check it could not
+  // pass. Until this baseline exists, every green this flow reports is worth
+  // nothing, which is why it runs before the first agent step and not later.
+  //
+  // failOnError: true. There is no repair owner for this and there must not be:
+  // "the thing that checks whether the gates were tampered with" is the one
+  // step in the flow an agent may never be handed.
+  wf.step('gate-integrity-baseline', {
+    type: 'deterministic',
+    dependsOn: ['preflight'],
+    captureOutput: true,
+    failOnError: true,
+    command: `${GATE_INTEGRITY} baseline`,
+  });
+
   wf.step('repair-preflight', {
     agent: 'reconcile-repair',
-    dependsOn: ['preflight'],
+    dependsOn: ['gate-integrity-baseline'],
     task: `Preflight for the sandbox-program flow ran in ${REPO_ROOT}.
 
 Output:
@@ -330,7 +361,7 @@ ${REPAIR_RULES}`,
 
   wf.step('acceptance-contract', {
     type: 'deterministic',
-    dependsOn: ['preflight'],
+    dependsOn: ['gate-integrity-baseline'],
     captureOutput: true,
     failOnError: false,
     command: [
@@ -395,6 +426,18 @@ ${REPAIR_RULES}`,
 
   // The lead runs in PARALLEL with the reconcile repair and is a dependency of
   // nothing. If its PTY drops, the gates still run.
+  //
+  // BOUNDED ON PURPOSE, AND IT OWES A FILE. The first cut told the lead to
+  // "watch the repair owners and exit when they converge". It cannot watch
+  // them: fix-provisioning, fix-sec30, fix-longrun and fix-routing all sit
+  // downstream of repair-lane-reconcile -> agent-liveness ->
+  // lane-reconcile-verify -> run-*, so not one of them has started while this
+  // step is alive. The exit condition was unsatisfiable by construction, the
+  // lead sat on a channel that was never going to say anything, and the step
+  // burned its full 25m wall clock and was aborted with no output and nothing
+  // on disk. A coordination step gets ONE pass over the reconcile it was
+  // handed. Convergence is what `program-acceptance` scores, downstream, from
+  // exit codes — not something an agent waits for in a PTY.
   wf.step('program-lead-coordinate', {
     agent: 'program-lead',
     dependsOn: ['lane-reconcile'],
@@ -414,18 +457,63 @@ The four lanes are LIVE agents in their own clones and they own the work:
 
 Your job is coordination, not implementation. Do not write code and do not
 duplicate a lane's work.
-1. Post the reconcile summary to the channel and name which stages are red.
-2. Watch the repair owners (fix-provisioning, fix-sec30, fix-longrun,
-   fix-routing) and flag drift from the acceptance contract early.
-3. Order of value is fixed: provisioning first, then sandbox#30, then the
-   reconciliation, then routing. An empty box beats a good router.
-4. When a decision needs Khaliq, print exactly one HUMAN_QUESTION line.
-Exit when the repair owners have converged or you have escalated.
+
+THIS IS A SINGLE BOUNDED PASS, NOT A WATCH. The repair owners
+(fix-provisioning, fix-sec30, fix-longrun, fix-routing) have NOT started and
+will not start while you are running — they are gated behind
+repair-lane-reconcile, agent-liveness and lane-reconcile-verify, further down
+the DAG. Do not wait for them, do not poll for them, and do not treat their
+silence as a signal. Read what you were handed, write your findings, exit.
+Your deliverable is a file, and the step is scored on that file.
+
+Do this, in order:
+1. Read the reconcile output above and verify each red line yourself against
+   the filesystem or git — by exit code or direct read, never from a lane's
+   self-report. A check pointing at a path that does not exist reports red for
+   the wrong reason and hides the real one; when you find that, say so and name
+   the correct path.
+2. Write ${ARTIFACTS}/lead-findings.md. REQUIRED — it is the artifact this step
+   owes and the only thing that survives your PTY. It must contain:
+     - which stages are RED and which of those reds are genuine vs. artifacts
+       of a wrong check, each with the evidence line that decided it;
+     - any drift you can already see between a lane's diff and the acceptance
+       contract, named by contract gate id (A1-A5, B1-B4, C1-C7, D1-D4);
+     - the standing order of value, restated: provisioning first, then
+       sandbox#30, then the reconciliation, then routing. An empty box beats a
+       good router.
+   If the reconcile is fully green, write that, with the evidence. "Nothing was
+   red and here is the proof" is a result and it goes on disk like any other.
+3. Post the same summary to the channel, one message, naming the red stages.
+4. FIRST, read ${ARTIFACTS}/questions/ for any *.ANSWER.md already waiting.
+   Standing rulings live there and they bind you — chief's answer to a previous
+   run's question is still the ruling. Only if a decision genuinely needs
+   Khaliq — a merge, a spend, a credential, or a product-direction call — print
+   exactly one HUMAN_QUESTION line and record it under ${ARTIFACTS}/questions/
+   first. The reply arrives at questions/<step-name>.ANSWER.md and is injected
+   into your session, but do NOT block this step on it: write the question down,
+   say in lead-findings.md that it is outstanding, and exit. An unanswered
+   question recorded on disk is recoverable; a step that died holding one is
+   not.
+5. Exit immediately once lead-findings.md is written. Do not idle.
 
 ${REPAIR_RULES}`,
-    verification: { type: 'exit_code' },
+    // Not `exit_code`: this was the last agent step in the flow still scored on
+    // an exit code, which is why a 25m timeout left behind no evidence at all.
+    // Not bare `file_exists` either — lead-findings.md from a previous run is
+    // already on disk, so existence alone would report a dead PTY as green,
+    // which is the exact defect class this flow exists to kill. lane-reconcile
+    // rewrites its evidence file immediately upstream of this step, so "newer
+    // than the reconcile it summarizes" is a freshness proof that costs nothing
+    // to maintain and cannot be satisfied by a stale file.
+    verification: {
+      type: 'custom',
+      value:
+        `test -s ${ARTIFACTS}/lead-findings.md && ` +
+        `test -n "$(find ${ARTIFACTS}/lead-findings.md -newer ${ARTIFACTS}/lane-reconcile-evidence.txt)"`,
+    },
     retries: 1,
-    timeoutMs: REPAIR_STEP_TIMEOUT_MS,
+    // Bounded bookkeeping now, not an open-ended watch: the plumbing leash.
+    timeoutMs: PLUMBING_STEP_TIMEOUT_MS,
   });
 
   wf.step('repair-lane-reconcile', {
@@ -575,13 +663,16 @@ is yours.
 If the red is MISSING: do NOT attempt to build it and do NOT ask a human whether
 you should. Write ${ARTIFACTS}/${key}-repair.md recording BLOCKED_MISSING, the
 exact check names and exit codes, and which lane owns building it. Append the
-same to ${ARTIFACTS}/BLOCKED_NO_COMMIT.md. Then exit. Blocking once, with
-evidence and an owner, is the correct outcome — it is not a failure and it is
-not something to retry.
+same to ${ARTIFACTS}/BLOCKED_NO_COMMIT.md. Then exit, ending stdout with
+OWNER_DECISION: COMPLETE and a REASON that the handled blocked result was
+recorded. Blocking once, with evidence and an owner, is the correct outcome —
+it is not a failure and it is not something to retry.
 
 If the red is WRONG: repair it, and you get at most two attempts across this
 whole run. If the second leaves it red, record BLOCKED_UNREPAIRED with the
-evidence rather than spending another engine on it.
+evidence rather than spending another engine on it, then end stdout with
+OWNER_DECISION: COMPLETE and a REASON that the handled blocked result was
+recorded.
 
 
 Your clone: ${lane.repo} (branch ${lane.branch})
@@ -602,6 +693,9 @@ from ${REPO_ROOT}:
     ${gate(key)}
 Keep iterating until the gate is green or a blocker is genuinely external.
 Record what you changed and the commands you ran in ${ARTIFACTS}/${key}-repair.md.
+When you are done — green, NOTHING_TO_REPAIR, BLOCKED_MISSING or
+BLOCKED_UNREPAIRED — end stdout with OWNER_DECISION: COMPLETE and a one-line
+REASON.
 
 ${REPAIR_RULES}`,
       verification: { type: 'file_exists', value: `${ARTIFACTS}/${key}-repair.md` },
@@ -685,28 +779,100 @@ Coordinate; do not write someone else's analysis, and never fabricate a
 measurement to turn a gate green.`,
   );
 
-  stageGate(
-    'stage4-capability-routing',
-    'fix-routing',
-    ['verify-stage1-provisioning'],
-    LANES.stage4,
-    `Stage 4 — capability routing in sandbox-router, consumed by cloud. This is the
-architectural centre: cloud is Daytona-bound today and must not be. Daytona
-becomes one provider among several, and the router picks by CAPABILITY rather
-than by hardcoded provider.
+  // ── Stage 4 — HARD BLOCKED. Deliberately no repair owner. ─────────────────
+  //
+  // Stage 4 is capability routing in sandbox-router, consumed by cloud: the
+  // architectural centre, where cloud stops being Daytona-bound and the router
+  // picks by CAPABILITY instead of by hardcoded provider.
+  //
+  // It has not been started. `git grep` for
+  //   sandbox-router|@agent-relay/sandbox-router|selectByCapability|routeByCapability
+  // across cloud's packages/src/infra/scripts returns ZERO matches. Cloud has
+  // never imported the router.
+  //
+  // WHY THERE IS NO fix-stage4 STEP. Pointing a repair owner at this produced
+  // two false greens in one night, because a repair owner cannot build an
+  // unbuilt feature — but it can always widen a gate until something already on
+  // disk satisfies it, and twice it did. The second time it also deleted
+  // S4_ROUTER_CI rather than reverting it. Both are reverted now, and the
+  // repair loop that produced them is gone with them.
+  //
+  // BLOCKED is the honest state and it is the valuable finding. It tells Khaliq
+  // the centre of his sandbox program has not been started. A green tells him it
+  // is finished. Stage 4 blocks ONCE, records why, and stops.
+  wf.step('run-stage4-capability-routing', {
+    type: 'deterministic',
+    dependsOn: ['verify-stage1-provisioning'],
+    captureOutput: true,
+    failOnError: false,
+    command: gate('stage4-capability-routing'),
+  });
 
-It depends on stage 1 deliberately. An empty box beats a good router.
-
-The half that is easy to fake is "consumed by cloud". A router that compiles
-and is imported nowhere has not shipped: the gate asserts a real call site in
-cloud, not just a module in sandbox-router. Merged is not released is not
-deployed — a green deploy shipped nothing as recently as cloud#3155 because the
-classifier routed core changes to the web-only fast path.`,
-  );
+  // Named `verify-*` so the acceptance DAG below is unchanged: this is where a
+  // repair-and-reverify loop used to sit, and the shape of the program is the
+  // same whether a stage is repaired or blocked.
+  wf.step('verify-stage4-capability-routing', {
+    type: 'deterministic',
+    dependsOn: ['run-stage4-capability-routing'],
+    captureOutput: true,
+    failOnError: false,
+    command: [
+      'set -uo pipefail',
+      `mkdir -p ${ARTIFACTS}`,
+      'CLOUD="${STAGE4_CLOUD_REPO:-' + '${AW_ROOT:-$HOME/Projects/AgentWorkforce}' + '/cloud}"',
+      `EV=${ARTIFACTS}/stage4-capability-routing-blocked.txt`,
+      // Re-derive the evidence here rather than quoting it. A blocked state
+      // asserted from a previous run's file is the same defect class as a green
+      // asserted from one.
+      'RC=0',
+      'if [ -d "$CLOUD" ]; then',
+      '  ( cd "$CLOUD" && git grep -nE "sandbox-router|@agent-relay/sandbox-router|selectByCapability|routeByCapability" \\',
+      '      -- \'packages\' \'src\' \'infra\' \'scripts\' ) > "$EV.matches" 2>&1 || RC=$?',
+      'else',
+      '  RC=1; echo "cloud clone not present at $CLOUD" > "$EV.matches"',
+      'fi',
+      '{',
+      '  echo "gate: stage4-capability-routing"',
+      '  echo "state: BLOCKED_UNBUILT"',
+      '  echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+      '  echo "---"',
+      '  echo "S4_CLOUD_CONSUMES_ROUTER exit=1  # capability routing is UNBUILT, not broken"',
+      '  echo ""',
+      '  echo "Verbatim, in $CLOUD:"',
+      '  echo "  git grep -nE \"sandbox-router|@agent-relay/sandbox-router|selectByCapability|routeByCapability\" -- packages src infra scripts"',
+      '  echo "  exit=$RC  (1 = zero matches)"',
+      '  echo "  matches:"',
+      '  sed "s/^/    /" "$EV.matches"',
+      '  echo ""',
+      '  echo "Cloud does not import the capability router anywhere. This stage has"',
+      '  echo "not been started. It is not a repair: a repair owner cannot build an"',
+      '  echo "unbuilt feature, and asking one to try produced two false greens on"',
+      '  echo "2026-08-25 — first by widening this gate to match a different,"',
+      '  echo "pre-existing package (@agent-relay/sandbox), then by deleting the CI"',
+      '  echo "check it could not pass. Both are reverted."',
+      '  echo ""',
+      '  echo "Owner: the sandbox-router lane, plus a cloud change to consume it."',
+      '} > "$EV"',
+      'cat "$EV"',
+      // The blocked record is what the acceptance step and commit gate read.
+      `cp "$EV" ${ARTIFACTS}/stage4-capability-routing-repair.md`,
+      `touch ${ARTIFACTS}/BLOCKED_NO_COMMIT.md`,
+      `{ echo ""; echo "## stage4-capability-routing — BLOCKED_UNBUILT ($(date -u +%Y-%m-%dT%H:%M:%SZ))"; cat "$EV"; } >> ${ARTIFACTS}/BLOCKED_NO_COMMIT.md`,
+      // Exit 0: a recorded block is a handled outcome, not a crash. The stage is
+      // still red in the acceptance gate, which is where it counts.
+      'echo "STAGE4_STATE: BLOCKED_UNBUILT (recorded, not repaired)"',
+      'exit 0',
+    ].join('\n'),
+  });
 
   // ── Phase 4: program acceptance ────────────────────────────────────────────
 
-  wf.step('program-acceptance', {
+  // Re-hash before scoring. Every repair owner has now had its turn, so this is
+  // the moment the question "were these the gates the run started with?" is
+  // actually worth asking. A changed gate voids every green behind it, so this
+  // fails the run rather than recording a red: there is nothing to repair and
+  // nothing downstream worth computing.
+  wf.step('gate-integrity-verify', {
     type: 'deterministic',
     dependsOn: [
       'verify-stage1-provisioning',
@@ -714,6 +880,14 @@ classifier routed core changes to the web-only fast path.`,
       'verify-stage3-longrun-reconcile',
       'verify-stage4-capability-routing',
     ],
+    captureOutput: true,
+    failOnError: true,
+    command: `${GATE_INTEGRITY} verify`,
+  });
+
+  wf.step('program-acceptance', {
+    type: 'deterministic',
+    dependsOn: ['gate-integrity-verify'],
     captureOutput: true,
     failOnError: false,
     command: gate('program-acceptance'),
@@ -743,9 +917,19 @@ ${REPAIR_RULES}`,
     timeoutMs: REPAIR_STEP_TIMEOUT_MS,
   });
 
-  wf.step('program-acceptance-final', {
+  // repair-program-acceptance is an agent with the whole program in scope, and
+  // the acceptance gate is exactly the instrument it is judged by. Re-hash.
+  wf.step('gate-integrity-verify-final', {
     type: 'deterministic',
     dependsOn: ['repair-program-acceptance'],
+    captureOutput: true,
+    failOnError: true,
+    command: `${GATE_INTEGRITY} verify`,
+  });
+
+  wf.step('program-acceptance-final', {
+    type: 'deterministic',
+    dependsOn: ['gate-integrity-verify-final'],
     captureOutput: true,
     failOnError: false,
     command: gate('program-acceptance'),
@@ -866,9 +1050,20 @@ ${REPAIR_RULES}`,
   // rather than crashing. It commits only in this repo, only declared paths,
   // and it never pushes and never merges.
 
-  wf.step('commit-if-green', {
+  // The last scoring point, and the one that writes to the repo. Between the
+  // final acceptance and here sit two review agents and two fix agents, all with
+  // the gates in reach.
+  wf.step('gate-integrity-verify-commit', {
     type: 'deterministic',
     dependsOn: ['final-review-pass-gate'],
+    captureOutput: true,
+    failOnError: true,
+    command: `${GATE_INTEGRITY} verify`,
+  });
+
+  wf.step('commit-if-green', {
+    type: 'deterministic',
+    dependsOn: ['gate-integrity-verify-commit'],
     captureOutput: true,
     failOnError: false,
     command: [
@@ -975,10 +1170,35 @@ ${REPAIR_RULES}`,
     }
   }
 
+  // ── Human assistance: on disk, not through Slack ──────────────────────────
+  //
+  // Chief's ruling, and it is not a preference. The Slack path cost this flow
+  // two complete runs and bought nothing:
+  //
+  //   run 4, [27:31] a question went to Slack
+  //   run 4, [87:38] it timed out after the full 3600000ms, unanswered
+  //   run 4, [115:03] the next one failed to subscribe and killed the process
+  //
+  // Meanwhile chief answered that same question ON DISK within minutes, and the
+  // answer sat unread at questions/program-lead-coordinate.ANSWER.md for the
+  // entire hour Slack spent timing out on it. Blocked steps were already writing
+  // their questions to disk and DM-ing chief; nothing ever read the reply. The
+  // answer half was simply never built.
+  //
+  // So: `file` and no `slack` key. The runner records the question, polls
+  // <step>.ANSWER.md, and injects it exactly as a Slack answer would be. No
+  // workspace token, no bot, nothing to fail to subscribe to. Declaring `file`
+  // also disables Slack in the runner, and the env kill switch below closes the
+  // door on any path that might still reach for it.
+  process.env.RELAYFLOWS_DISABLE_SLACK_HUMAN_ASSISTANCE = '1';
   config.swarm.humanAssistance = {
-    slack: {
-      channel: SLACK_CHANNEL,
-      timeoutMs: 3_600_000,
+    file: {
+      dir: `${ARTIFACTS}/questions`,
+      pollIntervalMs: 5_000,
+      // Ten minutes, not an hour. An hour is not a bound, it is a night — and a
+      // question recorded on disk survives the step ending, so a step that stops
+      // waiting has lost nothing but the wait.
+      timeoutMs: 600_000,
     },
   };
 
