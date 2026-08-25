@@ -4225,8 +4225,17 @@ export class WorkflowRunner {
         (state) => state.row.completionReason === 'completed_early_exit'
       );
       const hasFailedStep = [...stepStates.values()].some((state) => state.row.status === 'failed');
+      // "Completed early" is a claim about work that did NOT run, so it has to
+      // be derived from the current step states, not from a stored reason that
+      // outlives the condition it described. A resumed run is the case that
+      // separates them: the terminal step keeps completionReason
+      // 'completed_early_exit' forever, but the resume reset returns failed
+      // steps to pending and they can then all succeed, leaving nothing
+      // skipped. Reporting "completed early ... 0 steps were skipped" there
+      // contradicts itself. No skipped step means nothing was cut short.
+      const hasSkippedStep = [...stepStates.values()].some((state) => state.row.status === 'skipped');
 
-      if (completedEarlyStep && !hasFailedStep) {
+      if (completedEarlyStep && !hasFailedStep && hasSkippedStep) {
         const terminalStepName = completedEarlyStep.row.stepName;
         this.log(`Workflow completed early at "${terminalStepName}"`);
         await this.updateRunStatus(runId, 'completed_early');

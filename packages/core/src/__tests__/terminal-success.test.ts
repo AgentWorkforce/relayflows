@@ -247,6 +247,55 @@ describe('terminal-success deterministic exits', () => {
     expect(executeDeterministicStep).toHaveBeenCalledTimes(1);
   });
 
+  it('does not report completed_early on a resume where every step finished', async () => {
+    // Regression: `completionReason: 'completed_early_exit'` is stored on the
+    // terminal step and outlives the run it described. On resume the reset
+    // returns failed steps to pending; if they then succeed, nothing is left
+    // skipped and the run must NOT still claim it ended early.
+    //
+    // Reaching this needs the failure and the gate in different scheduling
+    // waves: a ready terminal gate is a barrier that runs alone (see
+    // step-executor `terminalBarrier`), so a gate ready in wave 1 would skip
+    // the flaky step instead of letting it fail. Gating it behind `opener`
+    // puts the failure in wave 1 and the early exit in wave 2.
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-resume-'));
+    tempDirs.push(cwd);
+    const db = makeDb();
+    const runner = new WorkflowRunner({ db, cwd, workspaceId: 'ws-test' });
+
+    const config: RelayYamlConfig = {
+      ...configWithSteps([
+        {
+          name: 'flaky',
+          type: 'deterministic',
+          command: 'test -f retry-marker || { touch retry-marker; exit 1; }',
+        },
+        { name: 'opener', type: 'deterministic', command: 'true' },
+        { ...terminalStep(78, [78]), dependsOn: ['opener'] },
+      ]),
+      errorHandling: { strategy: 'continue' },
+    };
+
+    const first = await runner.execute(config, 'default');
+    expect(first.status).toBe('failed');
+    const firstSteps = await db.getStepsByRunId(first.id);
+    expect(firstSteps.find((s) => s.stepName === 'flaky')?.status).toBe('failed');
+    expect(firstSteps.find((s) => s.stepName === 'gate')).toMatchObject({
+      status: 'completed',
+      completionReason: 'completed_early_exit',
+    });
+
+    const resumed = await runner.resume(first.id, undefined, config);
+
+    const resumedSteps = await db.getStepsByRunId(first.id);
+    expect(resumedSteps.every((s) => s.status === 'completed')).toBe(true);
+    expect(resumedSteps.find((s) => s.stepName === 'gate')?.completionReason).toBe(
+      'completed_early_exit'
+    );
+    // Nothing was skipped, so the run completed — it did not complete early.
+    expect(resumed.status).toBe('completed');
+  }, 60000);
+
   it('does not reinterpret exit 78 without the opt-in field', async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-compat-'));
     tempDirs.push(cwd);
