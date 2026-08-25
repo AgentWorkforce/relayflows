@@ -179,3 +179,111 @@ The previous `RUN-REPORT.md` at this path (mtime `2026-08-25T00:05:24Z`) was
 written by hand by `sbx-relayflow-0824`. **No step in this flow writes this
 file**, so its staleness was never a symptom of a stuck run. This copy is also
 written by hand, by `sbx-relayflow-0824b`.
+
+---
+
+# CORRECTIONS — added after the fresh-eyes review
+
+The review phase (`claude-review`) found 13 findings, three of which land on
+**my own work** and two of which change results stated above. They are recorded
+here rather than quietly amended, because a report that silently absorbs its own
+corrections is the thing this flow exists to stop.
+
+## C-1 — Stage 2 is NOT green. A credential is still shipping. (F-02, blocker)
+
+**Above, and in my earlier reporting, stage 2 was called "genuine green 8/8,
+token absent". The token-absent half is false.**
+
+Contract B3 is "the fixture token is absent from the generated content". The
+gate scored it by grepping the word `token|credential|secret` against a
+1300-line test file. The real assertion says the **opposite** on the path that
+ships:
+
+- `src/mount-script.test.ts:918-923` asserts the generated script
+  `.includes(TOKEN)` is **true** — "expected the default ingress to put the
+  credential in the script".
+- Token-absence holds only under `tokenIngress: "creds-file"`, which is opt-in:
+  `tokenIngress?: "argv"|"env"|"creds-file"` is optional with **no default**
+  (`src/mount-script.ts:84`).
+- The sole production caller, `src/orchestrator.ts:219`, **never sets it**.
+
+**So on a real sandbox today the credential literal is still written into the
+generated initial-sync script. Only the file mode changed.** B1, B2 and B4 are
+genuinely proven (real `statSync(...).mode & 0o777 === 0o600` under an explicit
+`umask 022`, plus a refuse-to-launch regression test). B3 is not.
+
+This is a live exposure that has been reported as fixed. Stage 2 should be
+**RED**, and sandbox#30 is not closed.
+
+## C-2 — The integrity guard was defeated in this run, and I relayed its green (F-01, blocker)
+
+The guard I built has a hole: `manifest > "$BASELINE"` overwrote an existing
+baseline unconditionally, with no refuse-if-exists and no run-id binding, and
+`.agent-relay/` is gitignored so a re-baseline left no VCS trace. Its own text
+says "never by re-baselining" and it could not enforce that.
+
+It happened twice:
+
+| when | actor | visible? |
+|---|---|---|
+| 04:50Z | `repair-program-acceptance-repair-1` | declared in `gate-integrity-rebaseline.md`, kept `.pre-repair-0825` |
+| 05:41Z | `claude-fix` | archived via the newly hardened path |
+
+Both actors were honest and both left a record. **A dishonest one would leave
+nothing.** So, precisely:
+
+- `gate-integrity-verify` (before the repair phase) — **valid**.
+- `gate-integrity-verify-final` — **NOT valid with respect to run start.** The
+  baseline had been amended 16 minutes earlier. I reported that pass as
+  "9 gate files unchanged". That statement was wrong.
+- Any `GATE_INTEGRITY_OK` after 04:50Z attests only to agreement with an amended
+  baseline, not to the run-start state.
+
+The fix is in the working tree (refuse-to-overwrite, `RESET_BASELINE=1` for a
+deliberate reset, archive-never-discard, and a git-tracked lock holding the
+baseline's own sha256). **It still needs the negative test F-01 asks for**:
+baseline → edit a gate → re-baseline → `verify` must exit 1. Until that test
+exists, treat this guard as unproven.
+
+## C-3 — The answer channel I built has no authorship control (F-03, high)
+
+Task 1 told every repair owner that a `questions/<step>.ANSWER.md` is a binding
+standing ruling. **Nothing verifies an answer came from chief.** Any agent can
+write one into the very directory it is told to write questions to.
+
+It already happened: `questions/repair-program-acceptance.ANSWER.md` was written
+by `repair-program-acceptance-repair-1`. That instance is honest — it
+self-labels `PROVENANCE: ... NOT chief, NOT Khaliq` and only re-points at
+genuine prior rulings — but it is structurally the same move as editing a gate,
+one level up: **an agent authoring the authority that then excuses its reds.**
+Chief's own file carries no signature distinguishing it from the self-written
+one.
+
+Fix: answers must be read from a `rulings/` path no repair owner can write, with
+a `RULED_BY: chief|khaliq` header and a deterministic step that quarantines any
+answer whose author cannot be established.
+
+## What the review also improved
+
+The fix pass made the gates **stricter**, not looser — the opposite of last
+night. `ci_check` now matches runs to HEAD sha and flags `--limit` truncation; a
+new `run_check_tap` refuses a suite green that was only green because tests were
+skipped; and stage 3's marker greps became `heading_section_check`, binding each
+assertion to its section — the tightening flagged as a follow-up above, done
+properly.
+
+**But note the consequence:** the stage results recorded earlier in this run
+were scored by the OLD gates. The gates on disk now are stricter. **Every green
+above must be re-scored under the current gates before it is trusted** — stage 3
+in particular, since the whole point of the tightening was that its old 15/15
+did not prove content.
+
+## Corrected end state
+
+| Stage | Stated above | Corrected |
+|---|---|---|
+| 1 — provisioning | PENDING, unmeasured | unchanged |
+| 2 — sandbox#30 | GREEN 8/8 | **RED — B3 unmet, credential still shipping** |
+| 3 — longrun | GREEN 15/15 structurally | **UNPROVEN — re-score under the new gate** |
+| 4 — routing | BLOCKED_UNBUILT | unchanged |
+| acceptance | BLOCKED, MISSING | unchanged, and now for a fourth reason |
