@@ -169,6 +169,38 @@ describe('terminal-success deterministic exits', () => {
     });
   });
 
+  it('records completed_early_exit even when verification also passes', async () => {
+    // Locks the precedence between #39 (terminal-success exits) and the
+    // artifact-contract judgement: a passing verification does NOT downgrade a
+    // terminal exit back to a normal completion, and the run still ends early.
+    // Deliberate, and asserted here so it cannot change silently.
+    const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-verified-'));
+    tempDirs.push(cwd);
+    const db = makeDb();
+    const runner = new WorkflowRunner({ db, cwd, workspaceId: 'ws-test' });
+    const gate = {
+      ...terminalStep(78, [78]),
+      command: 'printf verified; exit 78',
+      verification: { type: 'output_contains', value: 'verified' } as const,
+    };
+
+    const run = await runner.execute(
+      configWithSteps([
+        gate,
+        { name: 'never-runs', type: 'deterministic', command: 'touch never-runs-ran' },
+      ]),
+      'default'
+    );
+
+    expect(run.status).toBe('completed_early');
+    const steps = await db.getStepsByRunId(run.id);
+    expect(steps.find((s) => s.stepName === 'gate')).toMatchObject({
+      status: 'completed',
+      completionReason: 'completed_early_exit',
+    });
+    expect(existsSync(path.join(cwd, 'never-runs-ran'))).toBe(false);
+  });
+
   it('continues normally when a terminal-capable gate exits with an unlisted success code', async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), 'relayflows-terminal-continue-'));
     tempDirs.push(cwd);
