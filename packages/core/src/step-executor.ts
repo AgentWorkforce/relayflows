@@ -407,15 +407,24 @@ export class StepExecutor<TState extends StateLike = StateLike> {
           error: state.row.error ?? result?.error,
         };
       }
+      const output = result?.output ?? '';
+      const status = result?.status ?? 'completed';
+      const verificationResult =
+        status === 'completed' && step.verification
+          ? this.runVerification(step.verification, output, step.name, undefined, {
+              allowFailure: true,
+              exitCode: result?.exitCode,
+            })
+          : undefined;
       return this.completeStep(step, state, {
-        status: result?.status ?? 'completed',
-        output: result?.output ?? '',
+        status: verificationResult?.passed === false ? 'failed' : status,
+        output,
         exitCode: result?.exitCode,
         exitSignal: result?.exitSignal,
-        completionReason: result?.completionReason,
+        completionReason: verificationResult?.completionReason ?? result?.completionReason,
         retries: result?.retries ?? state.row.retryCount,
         duration: result?.duration ?? 0,
-        error: result?.error,
+        error: verificationResult?.error ?? result?.error,
       });
     }
 
@@ -539,12 +548,19 @@ export class StepExecutor<TState extends StateLike = StateLike> {
           };
         }
 
+        const verificationResult = step.verification
+          ? this.runVerification(step.verification, output, step.name, undefined, {
+              exitCode: spawnResult.exitCode,
+            })
+          : undefined;
+
         return {
           status: 'completed' as const,
           output,
           exitCode: spawnResult.exitCode,
           exitSignal: spawnResult.exitSignal,
           retries: attempt,
+          completionReason: verificationResult?.completionReason,
         };
       },
     });

@@ -70,6 +70,7 @@ vi.mock('@relaycast/sdk', () => ({
 let waitForExitFn: (ms?: number) => Promise<'exited' | 'timeout' | 'released'>;
 let waitForIdleFn: (ms?: number) => Promise<'idle' | 'timeout' | 'exited'>;
 let mockSpawnOutputs: string[] = [];
+let mockSpawnExitCodes: Array<number | undefined> = [];
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -106,7 +107,7 @@ function makeMockHandle(name: string) {
   return {
     name,
     runtime: 'pty' as const,
-    exitCode: undefined as number | undefined,
+    exitCode: mockSpawnExitCodes.shift(),
     exitSignal: undefined as string | undefined,
     waitForExit: (ms?: number) => waitForExitFn(ms).then((reason) => ({ reason })),
     waitForIdle: (ms?: number) => waitForIdleFn(ms).then((reason) => ({ reason })),
@@ -348,6 +349,7 @@ describe('Completion Pipeline', () => {
     waitForExitFn = vi.fn().mockResolvedValue('exited');
     waitForIdleFn = vi.fn().mockImplementation(() => never());
     mockSpawnOutputs = [];
+    mockSpawnExitCodes = [];
     mockRelayInstance.spawnPty.mockImplementation(defaultSpawnPtyImplementation);
     eventListeners.clear();
     db = makeDb();
@@ -1728,6 +1730,7 @@ describe('Completion Pipeline', () => {
 
       // Output has no STEP_COMPLETE, no OWNER_DECISION — just normal work output
       mockSpawnOutputs = ['Implemented the auth module. All tests pass.'];
+      mockSpawnExitCodes = [0];
 
       const localDb = makeDb();
       runner = new WorkflowRunner({ db: localDb, workspaceId: 'ws-test' });
@@ -1823,6 +1826,7 @@ describe('Completion Pipeline', () => {
 
       // Output contains positive conclusion words but no explicit marker
       mockSpawnOutputs = ['Feature implemented and verified. All artifacts are correct and complete.'];
+      mockSpawnExitCodes = [0];
 
       const localDb = makeDb();
       runner = new WorkflowRunner({ db: localDb, workspaceId: 'ws-test' });
@@ -1925,6 +1929,7 @@ describe('Completion Pipeline', () => {
       mockSpawnOutputs = [
         'Implemented the feature.\nOWNER_DECISION: INCOMPLETE_RETRY\nREASON: needs more tests\n',
       ];
+      mockSpawnExitCodes = [0];
 
       const localDb = makeDb();
       runner = new WorkflowRunner({ db: localDb, workspaceId: 'ws-test' });

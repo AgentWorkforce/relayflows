@@ -184,7 +184,9 @@ function makeMockHandle(name: string) {
   return {
     name,
     runtime: 'pty' as const,
-    exitCode: undefined as number | undefined,
+    // This fixture models agents that exit cleanly; exit_code verification now
+    // consumes the recorded code instead of treating process success as implicit.
+    exitCode: 0 as number | undefined,
     exitSignal: undefined as string | undefined,
     waitForExit: (ms?: number) => waitForExitFn(ms).then((reason) => ({ reason })),
     waitForIdle: (ms?: number) => waitForIdleFn(ms).then((reason) => ({ reason })),
