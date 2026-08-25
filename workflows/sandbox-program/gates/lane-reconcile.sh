@@ -44,6 +44,52 @@ lane() {
   else
     record "RECON_${label}_MATERIALIZED" 0
   fi
+
+  # F-08: nothing recorded whether a lane pushed during the run, so the fact
+  # was unrecoverable from evidence alone. Informational (exit=0 whenever the
+  # read itself succeeds) — this is a visibility record, not a hard gate; the
+  # standing question of who is allowed to push a lane branch is chief/Khaliq's
+  # call, not this gate's.
+  local upstream unpushed_count
+  upstream=$( cd "$repo" && git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null )
+  if [ -n "$upstream" ]; then
+    unpushed_count=$( cd "$repo" && git log --oneline "${upstream}..HEAD" 2>/dev/null | wc -l | tr -d ' ' )
+    record "RECON_${label}_UNPUSHED" 0 "$unpushed_count unpushed commit(s) vs $upstream"
+  else
+    record "RECON_${label}_UNPUSHED" 0 "no upstream tracking branch configured"
+  fi
+
+  # F-13: reconcile scoped this lane to specific paths (e.g. `src docs`), so an
+  # untracked file elsewhere in the clone — like a new .github/ CI workflow —
+  # was invisible to evidence. Record it; do not fail the gate on it, since
+  # whether a repair owner may add CI config is a ruling this check does not
+  # make (see claude-review.md F-13).
+  local untracked_ci
+  untracked_ci=$( cd "$repo" && git status --short --porcelain -- '.github' 2>/dev/null )
+  if [ -n "$untracked_ci" ]; then
+    record "RECON_${label}_UNTRACKED_CI" 0 "untracked/changed under .github/: $(echo "$untracked_ci" | tr '\n' ';' | sed 's/;$//')"
+  else
+    record "RECON_${label}_UNTRACKED_CI" 0 "no untracked/changed files under .github/"
+  fi
+
+  # F-12: the repo-visibility roster in REPAIR_RULES was hardcoded and wrong
+  # (sandbox-router is PRIVATE, not PUBLIC as the driver text claimed). Derive
+  # it at runtime instead of trusting a hardcoded list.
+  local origin_url slug visibility vrc
+  origin_url=$( cd "$repo" && git remote get-url origin 2>/dev/null )
+  slug=$(printf '%s' "$origin_url" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')
+  vrc=0
+  if [ -n "$slug" ]; then
+    visibility=$(gh repo view "$slug" --json visibility -q .visibility 2>>"$LOG") || vrc=$?
+  else
+    visibility=""
+    vrc=1
+  fi
+  if [ "$vrc" -eq 0 ] && [ -n "$visibility" ]; then
+    record "RECON_${label}_VISIBILITY" 0 "$slug is $visibility"
+  else
+    record "RECON_${label}_VISIBILITY" 1 "could not determine visibility for $slug (origin: $origin_url)"
+  fi
 }
 
 lane STAGE1_PROVISIONING "${STAGE1_REPO:-$AW_ROOT/cloud-provisioning-0824}" \

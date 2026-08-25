@@ -26,8 +26,13 @@ run_check S4_ROUTER_TESTS "$ROUTER" npm test
 run_check S4_ROUTER_BUILD "$ROUTER" npm run build
 
 # ── Selection is by capability, not by hardcoded provider ───────────────────
-grep_check S4_ROUTING_BY_CAPABILITY "$ROUTER/src/routing.ts" 'capabilit'
-grep_check S4_ROUTING_TEST_BY_CAPABILITY "$ROUTER/src/routing.test.ts" 'capabilit'
+# F-11: bare `capabilit` matches a file that only mentions the word in a
+# comment. Anchor to the actual exported construct routing.ts uses today
+# (requiredCapabilities/forbiddenCapabilities fields, provider.capabilities
+# lookups), not the substring.
+CAPABILITY_PATTERN='requiredCapabilities|forbiddenCapabilities|provider\.capabilities'
+grep_check S4_ROUTING_BY_CAPABILITY "$ROUTER/src/routing.ts" "$CAPABILITY_PATTERN"
+grep_check S4_ROUTING_TEST_BY_CAPABILITY "$ROUTER/src/routing.test.ts" "$CAPABILITY_PATTERN"
 
 # ── cloud actually consumes it ──────────────────────────────────────────────
 #
@@ -71,6 +76,6 @@ record S4_CLOUD_CONSUMES_ROUTER "$rc" "call sites recorded in $CLOUD_CONSUMER"
 # `N checks, 0 failed` cannot tell you which of the two it is reporting. Local
 # success and remote success diverge, which is exactly why the standing rule is
 # green per workflow via `gh run list --branch`.
-ci_check S4_ROUTER_CI "$ROUTER_SLUG" "$ROUTER_BRANCH"
+ci_check S4_ROUTER_CI "$ROUTER_SLUG" "$ROUTER_BRANCH" "$ROUTER"
 
 gate_finish

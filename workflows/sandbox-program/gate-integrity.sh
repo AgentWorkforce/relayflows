@@ -56,6 +56,14 @@ SELF="workflows/sandbox-program/gate-integrity.sh"
 # where the tamperer works is not a record.
 BASELINE_DIR=".agent-relay"
 BASELINE="$BASELINE_DIR/gate-integrity.baseline.txt"
+# The baseline's own hash, recorded at baseline time. `.agent-relay` is
+# gitignored and a re-baseline is otherwise silent (F-01): this lock is the
+# only thing that lets `verify` notice the baseline file itself was swapped
+# between baseline and verify. It is written to a git-tracked directory that
+# no step or REPAIR_RULES text ever names, so a repair owner has no routine
+# reason to find it, let alone edit it alongside a re-baseline.
+LOCK_DIR="workflows/sandbox-program/.gate-integrity-lock"
+LOCK="$LOCK_DIR/baseline.sha256"
 
 EVIDENCE="${ARTIFACTS_ROOT:-$PWD/.workflow-artifacts/sandbox-program}/gate-integrity-evidence.txt"
 
@@ -100,16 +108,39 @@ manifest() {
 
 case "${1:-}" in
   baseline)
-    mkdir -p "$BASELINE_DIR" "$(dirname "$EVIDENCE")"
+    mkdir -p "$BASELINE_DIR" "$LOCK_DIR" "$(dirname "$EVIDENCE")"
+    # Refuse to overwrite an existing baseline. Re-running `baseline` used to
+    # silently replace it — that is exactly how this guard was defeated once
+    # already (F-01): a repair pass edited a gate, then re-ran `baseline` and
+    # every downstream `verify` reported GATE_INTEGRITY_UNCHANGED against the
+    # new, already-tampered state. A genuine re-baseline (e.g. chief ruling a
+    # driver hardening in mid-run) must be an explicit, visible act.
+    if [ -f "$BASELINE" ] && [ "${RESET_BASELINE:-0}" != "1" ]; then
+      echo "GATE_INTEGRITY_ERROR: baseline already exists at $BASELINE"
+      echo "Re-baselining a live run hides any tamper from before this point."
+      echo "If this is a deliberate, chief-approved amendment, set"
+      echo "RESET_BASELINE=1 — the prior manifest is archived, never discarded —"
+      echo "otherwise 'git checkout -- <path>' to restore the tampered file."
+      exit 1
+    fi
+    if [ -f "$BASELINE" ]; then
+      # Archive rather than overwrite: every prior manifest stays on disk, so a
+      # reset is a visible, reviewable act instead of a silent replacement.
+      ARCHIVE="$BASELINE_DIR/gate-integrity.baseline.$(date -u +%Y%m%dT%H%M%SZ).txt"
+      cp "$BASELINE" "$ARCHIVE"
+      echo "GATE_INTEGRITY_RESET: prior baseline archived to $ARCHIVE"
+    fi
     manifest > "$BASELINE"
+    sha256_of "$BASELINE" > "$LOCK"
     {
       echo "gate: gate-integrity"
       echo "phase: baseline"
       echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "baseline_sha256: $(cat "$LOCK")"
       echo "---"
       cat "$BASELINE"
     } > "$EVIDENCE"
-    echo "GATE_INTEGRITY_BASELINE: $(wc -l < "$BASELINE" | tr -d ' ') files hashed"
+    echo "GATE_INTEGRITY_BASELINE: $(wc -l < "$BASELINE" | tr -d ' ') lines hashed, baseline_sha256=$(cat "$LOCK")"
     # Echoed in full so the run log carries an independent copy. A baseline that
     # exists only in the file the guard reads can be edited alongside the gate.
     cat "$BASELINE"
@@ -130,6 +161,39 @@ case "${1:-}" in
         echo "GATE_INTEGRITY_NO_BASELINE exit=1  # $BASELINE missing"
       } > "$EVIDENCE"
       echo "GATE_INTEGRITY_VIOLATION: no baseline at $BASELINE — gate provenance cannot be established"
+      exit 1
+    fi
+
+    # The baseline file itself must be the one written at baseline time. A
+    # re-baseline (F-01) changes $BASELINE's own bytes without touching any
+    # scored gate, so a plain diff of $BASELINE against itself always agrees —
+    # this is the check that catches that class of tamper.
+    if [ ! -f "$LOCK" ]; then
+      {
+        echo "gate: gate-integrity"
+        echo "phase: verify"
+        echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "---"
+        echo "GATE_INTEGRITY_NO_LOCK exit=1  # $LOCK missing — baseline provenance cannot be established"
+      } > "$EVIDENCE"
+      echo "GATE_INTEGRITY_VIOLATION: no baseline lock at $LOCK — baseline may have been swapped"
+      exit 1
+    fi
+    BASELINE_NOW_SHA="$(sha256_of "$BASELINE")"
+    BASELINE_LOCK_SHA="$(cat "$LOCK")"
+    if [ "$BASELINE_NOW_SHA" != "$BASELINE_LOCK_SHA" ]; then
+      {
+        echo "gate: gate-integrity"
+        echo "phase: verify"
+        echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "---"
+        echo "GATE_INTEGRITY_BASELINE_SWAPPED exit=1"
+        echo "baseline locked at:  $BASELINE_LOCK_SHA"
+        echo "baseline now:        $BASELINE_NOW_SHA"
+        echo "The baseline file itself changed since it was recorded — it was"
+        echo "re-baselined, edited, or restored from a different copy mid-run."
+      } > "$EVIDENCE"
+      echo "GATE_INTEGRITY_VIOLATION: baseline file changed since it was locked ($BASELINE_LOCK_SHA -> $BASELINE_NOW_SHA)"
       exit 1
     fi
 
