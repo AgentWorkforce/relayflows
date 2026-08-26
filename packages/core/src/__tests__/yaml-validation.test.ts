@@ -731,6 +731,22 @@ describe('Custom Step Validation', () => {
       expect(result.missingSteps).toContain('unknown-step');
     });
 
+    it('does not warn that supported step fields like cwd/workdir will be ignored', () => {
+      const steps: WorkflowStep[] = [
+        {
+          name: 'build',
+          use: 'docker-build',
+          image: 'myapp:latest',
+          cwd: 'services/api',
+          workdir: 'api-checkout',
+        } as WorkflowStep,
+      ];
+
+      const result = validateCustomStepsUsage(steps, customSteps);
+
+      expect(result.warnings.filter((w) => w.includes('cwd') || w.includes('workdir'))).toEqual([]);
+    });
+
     it('should report missing required parameters', () => {
       const steps: WorkflowStep[] = [
         { name: 'build', use: 'docker-build' } as WorkflowStep, // missing 'image'

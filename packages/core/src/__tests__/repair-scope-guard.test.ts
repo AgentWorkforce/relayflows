@@ -288,6 +288,81 @@ describe('deterministic repair scope guard', () => {
     expect(readFileSync(gateScript, 'utf8')).toBe('exit 1\n');
   });
 
+  it('detects a parent directory replaced by a file masking an absent protected path', async () => {
+    const subDir = path.join(cwd, 'sub');
+    mkdirSync(subDir);
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          rmSync(subDir, { recursive: true, force: true });
+          writeFileSync(subDir, 'not a directory\n');
+          return 'replaced parent with file';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { protectedPaths: ['sub/output.txt'] })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(lstatSync(subDir).isDirectory()).toBe(true);
+  });
+
+  it('protects a script reached through cd and one loaded through source', async () => {
+    const subDir = path.join(cwd, 'sub');
+    mkdirSync(subDir);
+    const cdGate = path.join(subDir, 'gate.js');
+    writeFileSync(cdGate, 'process.exit(1)\n');
+    writeFileSync(path.join(cwd, 'env.sh'), 'exit 1\n');
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          writeFileSync(cdGate, 'process.exit(0)\n');
+          return 'edited gate behind cd';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { command: 'source ./env.sh; cd sub && node gate.js' })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(readFileSync(cdGate, 'utf8')).toBe('process.exit(1)\n');
+  });
+
+  it('skips repair when inline python imports a local module without an extension', async () => {
+    writeFileSync(path.join(cwd, 'helper.py'), 'VALUE = 1\n');
+    const executeAgentStep = vi.fn(async () => 'unexpected repair');
+    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+    const log = vi.spyOn(runner as any, 'log');
+
+    await (runner as any).runDeterministicRepairAgent(
+      repairContext(cwd, { command: 'python3 -c "import helper"' })
+    );
+
+    expect(executeAgentStep).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
+  });
+
+  it('skips repair when python -m targets a local package entrypoint', async () => {
+    mkdirSync(path.join(cwd, 'pkg'));
+    writeFileSync(path.join(cwd, 'pkg', '__main__.py'), 'raise SystemExit(1)\n');
+    const executeAgentStep = vi.fn(async () => 'unexpected repair');
+    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+    const log = vi.spyOn(runner as any, 'log');
+
+    await (runner as any).runDeterministicRepairAgent(
+      repairContext(cwd, { command: 'python3 -m pkg' })
+    );
+
+    expect(executeAgentStep).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
+  });
+
   it('skips repair when inline eval references a local script it cannot inspect', async () => {
     writeFileSync(path.join(cwd, 'helper.js'), 'module.exports = 1;\n');
     const executeAgentStep = vi.fn(async () => 'unexpected repair');

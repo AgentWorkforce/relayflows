@@ -54,6 +54,9 @@ interface ProtectedPathSnapshot {
   logicalType: ProtectedNodeType;
   logicalMode: number;
   logicalLinkTarget?: string;
+  /** True when an existing ancestor component is not a traversable directory,
+   *  i.e. the path reads as absent only because its parent chain is blocked. */
+  parentChainBlocked: boolean;
   node: ProtectedNode;
 }
 
@@ -84,6 +87,29 @@ function nodeType(filePath: string): { type: ProtectedNodeType; mode: number; li
       return { type: 'absent', mode: 0 };
     }
     throw error;
+  }
+}
+
+/** Does some existing ancestor of `filePath` block traversal (a file or other
+ *  non-directory where a directory component is required)? Distinguishes a
+ *  genuinely absent path from one masked by a replaced parent. */
+function isParentChainBlocked(filePath: string): boolean {
+  let cursor = path.dirname(path.resolve(filePath));
+  while (true) {
+    let info: ReturnType<typeof lstatSync> | undefined;
+    try {
+      info = lstatSync(cursor);
+    } catch (error) {
+      if (!UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
+    }
+    if (info) {
+      // The nearest existing ancestor decides: directories traverse, and
+      // symlinks are judged by canonical-path comparison instead.
+      return !info.isDirectory() && !info.isSymbolicLink();
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
   }
 }
 
@@ -249,6 +275,7 @@ function capturePath(requestedPath: string): ProtectedPathSnapshot {
     logicalType: logical.type,
     logicalMode: logical.mode,
     logicalLinkTarget: logical.linkTarget,
+    parentChainBlocked: isParentChainBlocked(absolute),
     node: captureNode(canonicalPath),
   };
 }
@@ -281,6 +308,15 @@ export class RepairProtectionSnapshot {
         reasons.push(`canonical target changed from ${expected.canonicalPath} to ${actual.canonicalPath}`);
       }
       if (expected.node.sha256 !== actual.node.sha256) reasons.push('SHA-256 changed');
+      if (expected.parentChainBlocked !== actual.parentChainBlocked) {
+        // An "absent" reading can be an artifact of a parent directory being
+        // replaced by a file; the two absences must not compare equal.
+        reasons.push(
+          actual.parentChainBlocked
+            ? 'parent chain replaced by a non-directory'
+            : 'parent chain traversability changed'
+        );
+      }
       if (reasons.length === 0) continue;
 
       const violation: RepairScopeViolation = {

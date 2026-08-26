@@ -5187,6 +5187,7 @@ export class WorkflowRunner {
     const packageRunners = new Set(['npm', 'npx', 'pnpm', 'yarn']);
     const scriptExtension = /\.(?:[cm]?js|ts|tsx|py|sh|bash|zsh)$/i;
 
+    let effectiveCwd = cwd;
     for (const originalTokens of this.tokenizeShellCommand(command)) {
       const tokens = [...originalTokens];
       while (tokens[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens.shift();
@@ -5202,6 +5203,34 @@ export class WorkflowRunner {
       const executableName = path.basename(executable).toLowerCase();
       let candidate: string | undefined;
 
+      // Shell constructs that change what later tokens resolve against, or
+      // execute local code without looking like a script invocation.
+      if (executableName === 'cd') {
+        if (tokens[1]) effectiveCwd = this.resolveProtectedPath(tokens[1], effectiveCwd);
+        continue;
+      }
+      if (executableName === 'source' || executableName === '.') {
+        // `source x.sh` executes x.sh in the current shell: protect it.
+        const sourced = tokens[1];
+        if (sourced) {
+          const resolvedSource = this.resolveProtectedPath(sourced, effectiveCwd);
+          if (existsSync(resolvedSource)) paths.push(resolvedSource);
+          else unresolved.push(`${source} script could not be resolved: ${sourced}`);
+        }
+        continue;
+      }
+      if (executableName === 'exec') {
+        const nested = this.findDirectLocalScripts(tokens.slice(1).join(' '), effectiveCwd, source);
+        paths.push(...nested.paths);
+        unresolved.push(...nested.unresolved);
+        continue;
+      } else if (executableName === 'eval') {
+        unresolved.push(
+          `${source} command uses shell eval; nested code cannot be inspected: ${tokens.join(' ')}`
+        );
+        continue;
+      }
+
       if (interpreters.has(executableName)) {
         const args = tokens.slice(1);
         for (let index = 0; index < args.length; index += 1) {
@@ -5216,22 +5245,63 @@ export class WorkflowRunner {
             const shellEval =
               ['sh', 'bash', 'dash', 'zsh'].includes(executableName) && arg === '-c';
             if (shellEval && payload) {
-              const nested = this.findDirectLocalScripts(payload, cwd, source);
+              const nested = this.findDirectLocalScripts(payload, effectiveCwd, source);
               paths.push(...nested.paths);
               unresolved.push(...nested.unresolved);
             } else if (arg === '-m' && payload) {
-              const moduleFile = this.resolveProtectedPath(`${payload.replace(/\./g, '/')}.py`, cwd);
-              if (existsSync(moduleFile)) {
+              // `python -m pkg` executes pkg.py OR pkg/__main__.py.
+              const moduleBase = payload.replace(/\./g, '/');
+              const moduleProbes = [`${moduleBase}.py`, `${moduleBase}/__main__.py`];
+              if (
+                moduleProbes.some((probe) => existsSync(this.resolveProtectedPath(probe, effectiveCwd)))
+              ) {
                 unresolved.push(
                   `${source} command runs local module ${payload}; nested code cannot be inspected: ${tokens.join(' ')}`
                 );
               }
             } else if (payload) {
+              // References to local code inside the inline payload: explicit
+              // script paths, plus extension-less import/require specifiers
+              // that resolve to a local module file.
               const referenced =
                 payload.match(/[A-Za-z0-9_./~-]+\.(?:[cm]?js|ts|tsx|py|sh|bash|zsh)\b/gi) ?? [];
-              for (const ref of referenced) {
-                const resolvedRef = this.resolveProtectedPath(ref, cwd);
-                if (existsSync(resolvedRef)) {
+              const specifiers: string[] = [];
+              for (const m of payload.matchAll(/\b(?:import|from)\s+([A-Za-z_][\w.]*)/g)) {
+                specifiers.push(m[1]);
+              }
+              for (const m of payload.matchAll(/\b(?:require|import)\s*\(\s*['"]([^'"]+)['"]/g)) {
+                specifiers.push(m[1]);
+              }
+              for (const m of payload.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) {
+                specifiers.push(m[1]);
+              }
+              const probes = new Set<string>(referenced);
+              for (const spec of specifiers) {
+                const base = spec.replace(/\./g, '/');
+                for (const suffix of [
+                  '',
+                  '.py',
+                  '/__init__.py',
+                  '/__main__.py',
+                  '.js',
+                  '.mjs',
+                  '.cjs',
+                  '.ts',
+                  '/index.js',
+                ]) {
+                  probes.add(`${base}${suffix}`);
+                }
+                probes.add(spec);
+              }
+              for (const ref of probes) {
+                const resolvedRef = this.resolveProtectedPath(ref, effectiveCwd);
+                let refExists = false;
+                try {
+                  refExists = existsSync(resolvedRef) && !statSync(resolvedRef).isDirectory();
+                } catch {
+                  refExists = false;
+                }
+                if (refExists) {
                   unresolved.push(
                     `${source} command evaluates inline code referencing local script ${ref}; it cannot be inspected: ${tokens.join(' ')}`
                   );
@@ -5271,7 +5341,7 @@ export class WorkflowRunner {
       }
 
       if (!candidate) continue;
-      const resolved = this.resolveProtectedPath(candidate, cwd);
+      const resolved = this.resolveProtectedPath(candidate, effectiveCwd);
       if (existsSync(resolved)) paths.push(resolved);
       else unresolved.push(`${source} script could not be resolved: ${candidate}`);
     }

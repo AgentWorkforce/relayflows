@@ -361,7 +361,7 @@ export function validateCustomStepsUsage(
     // Check for extra parameters that aren't defined
     const definedParams = new Set((customDef.params ?? []).map((p) => p.name));
     const stepKeys = Object.keys(stepAny).filter(
-      (k) => !['name', 'use', 'dependsOn', 'timeoutMs'].includes(k)
+      (k) => !['name', 'use', 'dependsOn', 'timeoutMs', 'cwd', 'workdir'].includes(k)
     );
     for (const key of stepKeys) {
       if (!definedParams.has(key)) {
