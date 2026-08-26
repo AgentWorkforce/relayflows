@@ -601,6 +601,20 @@ describe('Custom Step Resolution', () => {
     expect(resolved.terminalSuccessExitCodes).toEqual([78]);
   });
 
+  it('preserves the invoking step cwd and workdir through custom-step resolution', () => {
+    const step = {
+      name: 'build',
+      use: 'docker-build',
+      image: 'myapp:latest',
+      cwd: 'services/api',
+      workdir: 'api-checkout',
+    } as WorkflowStep;
+    const resolved = resolveCustomStep(step, customSteps);
+
+    expect(resolved.cwd).toBe('services/api');
+    expect(resolved.workdir).toBe('api-checkout');
+  });
+
   it('should resolve custom step with all params', () => {
     const step = {
       name: 'build',

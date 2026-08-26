@@ -455,6 +455,10 @@ export function resolveCustomStep(
     type: stepType as 'deterministic' | 'worktree',
     dependsOn: step.dependsOn,
     timeoutMs: step.timeoutMs ?? customDef.timeoutMs,
+    // The invoking step's effective directory must survive resolution:
+    // repairProtection paths and the command itself resolve against it.
+    cwd: step.cwd,
+    workdir: step.workdir,
   };
 
   if (stepType === 'deterministic') {

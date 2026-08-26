@@ -1,4 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -203,6 +212,94 @@ describe('deterministic repair scope guard', () => {
       )
     ).rejects.toBeInstanceOf(RepairScopeViolationError);
     expect(readFileSync(verificationPath, 'utf8')).toBe('#!/bin/sh\nexit 1\n');
+  });
+
+  it('treats a planted symlink cycle as a violation and restores the file', async () => {
+    const protectedPath = path.join(cwd, 'gate.js');
+    writeFileSync(protectedPath, 'original\n');
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          unlinkSync(protectedPath);
+          symlinkSync(protectedPath, protectedPath);
+          return 'planted cycle';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { protectedPaths: ['gate.js'] })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(readFileSync(protectedPath, 'utf8')).toBe('original\n');
+  });
+
+  it('restores through a real parent chain when a parent directory is swapped for a symlink', async () => {
+    const subDir = path.join(cwd, 'sub');
+    mkdirSync(subDir);
+    const protectedPath = path.join(subDir, 'gate.js');
+    writeFileSync(protectedPath, 'original\n');
+    const outsideDir = path.join(cwd, 'outside');
+    mkdirSync(outsideDir);
+    const outsideFile = path.join(outsideDir, 'gate.js');
+    writeFileSync(outsideFile, 'external\n');
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          rmSync(subDir, { recursive: true, force: true });
+          symlinkSync(outsideDir, subDir);
+          return 'swapped parent for symlink';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { protectedPaths: ['sub/gate.js'] })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(lstatSync(subDir).isDirectory()).toBe(true);
+    expect(lstatSync(subDir).isSymbolicLink()).toBe(false);
+    expect(readFileSync(protectedPath, 'utf8')).toBe('original\n');
+    expect(readFileSync(outsideFile, 'utf8')).toBe('external\n');
+  });
+
+  it('protects a script invoked through bash -c by resolving the nested command', async () => {
+    const gateScript = path.join(cwd, 'gate.sh');
+    writeFileSync(gateScript, 'exit 1\n', { mode: 0o755 });
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          writeFileSync(gateScript, 'exit 0\n');
+          return 'edited nested gate';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { command: "bash -c './gate.sh'" })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(readFileSync(gateScript, 'utf8')).toBe('exit 1\n');
+  });
+
+  it('skips repair when inline eval references a local script it cannot inspect', async () => {
+    writeFileSync(path.join(cwd, 'helper.js'), 'module.exports = 1;\n');
+    const executeAgentStep = vi.fn(async () => 'unexpected repair');
+    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+    const log = vi.spyOn(runner as any, 'log');
+
+    await (runner as any).runDeterministicRepairAgent(
+      repairContext(cwd, { command: 'node -e "require(\'./helper.js\')"' })
+    );
+
+    expect(executeAgentStep).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
   });
 
   it('skips repair loudly when indirect gate code is unresolvable and no explicit protection exists', async () => {

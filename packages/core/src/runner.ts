@@ -5207,6 +5207,42 @@ export class WorkflowRunner {
         for (let index = 0; index < args.length; index += 1) {
           const arg = args[index];
           if (['-c', '-e', '--eval', '-p', '--print', '-m'].includes(arg)) {
+            // Inline eval / module mode. The inline code itself lives in the
+            // workflow YAML, which is always protected — but any LOCAL SCRIPT
+            // it invokes is gate code we cannot see. Resolve shell payloads
+            // recursively; for other payloads, fail closed on any reference
+            // to an existing local script.
+            const payload = args[index + 1];
+            const shellEval =
+              ['sh', 'bash', 'dash', 'zsh'].includes(executableName) && arg === '-c';
+            if (shellEval && payload) {
+              const nested = this.findDirectLocalScripts(payload, cwd, source);
+              paths.push(...nested.paths);
+              unresolved.push(...nested.unresolved);
+            } else if (arg === '-m' && payload) {
+              const moduleFile = this.resolveProtectedPath(`${payload.replace(/\./g, '/')}.py`, cwd);
+              if (existsSync(moduleFile)) {
+                unresolved.push(
+                  `${source} command runs local module ${payload}; nested code cannot be inspected: ${tokens.join(' ')}`
+                );
+              }
+            } else if (payload) {
+              const referenced =
+                payload.match(/[A-Za-z0-9_./~-]+\.(?:[cm]?js|ts|tsx|py|sh|bash|zsh)\b/gi) ?? [];
+              for (const ref of referenced) {
+                const resolvedRef = this.resolveProtectedPath(ref, cwd);
+                if (existsSync(resolvedRef)) {
+                  unresolved.push(
+                    `${source} command evaluates inline code referencing local script ${ref}; it cannot be inspected: ${tokens.join(' ')}`
+                  );
+                  break;
+                }
+              }
+            } else {
+              unresolved.push(
+                `${source} command uses interpreter ${arg} mode with no inspectable payload: ${tokens.join(' ')}`
+              );
+            }
             candidate = undefined;
             break;
           }

@@ -58,6 +58,12 @@ interface ProtectedPathSnapshot {
 }
 
 const modeBits = (mode: number): number => mode & 0o7777;
+
+// Codes that mean "this path cannot be resolved as it stands" rather than a
+// real I/O failure. A repair that plants a symlink cycle (ELOOP) or replaces a
+// parent directory with a file (ENOTDIR) must surface as a violation to
+// restore, not as a thrown error that skips the restore path entirely.
+const UNRESOLVABLE_PATH_CODES = new Set(['ENOENT', 'ELOOP', 'ENOTDIR', 'ENAMETOOLONG']);
 const digest = (chunks: Array<string | Buffer>): string => {
   const hash = createHash('sha256');
   for (const chunk of chunks) hash.update(chunk);
@@ -74,8 +80,38 @@ function nodeType(filePath: string): { type: ProtectedNodeType; mode: number; li
     if (info.isDirectory()) return { type: 'directory', mode: modeBits(info.mode) };
     return { type: 'other', mode: modeBits(info.mode) };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { type: 'absent', mode: 0 };
+    if (UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) {
+      return { type: 'absent', mode: 0 };
+    }
     throw error;
+  }
+}
+
+/** Make every ancestor of `filePath` a real directory, removing any symlink or
+ *  non-directory a repair may have planted, so restore/removal operations act
+ *  on the canonical location instead of following a mutable parent elsewhere. */
+function ensureRealParentChain(filePath: string): void {
+  const parentPath = path.dirname(filePath);
+  if (parentPath === filePath) return;
+  const root = path.parse(parentPath).root;
+  const parts = parentPath.slice(root.length).split(path.sep).filter(Boolean);
+  let cursor = root;
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    let info: ReturnType<typeof lstatSync> | undefined;
+    try {
+      info = lstatSync(cursor);
+    } catch (error) {
+      if (!UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
+    }
+    if (!info) {
+      mkdirSync(cursor);
+      continue;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      rmSync(cursor, { recursive: true, force: true });
+      mkdirSync(cursor);
+    }
   }
 }
 
@@ -85,7 +121,7 @@ export function canonicalizeProtectedPath(filePath: string): string {
   try {
     return realpathSync.native(absolute);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
   }
 
   const missing: string[] = [];
@@ -98,7 +134,7 @@ export function canonicalizeProtectedPath(filePath: string): string {
     try {
       return path.join(realpathSync.native(cursor), ...missing);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (!UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
     }
   }
 }
@@ -164,6 +200,10 @@ function captureNode(filePath: string, ancestors = new Set<string>()): Protected
 }
 
 function restoreNode(filePath: string, node: ProtectedNode, restoredTargets = new Set<string>()): void {
+  // A repair may have swapped an ancestor directory for a symlink; every
+  // rm/write below would silently follow it to an external target otherwise.
+  ensureRealParentChain(filePath);
+
   if (node.type === 'absent') {
     rmSync(filePath, { recursive: true, force: true });
     return;
@@ -178,13 +218,11 @@ function restoreNode(filePath: string, node: ProtectedNode, restoredTargets = ne
       restoreNode(node.canonicalPath, targetNode, restoredTargets);
     }
     rmSync(filePath, { recursive: true, force: true });
-    mkdirSync(path.dirname(filePath), { recursive: true });
     symlinkSync(node.linkTarget ?? '', filePath);
     return;
   }
 
   rmSync(filePath, { recursive: true, force: true });
-  mkdirSync(path.dirname(filePath), { recursive: true });
   if (node.type === 'file') {
     writeFileSync(filePath, node.bytes ?? Buffer.alloc(0));
     chmodSync(filePath, node.mode);
@@ -258,10 +296,11 @@ export class RepairProtectionSnapshot {
       try {
         restoreNode(expected.canonicalPath, expected.node);
         if (expected.logicalType === 'absent') {
+          ensureRealParentChain(expected.requestedPath);
           rmSync(expected.requestedPath, { recursive: true, force: true });
         } else if (expected.logicalType === 'symlink') {
+          ensureRealParentChain(expected.requestedPath);
           rmSync(expected.requestedPath, { recursive: true, force: true });
-          mkdirSync(path.dirname(expected.requestedPath), { recursive: true });
           symlinkSync(expected.logicalLinkTarget ?? '', expected.requestedPath);
         } else if (
           actual.logicalType === 'symlink' ||
