@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -103,9 +104,18 @@ function isParentChainBlocked(filePath: string): boolean {
       if (!UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
     }
     if (info) {
-      // The nearest existing ancestor decides: directories traverse, and
-      // symlinks are judged by canonical-path comparison instead.
-      return !info.isDirectory() && !info.isSymbolicLink();
+      // The nearest existing ancestor decides. A symlink ancestor counts as
+      // blocked unless it resolves to a real directory — a dangling link or
+      // cycle would otherwise read identically to a genuinely absent path.
+      if (info.isSymbolicLink()) {
+        try {
+          return !statSync(cursor).isDirectory();
+        } catch (error) {
+          if (UNRESOLVABLE_PATH_CODES.has((error as NodeJS.ErrnoException).code ?? '')) return true;
+          throw error;
+        }
+      }
+      return !info.isDirectory();
     }
     const parent = path.dirname(cursor);
     if (parent === cursor) return false;

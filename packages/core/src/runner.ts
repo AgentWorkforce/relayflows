@@ -880,6 +880,10 @@ function resolveWorkflowTokenSigningKey(env: NodeJS.ProcessEnv): LocalJwksSignin
   };
 }
 
+/** Separator preceding a tokenized shell command; only ';', '&&', newline, and
+ *  'start' prove sequential execution in the parent shell. */
+type ShellCommandSeparator = ';' | '&&' | '||' | '|' | '&' | 'start';
+
 // ── WorkflowRunner ──────────────────────────────────────────────────────────
 
 export class WorkflowRunner {
@@ -5108,23 +5112,29 @@ export class WorkflowRunner {
     return score;
   }
 
-  private tokenizeShellCommand(command: string): string[][] {
-    const commands: string[][] = [];
+  private tokenizeShellCommand(
+    command: string
+  ): Array<{ tokens: string[]; sep: ShellCommandSeparator }> {
+    const commands: Array<{ tokens: string[]; sep: ShellCommandSeparator }> = [];
     let currentCommand: string[] = [];
     let currentToken = '';
     let quote: "'" | '"' | undefined;
     let escaped = false;
+    // The separator that preceded the command currently being collected.
+    let pendingSep: ShellCommandSeparator = 'start';
     const flushToken = () => {
       if (currentToken.length > 0) currentCommand.push(currentToken);
       currentToken = '';
     };
-    const flushCommand = () => {
+    const flushCommand = (nextSep: ShellCommandSeparator) => {
       flushToken();
-      if (currentCommand.length > 0) commands.push(currentCommand);
+      if (currentCommand.length > 0) commands.push({ tokens: currentCommand, sep: pendingSep });
       currentCommand = [];
+      pendingSep = nextSep;
     };
 
-    for (const char of command) {
+    for (let i = 0; i < command.length; i += 1) {
+      const char = command[i];
       if (escaped) {
         currentToken += char;
         escaped = false;
@@ -5144,17 +5154,35 @@ export class WorkflowRunner {
         continue;
       }
       if (/\s/.test(char)) {
-        if (char === '\n') flushCommand();
+        if (char === '\n') flushCommand(';');
         else flushToken();
         continue;
       }
-      if (char === ';' || char === '|' || char === '&') {
-        flushCommand();
+      if (char === ';') {
+        flushCommand(';');
+        continue;
+      }
+      if (char === '&') {
+        if (command[i + 1] === '&') {
+          flushCommand('&&');
+          i += 1;
+        } else {
+          flushCommand('&');
+        }
+        continue;
+      }
+      if (char === '|') {
+        if (command[i + 1] === '|') {
+          flushCommand('||');
+          i += 1;
+        } else {
+          flushCommand('|');
+        }
         continue;
       }
       currentToken += char;
     }
-    flushCommand();
+    flushCommand('start');
     return commands;
   }
 
@@ -5167,7 +5195,9 @@ export class WorkflowRunner {
   private findDirectLocalScripts(
     command: string,
     cwd: string,
-    source: 'gate' | 'verification'
+    source: 'gate' | 'verification',
+    depth = 0,
+    visited: Set<string> = new Set()
   ): { paths: string[]; unresolved: string[] } {
     const paths: string[] = [];
     const unresolved: string[] = [];
@@ -5188,7 +5218,7 @@ export class WorkflowRunner {
     const scriptExtension = /\.(?:[cm]?js|ts|tsx|py|sh|bash|zsh)$/i;
 
     let effectiveCwd = cwd;
-    for (const originalTokens of this.tokenizeShellCommand(command)) {
+    for (const { tokens: originalTokens, sep } of this.tokenizeShellCommand(command)) {
       const tokens = [...originalTokens];
       while (tokens[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens.shift();
       if (tokens[0] === 'env') {
@@ -5204,27 +5234,71 @@ export class WorkflowRunner {
       let candidate: string | undefined;
 
       // Shell constructs that change what later tokens resolve against, or
-      // execute local code without looking like a script invocation.
-      if (executableName === 'cd') {
+      // execute local code without looking like a script invocation. Matched
+      // on the RAW token: a script literally named ./source is not a builtin.
+      if (executable === 'cd') {
+        // A cd behind ||, |, or & runs conditionally or in a subshell; the
+        // effective directory of later commands cannot be proven.
+        if (sep === '||' || sep === '|' || sep === '&') {
+          unresolved.push(
+            `${source} command changes directory in a non-sequential position; effective directory cannot be proven: ${tokens.join(' ')}`
+          );
+          continue;
+        }
         if (tokens[1]) effectiveCwd = this.resolveProtectedPath(tokens[1], effectiveCwd);
         continue;
       }
-      if (executableName === 'source' || executableName === '.') {
-        // `source x.sh` executes x.sh in the current shell: protect it.
+      if (executable === 'source' || executable === '.') {
+        // `source x.sh` executes x.sh in the current shell: protect it and
+        // inspect its contents, since they run with the gate's authority.
         const sourced = tokens[1];
         if (sourced) {
           const resolvedSource = this.resolveProtectedPath(sourced, effectiveCwd);
-          if (existsSync(resolvedSource)) paths.push(resolvedSource);
-          else unresolved.push(`${source} script could not be resolved: ${sourced}`);
+          if (existsSync(resolvedSource)) {
+            paths.push(resolvedSource);
+            if (depth < 3 && !visited.has(resolvedSource)) {
+              visited.add(resolvedSource);
+              try {
+                const contents = readFileSync(resolvedSource, 'utf8');
+                const nested = this.findDirectLocalScripts(
+                  contents,
+                  effectiveCwd,
+                  source,
+                  depth + 1,
+                  visited
+                );
+                paths.push(...nested.paths);
+                unresolved.push(...nested.unresolved);
+                // A cd inside the sourced file changes the OUTER shell's
+                // directory; later commands in this gate cannot be resolved.
+                if (/(^|[\n;&|])\s*cd(\s|$)/.test(contents)) {
+                  unresolved.push(
+                    `${source} sourced script ${sourced} changes the working directory; later commands cannot be resolved`
+                  );
+                }
+              } catch {
+                unresolved.push(`${source} sourced script could not be read: ${sourced}`);
+              }
+            }
+          } else {
+            unresolved.push(`${source} script could not be resolved: ${sourced}`);
+          }
         }
         continue;
       }
-      if (executableName === 'exec') {
-        const nested = this.findDirectLocalScripts(tokens.slice(1).join(' '), effectiveCwd, source);
+      if (executable === 'exec') {
+        const nested = this.findDirectLocalScripts(
+          tokens.slice(1).join(' '),
+          effectiveCwd,
+          source,
+          depth + 1,
+          visited
+        );
         paths.push(...nested.paths);
         unresolved.push(...nested.unresolved);
         continue;
-      } else if (executableName === 'eval') {
+      }
+      if (executable === 'eval') {
         unresolved.push(
           `${source} command uses shell eval; nested code cannot be inspected: ${tokens.join(' ')}`
         );
@@ -5245,7 +5319,13 @@ export class WorkflowRunner {
             const shellEval =
               ['sh', 'bash', 'dash', 'zsh'].includes(executableName) && arg === '-c';
             if (shellEval && payload) {
-              const nested = this.findDirectLocalScripts(payload, effectiveCwd, source);
+              const nested = this.findDirectLocalScripts(
+                payload,
+                effectiveCwd,
+                source,
+                depth + 1,
+                visited
+              );
               paths.push(...nested.paths);
               unresolved.push(...nested.unresolved);
             } else if (arg === '-m' && payload) {
@@ -5266,18 +5346,27 @@ export class WorkflowRunner {
               const referenced =
                 payload.match(/[A-Za-z0-9_./~-]+\.(?:[cm]?js|ts|tsx|py|sh|bash|zsh)\b/gi) ?? [];
               const specifiers: string[] = [];
-              for (const m of payload.matchAll(/\b(?:import|from)\s+([A-Za-z_][\w.]*)/g)) {
-                specifiers.push(m[1]);
+              // Bare-identifier import syntax is Python's; matching it in JS
+              // payloads would capture import BINDINGS (import x from 'pkg')
+              // and false-positive on same-named local files.
+              if (executableName.startsWith('python')) {
+                for (const m of payload.matchAll(/\b(?:import|from)\s+([A-Za-z_][\w.]*)/g)) {
+                  specifiers.push(m[1]);
+                }
               }
               for (const m of payload.matchAll(/\b(?:require|import)\s*\(\s*['"]([^'"]+)['"]/g)) {
                 specifiers.push(m[1]);
               }
-              for (const m of payload.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) {
+              // Quoted sources: static side-effect imports and from-clauses.
+              for (const m of payload.matchAll(/\b(?:from|import)\s+['"]([^'"]+)['"]/g)) {
                 specifiers.push(m[1]);
               }
               const probes = new Set<string>(referenced);
               for (const spec of specifiers) {
-                const base = spec.replace(/\./g, '/');
+                // Dotted segments only denote module packages in bare
+                // specifiers; './helper' must stay a relative path.
+                const isPathLike = spec.startsWith('.') || spec.startsWith('/') || spec.includes('/');
+                const base = isPathLike ? spec : spec.replace(/\./g, '/');
                 for (const suffix of [
                   '',
                   '.py',

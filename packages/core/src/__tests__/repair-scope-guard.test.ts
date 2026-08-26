@@ -315,13 +315,15 @@ describe('deterministic repair scope guard', () => {
     mkdirSync(subDir);
     const cdGate = path.join(subDir, 'gate.js');
     writeFileSync(cdGate, 'process.exit(1)\n');
-    writeFileSync(path.join(cwd, 'env.sh'), 'exit 1\n');
+    const sourcedEnv = path.join(cwd, 'env.sh');
+    writeFileSync(sourcedEnv, 'export GATE_MODE=strict\n');
     const runner = new WorkflowRunner({
       cwd,
       executor: {
         executeAgentStep: vi.fn(async () => {
           writeFileSync(cdGate, 'process.exit(0)\n');
-          return 'edited gate behind cd';
+          writeFileSync(sourcedEnv, 'export GATE_MODE=lenient\n');
+          return 'edited gate behind cd and sourced env';
         }),
       },
     });
@@ -332,6 +334,94 @@ describe('deterministic repair scope guard', () => {
       )
     ).rejects.toBeInstanceOf(RepairScopeViolationError);
     expect(readFileSync(cdGate, 'utf8')).toBe('process.exit(1)\n');
+    expect(readFileSync(sourcedEnv, 'utf8')).toBe('export GATE_MODE=strict\n');
+  });
+
+  it('detects a parent directory swapped for a dangling symlink masking an absent path', async () => {
+    const subDir = path.join(cwd, 'sub');
+    mkdirSync(subDir);
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          rmSync(subDir, { recursive: true, force: true });
+          symlinkSync(path.join(cwd, 'nowhere'), subDir);
+          return 'replaced parent with dangling symlink';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { protectedPaths: ['sub/output.txt'] })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(lstatSync(subDir).isDirectory()).toBe(true);
+  });
+
+  it('protects a gate script literally named source', async () => {
+    const gateScript = path.join(cwd, 'source');
+    writeFileSync(gateScript, 'exit 1\n', { mode: 0o755 });
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          writeFileSync(gateScript, 'exit 0\n');
+          return 'edited script named source';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(repairContext(cwd, { command: './source' }))
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(readFileSync(gateScript, 'utf8')).toBe('exit 1\n');
+  });
+
+  it('fails closed when cd sits behind a non-sequential operator', async () => {
+    const subDir = path.join(cwd, 'sub');
+    mkdirSync(subDir);
+    writeFileSync(path.join(subDir, 'gate.js'), 'process.exit(1)\n');
+    writeFileSync(path.join(cwd, 'gate.js'), 'process.exit(1)\n');
+    const executeAgentStep = vi.fn(async () => 'unexpected repair');
+    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+    const log = vi.spyOn(runner as any, 'log');
+
+    await (runner as any).runDeterministicRepairAgent(
+      repairContext(cwd, { command: 'true || cd sub; node gate.js' })
+    );
+
+    expect(executeAgentStep).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
+  });
+
+  it('does not mistake a JS import binding for a local module reference', async () => {
+    writeFileSync(path.join(cwd, 'helper.js'), 'module.exports = 1;\n');
+    const executeAgentStep = vi.fn(async () => {
+      writeFileSync(path.join(cwd, 'state.txt'), 'fixed\n');
+      return 'repaired mutable state';
+    });
+    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+
+    await (runner as any).runDeterministicRepairAgent(
+      repairContext(cwd, { command: 'node -e "import helper from \'lodash\'; process.exit(1)"' })
+    );
+
+    expect(executeAgentStep).toHaveBeenCalled();
+  });
+
+  it('skips repair when a quoted side-effect import references a local extensionless module', async () => {
+    writeFileSync(path.join(cwd, 'helper.js'), 'module.exports = 1;\n');
+    const executeAgentStep = vi.fn(async () => 'unexpected repair');
+    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+    const log = vi.spyOn(runner as any, 'log');
+
+    await (runner as any).runDeterministicRepairAgent(
+      repairContext(cwd, { command: 'node --input-type=module -e "import \'./helper\'"' })
+    );
+
+    expect(executeAgentStep).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
   });
 
   it('skips repair when inline python imports a local module without an extension', async () => {
