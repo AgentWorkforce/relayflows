@@ -9924,6 +9924,7 @@ export class WorkflowRunner {
     // reported as injected. The PTY path writes before replying but a broker
     // may still reply late, so the wait is bounded rather than indefinite.
     let outcome: 'pty' | 'message' | 'unconfirmed';
+    let ackTimer: NodeJS.Timeout | undefined;
     try {
       outcome = await Promise.race([
         this.brokerTransport.sendInput(
@@ -9931,7 +9932,9 @@ export class WorkflowRunner {
           input.text,
           `injecting ${input.source} answer into "${input.agentName}"`
         ),
-        this.delay(10_000).then(() => 'unconfirmed' as const),
+        new Promise<'unconfirmed'>((resolve) => {
+          ackTimer = setTimeout(() => resolve('unconfirmed'), 10_000);
+        }),
       ]);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -9941,6 +9944,10 @@ export class WorkflowRunner {
       throw new Error(
         `Failed to inject ${input.source} answer into "${input.agentName}": ${message}`
       );
+    } finally {
+      // A pending race-loser timer would keep the event loop alive and delay
+      // CLI process exit after every fast dispatch.
+      if (ackTimer) clearTimeout(ackTimer);
     }
     if (outcome === 'unconfirmed') {
       this.log(
