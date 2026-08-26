@@ -383,16 +383,41 @@ describe('deterministic repair scope guard', () => {
     mkdirSync(subDir);
     writeFileSync(path.join(subDir, 'gate.js'), 'process.exit(1)\n');
     writeFileSync(path.join(cwd, 'gate.js'), 'process.exit(1)\n');
-    const executeAgentStep = vi.fn(async () => 'unexpected repair');
-    const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
-    const log = vi.spyOn(runner as any, 'log');
+    for (const command of ['true || cd sub; node gate.js', 'false && cd sub; node gate.js']) {
+      const executeAgentStep = vi.fn(async () => 'unexpected repair');
+      const runner = new WorkflowRunner({ cwd, executor: { executeAgentStep } });
+      const log = vi.spyOn(runner as any, 'log');
 
-    await (runner as any).runDeterministicRepairAgent(
-      repairContext(cwd, { command: 'true || cd sub; node gate.js' })
-    );
+      await (runner as any).runDeterministicRepairAgent(repairContext(cwd, { command }));
 
-    expect(executeAgentStep).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
+      expect(executeAgentStep).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('REPAIR PROTECTION WARNING'));
+    }
+  });
+
+  it('inspects sourced scripts beyond three levels of nesting', async () => {
+    const deepGate = path.join(cwd, 'deep-gate.js');
+    writeFileSync(deepGate, 'process.exit(1)\n');
+    writeFileSync(path.join(cwd, 'd.sh'), 'node deep-gate.js\n');
+    writeFileSync(path.join(cwd, 'c.sh'), 'source ./d.sh\n');
+    writeFileSync(path.join(cwd, 'b.sh'), 'source ./c.sh\n');
+    writeFileSync(path.join(cwd, 'a.sh'), 'source ./b.sh\n');
+    const runner = new WorkflowRunner({
+      cwd,
+      executor: {
+        executeAgentStep: vi.fn(async () => {
+          writeFileSync(deepGate, 'process.exit(0)\n');
+          return 'edited deeply sourced gate';
+        }),
+      },
+    });
+
+    await expect(
+      (runner as any).runDeterministicRepairAgent(
+        repairContext(cwd, { command: 'source ./a.sh' })
+      )
+    ).rejects.toBeInstanceOf(RepairScopeViolationError);
+    expect(readFileSync(deepGate, 'utf8')).toBe('process.exit(1)\n');
   });
 
   it('does not mistake a JS import binding for a local module reference', async () => {

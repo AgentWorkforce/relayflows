@@ -5237,9 +5237,11 @@ export class WorkflowRunner {
       // execute local code without looking like a script invocation. Matched
       // on the RAW token: a script literally named ./source is not a builtin.
       if (executable === 'cd') {
-        // A cd behind ||, |, or & runs conditionally or in a subshell; the
-        // effective directory of later commands cannot be proven.
-        if (sep === '||' || sep === '|' || sep === '&') {
+        // A cd behind &&, ||, |, or & runs conditionally or in a subshell;
+        // whether it executes cannot be proven statically, so neither can the
+        // effective directory of later commands. Only a cd at the start of a
+        // sequence (start, ;, newline) provably runs.
+        if (sep === '&&' || sep === '||' || sep === '|' || sep === '&') {
           unresolved.push(
             `${source} command changes directory in a non-sequential position; effective directory cannot be proven: ${tokens.join(' ')}`
           );
@@ -5256,7 +5258,10 @@ export class WorkflowRunner {
           const resolvedSource = this.resolveProtectedPath(sourced, effectiveCwd);
           if (existsSync(resolvedSource)) {
             paths.push(resolvedSource);
-            if (depth < 3 && !visited.has(resolvedSource)) {
+            // The visited set terminates cycles; every distinct sourced file
+            // is inspected exactly once, with no arbitrary depth cutoff that
+            // would silently skip deep dependencies.
+            if (!visited.has(resolvedSource)) {
               visited.add(resolvedSource);
               try {
                 const contents = readFileSync(resolvedSource, 'utf8');
