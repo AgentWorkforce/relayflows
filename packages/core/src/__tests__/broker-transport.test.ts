@@ -8,10 +8,18 @@ import { WorkflowRunner } from '../runner.js';
 
 describe('broker transport selection', () => {
   it('defaults to legacy mode', () => {
-    expect(resolveBrokerTransportMode(undefined, {})).toBe('legacy');
-    const runner = new WorkflowRunner();
-    expect((runner as any).brokerTransport).toBeInstanceOf(HarnessBrokerTransport);
-    expect((runner as any).brokerTransport.mode).toBe('legacy');
+    // WorkflowRunner resolves the mode from process.env when no selector is
+    // passed; pin the variable so the assertion cannot depend on the shell.
+    const saved = process.env.RELAYFLOWS_INTEGRATION_TRANSPORT;
+    delete process.env.RELAYFLOWS_INTEGRATION_TRANSPORT;
+    try {
+      expect(resolveBrokerTransportMode(undefined, {})).toBe('legacy');
+      const runner = new WorkflowRunner();
+      expect((runner as any).brokerTransport).toBeInstanceOf(HarnessBrokerTransport);
+      expect((runner as any).brokerTransport.mode).toBe('legacy');
+    } finally {
+      if (saved !== undefined) process.env.RELAYFLOWS_INTEGRATION_TRANSPORT = saved;
+    }
   });
 
   it('prefers the per-run selector over the environment selector', () => {

@@ -9920,21 +9920,37 @@ export class WorkflowRunner {
     }
 
     this.log(`[${input.stepName}] Injecting ${input.source} answer into ${input.agentName}`);
-    void this.brokerTransport
-      .sendInput(
-        input.agentName,
-        input.text,
-        `injecting ${input.source} answer into "${input.agentName}"`
-      )
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        if (/aborted due to timeout|operation was aborted|timeout/i.test(message)) return;
-        this.log(`[${input.stepName}] PTY input dispatch reported an error for ${input.agentName}: ${message}`);
-      });
-    // The current broker writes PTY input before replying, but does not ack the
-    // successful write. Give the dispatch a moment to leave this process.
-    await this.delay(500);
-    this.log(`[${input.stepName}] Injected ${input.source} answer into ${input.agentName}`);
+    // Await the transport so a failed message-fallback delivery is never
+    // reported as injected. The PTY path writes before replying but a broker
+    // may still reply late, so the wait is bounded rather than indefinite.
+    let outcome: 'pty' | 'message' | 'unconfirmed';
+    try {
+      outcome = await Promise.race([
+        this.brokerTransport.sendInput(
+          input.agentName,
+          input.text,
+          `injecting ${input.source} answer into "${input.agentName}"`
+        ),
+        this.delay(10_000).then(() => 'unconfirmed' as const),
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log(
+        `[${input.stepName}] Failed to inject ${input.source} answer into ${input.agentName}: ${message}`
+      );
+      throw new Error(
+        `Failed to inject ${input.source} answer into "${input.agentName}": ${message}`
+      );
+    }
+    if (outcome === 'unconfirmed') {
+      this.log(
+        `[${input.stepName}] ${input.source} answer dispatch to ${input.agentName} not acknowledged within 10s; continuing best-effort`
+      );
+    } else {
+      this.log(
+        `[${input.stepName}] Injected ${input.source} answer into ${input.agentName} via ${outcome}`
+      );
+    }
     this.postToChannel(`**[${input.stepName}]** Injected ${input.source} answer into \`${input.agentName}\``);
   }
 

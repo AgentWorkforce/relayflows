@@ -655,7 +655,12 @@ export class HarnessBrokerTransport implements BrokerTransportPort {
       }
 
       this.hooks?.onLog('Starting broker...');
+      // relayOptions.env is the caller-configured base (credentials, runtime
+      // settings); resolveRelayEnv is the runner's richer per-run resolution
+      // and wins where both define a key. Without the base merge, an embedder
+      // passing relay.env but no resolveRelayEnv loses its environment.
       const relayEnv = {
+        ...(this.relayOptions.env ?? {}),
         ...(this.resolveRelayEnv() ?? {}),
         AGENT_RELAY_STATE_DIR: stateDir,
       };
