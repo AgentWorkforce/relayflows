@@ -225,7 +225,7 @@ describe('Idle Nudge Detection', () => {
       const agentDef = { name: 'worker', cli: 'claude' };
 
       (runner as any).currentConfig = config;
-      (runner as any).relay = { sendMessage: mockSendMessage };
+      (runner as any).brokerTransport.relay = { sendMessage: mockSendMessage };
       const result = await (runner as any).waitForExitWithIdleNudging(
         wrappedMockAgent(),
         agentDef,
