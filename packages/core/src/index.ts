@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './runner.js';
+export * from './broker-transport.js';
 export * from './custom-steps.js';
 export * from './cli-session-collector.js';
 export * from './channel-messenger.js';
