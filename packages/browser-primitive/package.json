@@ -1,6 +1,6 @@
 {
   "name": "@relayflows/browser-primitive",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Browser automation workflow primitive for Agent Relay",
   "type": "module",
   "main": "dist/index.js",
