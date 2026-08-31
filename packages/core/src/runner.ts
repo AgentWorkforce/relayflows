@@ -5463,6 +5463,62 @@ export class WorkflowRunner {
   /**
    * Execute an integration step (external service interaction via executor).
    */
+  /**
+   * Built-in integration executors.
+   *
+   * Only STATELESS executors belong here. The runner caches what it resolves
+   * for the lifetime of the instance, so a stateful executor would leak across
+   * runs — `BrowserStepExecutor` holds a Map of live `BrowserClient` sessions
+   * and needs `closeAll()` on run teardown, so it is deliberately excluded
+   * until that lifecycle exists. `GitHubStepExecutor` and `SlackStepExecutor`
+   * hold only a readonly options object.
+   *
+   * Scoped to `github` for now: that is the integration with a reported
+   * failure. Adding `slack` is a one-line change once something needs it.
+   */
+  private static readonly BUILTIN_INTEGRATION_LOADERS: Record<
+    string,
+    () => Promise<RunnerStepExecutor>
+  > = {
+    github: async () => new (await import('./integrations/github.js')).GitHubStepExecutor(),
+  };
+
+  /**
+   * In-flight loads, not finished executors: two steps resolving the same
+   * integration concurrently must get the SAME instance. Caching only on
+   * completion lets both observe a miss and construct their own.
+   */
+  private readonly builtinIntegrationExecutors = new Map<
+    string,
+    Promise<RunnerStepExecutor>
+  >();
+
+  /**
+   * Resolve the built-in executor for a step's integration. Returns undefined
+   * for an unknown integration so the caller can name the ones that exist.
+   */
+  private async resolveBuiltinIntegrationExecutor(
+    step: WorkflowStep
+  ): Promise<RunnerStepExecutor | undefined> {
+    const integration = step.integration;
+    if (!integration) return undefined;
+
+    const inFlight = this.builtinIntegrationExecutors.get(integration);
+    if (inFlight) return inFlight;
+
+    const load = WorkflowRunner.BUILTIN_INTEGRATION_LOADERS[integration];
+    if (!load) return undefined;
+
+    // Store the promise before awaiting so concurrent callers share it. Evict
+    // on failure so a transient import error is not cached forever.
+    const pending = load().catch((error: unknown) => {
+      this.builtinIntegrationExecutors.delete(integration);
+      throw error;
+    });
+    this.builtinIntegrationExecutors.set(integration, pending);
+    return pending;
+  }
+
   private async executeIntegrationStep(
     step: WorkflowStep,
     state: StepState,
@@ -5479,14 +5535,26 @@ export class WorkflowRunner {
           resolvedParams[key] = this.interpolateStepTask(value, stepOutputContext);
         }
 
-        if (!this.executor?.executeIntegrationStep) {
+        // Integration steps resolve their executor per-step, exactly as
+        // deterministic steps do: an injected executor wins, otherwise the
+        // built-in for that integration runs. Before this, an executor without
+        // `executeIntegrationStep` was fatal — which meant integration steps
+        // could not run locally (no executor) OR in cloud (whose executor
+        // implements only agent + deterministic steps).
+        const integrationExecutor = this.executor?.executeIntegrationStep
+          ? this.executor
+          : await this.resolveBuiltinIntegrationExecutor(step);
+
+        if (!integrationExecutor?.executeIntegrationStep) {
+          const builtins = Object.keys(WorkflowRunner.BUILTIN_INTEGRATION_LOADERS).join(', ');
           throw new Error(
-            `Integration steps require a cloud executor. Step "${step.name}" cannot run locally. ` +
-              `Use "cloud run" to execute workflows with integration steps.`
+            `Step "${step.name}" uses integration "${step.integration}", which has no executor. ` +
+              `Built-in executors exist for: ${builtins}. ` +
+              `Pass a RunnerStepExecutor implementing executeIntegrationStep to run others.`
           );
         }
 
-        const integrationResult = await this.executor.executeIntegrationStep(step, resolvedParams, {
+        const integrationResult = await integrationExecutor.executeIntegrationStep(step, resolvedParams, {
           workspaceId: this.workspaceId,
           injectAnswerToAgent: (input) => this.injectAnswerToAgent(input),
         });
