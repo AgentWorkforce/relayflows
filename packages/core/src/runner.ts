@@ -5463,6 +5463,43 @@ export class WorkflowRunner {
   /**
    * Execute an integration step (external service interaction via executor).
    */
+  /**
+   * Built-in integrations. Each ships a RunnerStepExecutor in this package and
+   * is a hard dependency, so resolving one adds no install for the caller.
+   */
+  private static readonly BUILTIN_INTEGRATION_LOADERS: Record<
+    string,
+    () => Promise<RunnerStepExecutor>
+  > = {
+    github: async () => new (await import('./integrations/github.js')).GitHubStepExecutor(),
+    slack: async () => new (await import('./integrations/slack.js')).SlackStepExecutor(),
+    browser: async () => new (await import('./integrations/browser.js')).BrowserStepExecutor(),
+  };
+
+  private readonly builtinIntegrationExecutors = new Map<string, RunnerStepExecutor>();
+
+  /**
+   * Resolve the built-in executor for a step's integration, memoised per run.
+   * Returns undefined for an unknown integration so the caller can raise an
+   * error naming the ones that do exist.
+   */
+  private async resolveBuiltinIntegrationExecutor(
+    step: WorkflowStep
+  ): Promise<RunnerStepExecutor | undefined> {
+    const integration = step.integration;
+    if (!integration) return undefined;
+
+    const cached = this.builtinIntegrationExecutors.get(integration);
+    if (cached) return cached;
+
+    const load = WorkflowRunner.BUILTIN_INTEGRATION_LOADERS[integration];
+    if (!load) return undefined;
+
+    const executor = await load();
+    this.builtinIntegrationExecutors.set(integration, executor);
+    return executor;
+  }
+
   private async executeIntegrationStep(
     step: WorkflowStep,
     state: StepState,
@@ -5479,14 +5516,26 @@ export class WorkflowRunner {
           resolvedParams[key] = this.interpolateStepTask(value, stepOutputContext);
         }
 
-        if (!this.executor?.executeIntegrationStep) {
+        // Integration steps resolve their executor per-step, exactly as
+        // deterministic steps do: an injected executor wins, otherwise the
+        // built-in for that integration runs. Before this, an executor without
+        // `executeIntegrationStep` was fatal — which meant integration steps
+        // could not run locally (no executor) OR in cloud (whose executor
+        // implements only agent + deterministic steps).
+        const integrationExecutor = this.executor?.executeIntegrationStep
+          ? this.executor
+          : await this.resolveBuiltinIntegrationExecutor(step);
+
+        if (!integrationExecutor?.executeIntegrationStep) {
+          const builtins = Object.keys(WorkflowRunner.BUILTIN_INTEGRATION_LOADERS).join(', ');
           throw new Error(
-            `Integration steps require a cloud executor. Step "${step.name}" cannot run locally. ` +
-              `Use "cloud run" to execute workflows with integration steps.`
+            `Step "${step.name}" uses integration "${step.integration}", which has no executor. ` +
+              `Built-in executors exist for: ${builtins}. ` +
+              `Pass a RunnerStepExecutor implementing executeIntegrationStep to run others.`
           );
         }
 
-        const integrationResult = await this.executor.executeIntegrationStep(step, resolvedParams, {
+        const integrationResult = await integrationExecutor.executeIntegrationStep(step, resolvedParams, {
           workspaceId: this.workspaceId,
           injectAnswerToAgent: (input) => this.injectAnswerToAgent(input),
         });
