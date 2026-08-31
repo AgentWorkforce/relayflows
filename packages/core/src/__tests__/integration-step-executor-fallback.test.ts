@@ -50,17 +50,36 @@ describe('integration step executor resolution', () => {
     expect(resolved?.executeIntegrationStep).toBeTypeOf('function');
   });
 
-  it('resolves a built-in for every advertised integration', async () => {
+  it('does NOT resolve a built-in for stateful integrations', async () => {
+    // BrowserStepExecutor holds live BrowserClient sessions and needs
+    // closeAll() on teardown. Caching it on the runner would leak browser
+    // processes across runs, so it is excluded until that lifecycle exists.
     const runner = new WorkflowRunner();
-    for (const integration of ['github', 'slack', 'browser']) {
+    for (const integration of ['browser', 'slack']) {
       const step = configWithIntegrationStep(integration).workflows![0].steps[0];
       const resolved = await (
         runner as unknown as {
           resolveBuiltinIntegrationExecutor(s: WorkflowStep): Promise<RunnerStepExecutor | undefined>;
         }
       ).resolveBuiltinIntegrationExecutor(step);
-      expect(resolved?.executeIntegrationStep, integration).toBeTypeOf('function');
+      expect(resolved, integration).toBeUndefined();
     }
+  });
+
+  it('gives concurrent resolvers the SAME instance', async () => {
+    // Caching only completed executors lets two parallel first calls both miss
+    // and construct their own.
+    const runner = new WorkflowRunner();
+    const step = configWithIntegrationStep('github').workflows![0].steps[0];
+    const resolve = (
+      runner as unknown as {
+        resolveBuiltinIntegrationExecutor(s: WorkflowStep): Promise<RunnerStepExecutor | undefined>;
+      }
+    ).resolveBuiltinIntegrationExecutor.bind(runner);
+
+    const [a, b, c] = await Promise.all([resolve(step), resolve(step), resolve(step)]);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
   });
 
   it('memoises the built-in executor per integration', async () => {

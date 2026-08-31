@@ -5464,24 +5464,38 @@ export class WorkflowRunner {
    * Execute an integration step (external service interaction via executor).
    */
   /**
-   * Built-in integrations. Each ships a RunnerStepExecutor in this package and
-   * is a hard dependency, so resolving one adds no install for the caller.
+   * Built-in integration executors.
+   *
+   * Only STATELESS executors belong here. The runner caches what it resolves
+   * for the lifetime of the instance, so a stateful executor would leak across
+   * runs — `BrowserStepExecutor` holds a Map of live `BrowserClient` sessions
+   * and needs `closeAll()` on run teardown, so it is deliberately excluded
+   * until that lifecycle exists. `GitHubStepExecutor` and `SlackStepExecutor`
+   * hold only a readonly options object.
+   *
+   * Scoped to `github` for now: that is the integration with a reported
+   * failure. Adding `slack` is a one-line change once something needs it.
    */
   private static readonly BUILTIN_INTEGRATION_LOADERS: Record<
     string,
     () => Promise<RunnerStepExecutor>
   > = {
     github: async () => new (await import('./integrations/github.js')).GitHubStepExecutor(),
-    slack: async () => new (await import('./integrations/slack.js')).SlackStepExecutor(),
-    browser: async () => new (await import('./integrations/browser.js')).BrowserStepExecutor(),
   };
 
-  private readonly builtinIntegrationExecutors = new Map<string, RunnerStepExecutor>();
+  /**
+   * In-flight loads, not finished executors: two steps resolving the same
+   * integration concurrently must get the SAME instance. Caching only on
+   * completion lets both observe a miss and construct their own.
+   */
+  private readonly builtinIntegrationExecutors = new Map<
+    string,
+    Promise<RunnerStepExecutor>
+  >();
 
   /**
-   * Resolve the built-in executor for a step's integration, memoised per run.
-   * Returns undefined for an unknown integration so the caller can raise an
-   * error naming the ones that do exist.
+   * Resolve the built-in executor for a step's integration. Returns undefined
+   * for an unknown integration so the caller can name the ones that exist.
    */
   private async resolveBuiltinIntegrationExecutor(
     step: WorkflowStep
@@ -5489,15 +5503,20 @@ export class WorkflowRunner {
     const integration = step.integration;
     if (!integration) return undefined;
 
-    const cached = this.builtinIntegrationExecutors.get(integration);
-    if (cached) return cached;
+    const inFlight = this.builtinIntegrationExecutors.get(integration);
+    if (inFlight) return inFlight;
 
     const load = WorkflowRunner.BUILTIN_INTEGRATION_LOADERS[integration];
     if (!load) return undefined;
 
-    const executor = await load();
-    this.builtinIntegrationExecutors.set(integration, executor);
-    return executor;
+    // Store the promise before awaiting so concurrent callers share it. Evict
+    // on failure so a transient import error is not cached forever.
+    const pending = load().catch((error: unknown) => {
+      this.builtinIntegrationExecutors.delete(integration);
+      throw error;
+    });
+    this.builtinIntegrationExecutors.set(integration, pending);
+    return pending;
   }
 
   private async executeIntegrationStep(
