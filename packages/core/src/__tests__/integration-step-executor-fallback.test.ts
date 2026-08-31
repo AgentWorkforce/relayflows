@@ -27,16 +27,6 @@ function configWithIntegrationStep(integration: string): RelayYamlConfig {
   } as RelayYamlConfig;
 }
 
-/** Same shape as cloud's SandboxedStepExecutor: no executeIntegrationStep. */
-const cloudShapedExecutor: RunnerStepExecutor = {
-  async executeAgentStep() {
-    return 'stub';
-  },
-  async executeDeterministicStep() {
-    return { output: 'stub', exitCode: 0 };
-  },
-};
-
 describe('integration step executor resolution', () => {
   it('does not reject a known integration when no executor is supplied', async () => {
     const runner = new WorkflowRunner();
@@ -106,23 +96,52 @@ describe('integration step executor resolution', () => {
     expect(resolved).toBeUndefined();
   });
 
-  it('prefers an injected executor that implements executeIntegrationStep', async () => {
-    let called = false;
+  it('routes the step to an injected executor, not the built-in, through execute()', async () => {
+    // Drive the real dispatch path. Asserting on resolveBuiltinIntegrationExecutor
+    // alone would still pass if the runner picked the built-in at the call site.
+    let injectedCalls = 0;
     const injected: RunnerStepExecutor = {
-      ...cloudShapedExecutor,
+      async executeAgentStep() {
+        throw new Error('no agent steps in this workflow');
+      },
+      async executeDeterministicStep() {
+        return { output: 'stub', exitCode: 0 };
+      },
       async executeIntegrationStep() {
-        called = true;
+        injectedCalls += 1;
         return { output: 'from-injected', success: true };
       },
     };
 
-    const runner = new WorkflowRunner({ executor: injected });
-    const step = configWithIntegrationStep('github').workflows![0].steps[0];
-    const result = await injected.executeIntegrationStep!(step, {}, {});
+    const runner = new WorkflowRunner({ cwd: process.cwd(), executor: injected });
+    const row = await runner.execute(configWithIntegrationStep('github'));
 
-    expect(called).toBe(true);
-    expect(result.output).toBe('from-injected');
-    // The built-in is still resolvable, but the injected one wins at the call site.
-    expect(runner).toBeDefined();
+    expect(injectedCalls).toBe(1);
+    expect(row.status).toBe('completed');
+  });
+
+  it('falls back to the built-in when the executor cannot run integration steps', async () => {
+    // The exact shape cloud passes: agent + deterministic only. Before this
+    // change the runner threw "Integration steps require a cloud executor".
+    const cloudShaped: RunnerStepExecutor = {
+      async executeAgentStep() {
+        throw new Error('no agent steps in this workflow');
+      },
+      async executeDeterministicStep() {
+        return { output: 'stub', exitCode: 0 };
+      },
+    };
+
+    const runner = new WorkflowRunner({ cwd: process.cwd(), executor: cloudShaped });
+    const resolved = await (
+      runner as unknown as {
+        resolveBuiltinIntegrationExecutor(s: WorkflowStep): Promise<RunnerStepExecutor | undefined>;
+      }
+    ).resolveBuiltinIntegrationExecutor(
+      configWithIntegrationStep('github').workflows![0].steps[0],
+    );
+
+    expect(cloudShaped.executeIntegrationStep).toBeUndefined();
+    expect(resolved?.executeIntegrationStep).toBeTypeOf('function');
   });
 });
