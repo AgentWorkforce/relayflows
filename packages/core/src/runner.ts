@@ -69,6 +69,12 @@ import {
   formatObserverGuidance,
   scrubForChannel as scrubWorkflowOutputForChannel,
 } from './channel-messenger.js';
+import {
+  buildObserverUrl,
+  mintObserverToken,
+  resolveObserverBaseUrl,
+  resolveObserverTtlMs,
+} from './observer-token.js';
 import { InMemoryWorkflowDb } from './memory-db.js';
 import { buildCommand as buildProcessCommand, spawnProcess } from './process-spawner.js';
 import { createProcessBackendExecutor } from './process-backend-executor.js';
@@ -2454,6 +2460,59 @@ export class WorkflowRunner {
       });
   }
 
+  /**
+   * Mint a read-only observer link for this run, so a human can follow along
+   * without being handed the workspace key.
+   *
+   * The workspace key is an administrative credential and the engine rejects it
+   * on the realtime endpoint anyway, so the link carries a scoped `ot_live_`
+   * token instead. Best-effort throughout: a run must never fail because an
+   * observability convenience could not be created.
+   *
+   * @param channel - This run's coordination channel
+   * @returns the observer URL, or `undefined` if no link could be minted
+   */
+  private async mintRunObserverUrl(channel: string): Promise<string | undefined> {
+    if (!this.relayApiKey) return undefined;
+
+    const env = { ...process.env, ...(this.relayOptions.env ?? {}) };
+
+    // Resolve the dashboard URL BEFORE minting. A bad RELAY_OBSERVER_URL would
+    // otherwise mint a live token and then throw before printing it, leaving an
+    // active credential nobody ever saw.
+    let observerBase: string;
+    try {
+      observerBase = resolveObserverBaseUrl(undefined, env);
+    } catch (error) {
+      console.warn(
+        `[WorkflowRunner] Skipping observer link: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return undefined;
+    }
+
+    const minted = await mintObserverToken({
+      baseUrl: this.getRelaycastBaseUrl(),
+      workspaceKey: this.relayApiKey,
+      name: `relayflows-${channel}-${randomBytes(4).toString('hex')}`,
+      description: `Read-only follow-along for the relayflows run in #${channel}`,
+      // An auto-created workspace exists only for this run, so the link shows
+      // all of it. A user-supplied workspace may carry unrelated traffic —
+      // scope the link to this run's channel and leave agent DMs out.
+      filters: this.relayApiKeyAutoCreated
+        ? { include_dms: true }
+        : { include_dms: false, channel_names: [channel] },
+      ttlMs: resolveObserverTtlMs(env),
+    });
+
+    if (!minted) return undefined;
+
+    try {
+      return buildObserverUrl(observerBase, minted.token);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async loadCredentialProxyModule(): Promise<CredentialProxyModule | null> {
     try {
       const dynamicImport = new Function('specifier', 'return import(specifier)') as (
@@ -4280,10 +4339,12 @@ export class WorkflowRunner {
           this.log('Resolving Relaycast API key...');
           await this.ensureRelaycastApiKey(channel);
           this.log('API key resolved');
-          if (this.relayApiKeyAutoCreated) {
-            for (const line of formatObserverGuidance(channel)) {
-              this.log(line);
-            }
+          const observerUrl = await this.mintRunObserverUrl(channel);
+          for (const line of formatObserverGuidance(channel, {
+            workspaceCreated: this.relayApiKeyAutoCreated,
+            observerUrl,
+          })) {
+            this.log(line);
           }
         }
 
@@ -4466,6 +4527,20 @@ export class WorkflowRunner {
         }
       }
     } finally {
+      // First, ahead of any fallible teardown. An auto-created workspace
+      // belongs to the run that created it — `ensureRelaycastApiKey` promises
+      // "each run gets full isolation" — and leaving the key set breaks that
+      // promise on a reused runner instance: the next run silently joins the
+      // same workspace, where the previous run's observer link can still watch
+      // it. Everything below this can throw (`shutdownRelay`, subscription
+      // teardown), which would skip the rest of the block; this invariant is
+      // not one to lose to a failed broker shutdown. A key supplied through
+      // RELAY_API_KEY is the caller's and is re-read from the environment.
+      if (this.relayApiKeyAutoCreated) {
+        this.relayApiKey = undefined;
+        this.relayApiKeyAutoCreated = false;
+      }
+
       this.lastFailedStepOutput.clear();
       this.lastCustomVerificationFailure.clear();
       for (const stream of this.ptyLogStreams.values()) stream.end();

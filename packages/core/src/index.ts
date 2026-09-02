@@ -3,6 +3,7 @@ export * from './runner.js';
 export * from './custom-steps.js';
 export * from './cli-session-collector.js';
 export * from './channel-messenger.js';
+export * from './observer-token.js';
 export * from './process-spawner.js';
 export {
   createProcessBackendExecutor,

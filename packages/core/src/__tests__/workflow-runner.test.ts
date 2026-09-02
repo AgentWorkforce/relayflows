@@ -498,6 +498,100 @@ agents:
   // ── Execution ──────────────────────────────────────────────────────────
 
   describe('execute', () => {
+    // `ensureRelaycastApiKey` promises "each run gets full isolation" by creating
+    // a fresh workspace per run. It early-returns when `relayApiKey` is already
+    // set, so teardown has to clear an auto-created one — otherwise a second run
+    // on the same instance silently joins the first run's workspace, where the
+    // first run's observer link can still watch it.
+    const deterministicConfig = (name: string) =>
+      ({
+        version: '1',
+        name,
+        swarm: { pattern: 'dag' },
+        agents: [],
+        workflows: [
+          { name: 'default', steps: [{ name: 'noop', type: 'deterministic', command: 'true' }] },
+        ],
+        trajectories: false,
+      }) as unknown as RelayYamlConfig;
+
+    it('provisions a separate workspace for each auto-created run on one instance', async () => {
+      vi.stubEnv('RELAY_API_KEY', '');
+      const created: string[] = [];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (String(url).includes('/v1/workspaces')) {
+          const key = `rk_live_workspace_${created.length + 1}`;
+          created.push(key);
+          return { ok: true, json: async () => ({ data: { api_key: key } }) } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as unknown as typeof fetch);
+
+      try {
+        // First run resolves a key, then tears down.
+        await (runner as any).ensureRelaycastApiKey('wf-first');
+        expect((runner as any).relayApiKey).toBe('rk_live_workspace_1');
+        await runner.execute(deterministicConfig('first-run'), 'default');
+
+        // Second run must provision its own workspace rather than early-returning
+        // onto the first run's — which the first run's observer link can watch.
+        await (runner as any).ensureRelaycastApiKey('wf-second');
+        expect((runner as any).relayApiKey).toBe('rk_live_workspace_2');
+
+        const workspaceCalls = fetchSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('/v1/workspaces')
+        );
+        expect(workspaceCalls).toHaveLength(2);
+        expect(created).toEqual(['rk_live_workspace_1', 'rk_live_workspace_2']);
+      } finally {
+        fetchSpy.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('clears the auto-created key even when broker shutdown fails', async () => {
+      // The reset sits ahead of fallible teardown for exactly this reason: a
+      // rejecting `shutdownRelay()` skips the rest of the finally block, and
+      // this invariant must not be lost to a failed broker shutdown.
+      (runner as any).relayApiKey = 'rk_live_autocreated';
+      (runner as any).relayApiKeyAutoCreated = true;
+      vi.spyOn(runner as any, 'shutdownRelay').mockRejectedValue(new Error('broker shutdown failed'));
+
+      await runner
+        .execute(deterministicConfig('teardown-resets-despite-shutdown-failure'), 'default')
+        .catch(() => undefined);
+
+      expect((runner as any).relayApiKey).toBeUndefined();
+      expect((runner as any).relayApiKeyAutoCreated).toBe(false);
+    });
+
+    it('reuses a caller-supplied key across runs without provisioning a workspace', async () => {
+      // A key from RELAY_API_KEY belongs to the caller. Clearing it would make
+      // the next run re-read the same value; it must never trigger provisioning.
+      vi.stubEnv('RELAY_API_KEY', 'rk_live_caller_supplied');
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => {
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as unknown as typeof fetch);
+
+      try {
+        await (runner as any).ensureRelaycastApiKey('wf-first');
+        expect((runner as any).relayApiKey).toBe('rk_live_caller_supplied');
+        expect((runner as any).relayApiKeyAutoCreated).toBe(false);
+
+        await runner.execute(deterministicConfig('supplied-key-run'), 'default');
+
+        await (runner as any).ensureRelaycastApiKey('wf-second');
+        expect((runner as any).relayApiKey).toBe('rk_live_caller_supplied');
+
+        expect(
+          fetchSpy.mock.calls.filter((call) => String(call[0]).includes('/v1/workspaces'))
+        ).toHaveLength(0);
+      } finally {
+        fetchSpy.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('spawns a persona with its declared runtime and verifies readiness plus registration', async () => {
       mockRelayInstance.spawnPty.mockImplementation(async (input: { name: string; task?: string }) => {
         mockRelayInstance.listAgents.mockResolvedValueOnce([{ name: input.name }]);

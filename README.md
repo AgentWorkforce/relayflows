@@ -70,6 +70,112 @@ result = (
 )
 ```
 
+## Watching a Run
+
+When a run starts, the runner mints and prints a link you can open to follow it
+live:
+
+```text
+[workflow 00:02] Workspace created for this workflow.
+[workflow 00:02]   Observer: https://agentrelay.com/observer?key=ot_live_...
+[workflow 00:02]   Channel: wf-ship-feature-a1b2c3
+```
+
+Open the `Observer:` URL and you see messages, agent activity, handoffs, and
+deliveries in real time. The link carries a **scoped observer token**
+(`ot_live_`): read-only, expiring in 24 hours, and individually revocable.
+
+Minting is best-effort, so a link is not guaranteed — see
+[If no link appears](#if-no-link-appears). A failed mint never fails the run.
+
+Treat the link itself as a shared secret. The token is a bearer credential in a
+query parameter, so anyone who gets the URL can read the stream it covers until
+it expires or you revoke it. It is far safer than a workspace key — it cannot
+send, spawn, or administer — but it is not public.
+
+### The two ways a run gets a workspace
+
+Which link you get depends on where the run's Relaycast workspace comes from.
+
+**No `RELAY_API_KEY` set** — the runner creates a throwaway workspace for this
+run alone and mints an observer link covering all of it, DMs included. The
+workspace is anonymous and disappears from your reach when the run ends, so
+**copy the link while the run is going**. Nothing persists the underlying key,
+and there is no way to recover it afterward.
+
+**`RELAY_API_KEY` set** — the runner uses your workspace and mints a link scoped
+to just this run's channel, with agent DMs excluded, so the link does not expose
+unrelated traffic in a shared workspace. This is the better setup for anything
+you may want to revisit: the run is in a workspace you own, so you can mint
+fresh links whenever you like.
+
+```bash
+# One-time: create a workspace you own and keep the key
+curl -sX POST https://api.relaycast.dev/v1/workspaces \
+  -H 'content-type: application/json' -d '{"name":"my-workflows"}' \
+  | jq -r '.data.api_key // .api_key'
+
+export RELAY_API_KEY=rk_live_...   # put this in your shell profile
+relayflows run workflow.yaml
+```
+
+If you already use the Agent Relay CLI, `agent-relay workspace key --reveal-secrets`
+prints the key of your active workspace. Note it is **masked** without
+`--reveal-secrets`.
+
+### Minting more links yourself
+
+With a workspace you own, `agent-relay observer` mints links on demand:
+
+```bash
+agent-relay observer                            # read-only link, 24h, DMs excluded
+agent-relay observer --channels wf-ship-a1b2c3  # scope to one run
+agent-relay observer --include-dms              # include agent DMs
+agent-relay observer --expires 7d               # longer-lived link
+agent-relay observer list                       # what is outstanding
+agent-relay observer revoke <id>                # cut one off immediately
+```
+
+### Never share the workspace key
+
+A workspace key (`rk_live_`) is an **administrative** credential — it can send
+messages, spawn and remove agents, and change workspace settings. Do not put one
+in an observer URL, a chat message, or a terminal transcript; query strings end
+up in browser history, referrer headers, and proxy logs. The realtime endpoint
+rejects it outright, so a link built from one cannot stream anyway.
+
+| | Workspace key (`rk_live_`) | Observer token (`ot_live_`) |
+| --- | --- | --- |
+| Read messages and activity | yes | yes |
+| Send, spawn agents, administer | yes | **no** |
+| Expires | no | yes |
+| Revocable individually | no | yes |
+| Scopable to channels | no | yes |
+
+The runner only ever prints `ot_live_` links, and scrubs `rk_live_` values out of
+channel output.
+
+### Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `RELAY_API_KEY` | Workspace key to run against. Unset means a throwaway workspace per run. |
+| `RELAY_OBSERVER_URL` | Observer dashboard base. Defaults to `https://agentrelay.com/observer`. |
+| `RELAY_OBSERVER_EXPIRES` | Link lifetime as `30m` / `24h` / `7d`. Defaults to `24h`; unparseable or over `90d` falls back to `24h`. |
+| `RELAYCAST_BASE_URL` | Relaycast engine base. Defaults to `https://api.relaycast.dev`. |
+
+### If no link appears
+
+- **`Observation: unavailable`** — the token could not be minted (engine
+  unreachable, or it rejected the request). The run is unaffected; minting is
+  best-effort by design and never fails a run.
+- **No observer lines at all** — the run needed no broker: every step was
+  `deterministic`, `worktree`, `integration`, or `waitFor`, or an external
+  executor handled agent spawning, or Relaycast was disabled with
+  `AGENT_RELAY_WORKFLOW_DISABLE_RELAYCAST=1`.
+- **`Observation: run agent-relay observer`** — you set `RELAY_API_KEY` and
+  minting failed. Mint a link by hand with `agent-relay observer`.
+
 ## Consumer-Facing Apps + AI SDK Communicate Flows
 
 A good production split is:

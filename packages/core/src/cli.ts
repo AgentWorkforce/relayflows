@@ -15,6 +15,7 @@ import chalk from 'chalk';
 import type { WorkflowEvent } from './runner.js';
 import { WorkflowRunner } from './runner.js';
 import { JsonFileWorkflowDb } from './file-db.js';
+import { isObserverGuidanceLine } from './channel-messenger.js';
 
 function printUsage(): void {
   console.log(
@@ -80,12 +81,12 @@ interface StepHandle {
 }
 
 // Filter [broker] and [workflow HH:MM] noise while listr owns the terminal,
-// but let the observer URL and channel name through.
+// but let the observer guidance block (link, channel) through.
 function installOutputFilter(): () => void {
   const orig = console.log.bind(console);
   console.log = (...args: unknown[]) => {
     const str = String(args[0] ?? '');
-    if (str.includes('Observer:') || str.includes('agentrelay.com') || str.includes('Channel: wf-')) {
+    if (isObserverGuidanceLine(str)) {
       orig(...args);
       return;
     }
