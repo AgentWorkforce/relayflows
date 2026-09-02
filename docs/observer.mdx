@@ -3,8 +3,10 @@ title: 'Watch a run'
 description: 'Follow a running workflow live at agentrelay.com with a read-only observer link, and understand where that link comes from.'
 ---
 
-Every workflow run that uses a broker prints a link you can open to follow it in
-real time — messages, agent activity, handoffs, and deliveries as they happen.
+A workflow run that uses a broker mints a link you can open to follow it in real
+time — messages, agent activity, handoffs, and deliveries as they happen.
+Minting is best-effort: it can fail without failing the run, and a run that
+needs no broker prints no link at all. See [If no link appears](#if-no-link-appears).
 
 ```text
 [workflow 00:02] Workspace created for this workflow.
@@ -12,9 +14,15 @@ real time — messages, agent activity, handoffs, and deliveries as they happen.
 [workflow 00:02]   Channel: wf-ship-feature-a1b2c3
 ```
 
-Open the `Observer:` URL, or paste it to a teammate. It carries a scoped
+Open the `Observer:` URL, or hand it to a teammate. It carries a scoped
 **observer token** (`ot_live_`): read-only, expiring in 24 hours by default, and
 individually revocable.
+
+Treat the link as a shared secret. The token is a bearer credential in a query
+parameter, so anyone holding the URL can read the stream it covers until it
+expires or is revoked. That is a far smaller blast radius than a workspace key —
+it cannot send, spawn, or administer — but it is not public. Revoke one with
+`agent-relay observer revoke <id>`.
 
 ## Where the link comes from
 

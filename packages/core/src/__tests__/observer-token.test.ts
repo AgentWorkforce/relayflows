@@ -40,6 +40,22 @@ describe('resolveObserverBaseUrl', () => {
       expect(() => resolveObserverBaseUrl(value, {} as NodeJS.ProcessEnv)).toThrow();
     }
   );
+
+  it.each([
+    'http://observer.example.com/observer',
+    'http://192.168.1.10:4000/observer',
+  ])('rejects cleartext %s — the link carries a bearer token', (value) => {
+    expect(() => resolveObserverBaseUrl(value, {} as NodeJS.ProcessEnv)).toThrow(/https/);
+  });
+
+  it.each([
+    'http://localhost:4000/observer',
+    'http://127.0.0.1:4000/observer',
+    'http://[::1]:4000/observer',
+    'http://dash.localhost/observer',
+  ])('allows cleartext %s — nothing crosses a network', (value) => {
+    expect(resolveObserverBaseUrl(value, {} as NodeJS.ProcessEnv)).toBe(value);
+  });
 });
 
 describe('buildObserverUrl', () => {

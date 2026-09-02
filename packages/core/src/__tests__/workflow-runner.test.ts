@@ -498,6 +498,60 @@ agents:
   // ── Execution ──────────────────────────────────────────────────────────
 
   describe('execute', () => {
+    // `ensureRelaycastApiKey` promises "each run gets full isolation" by creating
+    // a fresh workspace per run. It early-returns when `relayApiKey` is already
+    // set, so teardown has to clear an auto-created one — otherwise a second run
+    // on the same instance silently joins the first run's workspace, where the
+    // first run's observer link can still watch it.
+    it('clears an auto-created Relaycast key on teardown so the next run gets its own workspace', async () => {
+      (runner as any).relayApiKey = 'rk_live_autocreated';
+      (runner as any).relayApiKeyAutoCreated = true;
+
+      const config = {
+        version: '1',
+        name: 'teardown-resets-autocreated-key',
+        swarm: { pattern: 'dag' },
+        agents: [],
+        workflows: [
+          {
+            name: 'default',
+            steps: [{ name: 'noop', type: 'deterministic', command: 'true' }],
+          },
+        ],
+        trajectories: false,
+      } as unknown as RelayYamlConfig;
+
+      await runner.execute(config, 'default');
+
+      expect((runner as any).relayApiKey).toBeUndefined();
+      expect((runner as any).relayApiKeyAutoCreated).toBe(false);
+    });
+
+    it('keeps a caller-supplied Relaycast key across runs', async () => {
+      // A key from RELAY_API_KEY belongs to the caller; clearing it would just
+      // make the next run re-read the same value from the environment.
+      (runner as any).relayApiKey = 'rk_live_caller_supplied';
+      (runner as any).relayApiKeyAutoCreated = false;
+
+      const config = {
+        version: '1',
+        name: 'teardown-keeps-supplied-key',
+        swarm: { pattern: 'dag' },
+        agents: [],
+        workflows: [
+          {
+            name: 'default',
+            steps: [{ name: 'noop', type: 'deterministic', command: 'true' }],
+          },
+        ],
+        trajectories: false,
+      } as unknown as RelayYamlConfig;
+
+      await runner.execute(config, 'default');
+
+      expect((runner as any).relayApiKey).toBe('rk_live_caller_supplied');
+    });
+
     it('spawns a persona with its declared runtime and verifies readiness plus registration', async () => {
       mockRelayInstance.spawnPty.mockImplementation(async (input: { name: string; task?: string }) => {
         mockRelayInstance.listAgents.mockResolvedValueOnce([{ name: input.name }]);

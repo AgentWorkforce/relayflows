@@ -82,13 +82,28 @@ export interface MintedObserverToken {
 }
 
 /**
+ * Whether a hostname never leaves the machine, so cleartext carries no
+ * credential across a network.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
+}
+
+/**
  * Resolve the observer dashboard base URL: explicit value, then
  * `RELAY_OBSERVER_URL` (for self-hosted or staging dashboards), then the hosted
  * default.
  *
- * @throws if the resolved value is not an http(s) URL — the token is appended to
- * this URL's query string, so the scheme decides where a live credential ends
- * up, and `new URL` happily accepts `data:` and `javascript:`.
+ * The token is appended to this URL's query string, so the scheme decides where
+ * a live credential ends up. `new URL` happily accepts `data:` and
+ * `javascript:`, and plain `http:` would put a bearer token on the wire in
+ * cleartext. Only `https:` is allowed off-machine; `http:` is permitted solely
+ * for loopback, where a self-hosted or staging dashboard has no TLS to offer
+ * and nothing crosses a network.
+ *
+ * @throws if the resolved value is not a URL, or would transmit the token in
+ * cleartext to a remote host
  */
 export function resolveObserverBaseUrl(explicit?: string, env: NodeJS.ProcessEnv = process.env): string {
   const value = explicit?.trim() || env.RELAY_OBSERVER_URL?.trim() || DEFAULT_OBSERVER_URL;
@@ -98,10 +113,14 @@ export function resolveObserverBaseUrl(explicit?: string, env: NodeJS.ProcessEnv
   } catch {
     throw new Error(`Invalid observer URL: ${value}`);
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error(`Observer URL must be http or https: ${value}`);
+  if (parsed.protocol === 'https:') return value;
+  if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) return value;
+  if (parsed.protocol === 'http:') {
+    throw new Error(
+      `Observer URL must use https (the link carries a bearer token): ${value}`
+    );
   }
-  return value;
+  throw new Error(`Observer URL must be http or https: ${value}`);
 }
 
 /**

@@ -72,7 +72,8 @@ result = (
 
 ## Watching a Run
 
-When a run starts, the runner prints a link you can open to follow it live:
+When a run starts, the runner mints and prints a link you can open to follow it
+live:
 
 ```text
 [workflow 00:02] Workspace created for this workflow.
@@ -81,9 +82,16 @@ When a run starts, the runner prints a link you can open to follow it live:
 ```
 
 Open the `Observer:` URL and you see messages, agent activity, handoffs, and
-deliveries in real time. The link is safe to paste to a teammate: it carries a
-**scoped observer token** (`ot_live_`), which is read-only, expires in 24 hours,
-and can be revoked individually.
+deliveries in real time. The link carries a **scoped observer token**
+(`ot_live_`): read-only, expiring in 24 hours, and individually revocable.
+
+Minting is best-effort, so a link is not guaranteed — see
+[If no link appears](#if-no-link-appears). A failed mint never fails the run.
+
+Treat the link itself as a shared secret. The token is a bearer credential in a
+query parameter, so anyone who gets the URL can read the stream it covers until
+it expires or you revoke it. It is far safer than a workspace key — it cannot
+send, spawn, or administer — but it is not public.
 
 ### The two ways a run gets a workspace
 
