@@ -8924,7 +8924,14 @@ export class WorkflowRunner {
     if (this.ptyListeners.has(oldName)) {
       const rekeyedListener = (chunk: string) => {
         const stripped = WorkflowRunner.stripAnsi(chunk);
-        buffer.push(stripped);
+        // Must go through the bounded append, not a bare push. This listener is
+        // registered under BOTH names and never replaced, so after a rekey it
+        // handles every remaining chunk for the rest of the agent's life. A
+        // direct push here would leave rekeyed agents unbounded — the exact OOM
+        // this cap exists to prevent — and would drift ptyOutputBufferSizes
+        // from the real buffer contents. Keyed on newName, where the buffer now
+        // lives.
+        this.appendBoundedPtyChunk(newName, buffer, stripped);
         writeToLog(chunk);
         if (this.isSlackHumanAssistanceEnabled(humanAssistanceConfig)) {
           this.observeHumanAssistanceOutput({

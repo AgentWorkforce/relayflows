@@ -9,6 +9,8 @@
  * Retaining a tail is safe: consumers clip to the last few thousand characters,
  * and the complete transcript is still written to the PTY log file on disk.
  */
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { WorkflowRunner } from '../runner.js';
@@ -116,5 +118,32 @@ describe('PTY output buffer is bounded', () => {
     const runner = withSizes(newRunner());
     const append = boundedAppend(runner);
     expect(() => append('gone', undefined, 'anything')).not.toThrow();
+  });
+});
+
+/**
+ * Regression cover for the rekey path (cubic P1 on relayflows#49).
+ *
+ * When the broker assigns an agent a different name than requested,
+ * `rekeyPtyStreams` installs a replacement listener under BOTH names and never
+ * swaps it out — so it handles every remaining chunk for the rest of that
+ * agent's life. The first version of this fix bounded the original listener but
+ * left the rekeyed one doing a bare `buffer.push(...)`, which meant any rekeyed
+ * agent stayed unbounded: the exact OOM the cap exists to prevent.
+ */
+describe('rekeyed PTY listener stays bounded', () => {
+  it('routes rekeyed chunks through the bounded append', () => {
+    const source = readFileSync(
+      new URL('../runner.ts', import.meta.url),
+      'utf8',
+    );
+    const rekeyBody = source.slice(
+      source.indexOf('const rekeyedListener = (chunk: string) => {'),
+    );
+    const listener = rekeyBody.slice(0, rekeyBody.indexOf('};'));
+
+    // The bare push is what made rekeyed agents unbounded.
+    expect(listener).not.toMatch(/buffer\.push\(stripped\)/);
+    expect(listener).toContain('appendBoundedPtyChunk');
   });
 });
