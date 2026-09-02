@@ -1,16 +1,17 @@
 import chalk from 'chalk';
 import type { ListrTask } from 'listr2';
 import type { WorkflowEvent, WorkflowEventListener } from './runner.js';
+import { isObserverGuidanceLine } from './channel-messenger.js';
 
 // Filter console.log while listr owns the terminal.
 // Blocks [broker] noise and [workflow HH:MM] timing lines, but lets the
-// observer URL and channel name through so users can track the run.
+// observer guidance block through so users can track the run.
 function installOutputFilter(): () => void {
   const orig = console.log.bind(console);
   console.log = (...args: unknown[]) => {
     const str = String(args[0] ?? '');
-    // Always show the observer URL and channel so users can follow the run
-    if (str.includes('Observer:') || str.includes('agentrelay.com') || str.includes('Channel: wf-')) {
+    // Always show the observer guidance so users can follow the run
+    if (isObserverGuidanceLine(str)) {
       orig(...args);
       return;
     }

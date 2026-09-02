@@ -109,12 +109,62 @@ export function scrubSecrets(text: string): string {
   return result;
 }
 
-export function formatObserverGuidance(channel: string): string[] {
-  return [
-    'Workspace created for this workflow.',
-    '  Observation: requires a separately provisioned, read-only observer token',
-    `  Channel: ${channel}`,
-  ];
+export interface ObserverGuidanceOptions {
+  /** Set when the runner auto-created a throwaway workspace for this run. */
+  workspaceCreated?: boolean;
+  /** Read-only observer link (`ot_live_`), when one could be minted. */
+  observerUrl?: string;
+}
+
+/**
+ * The lines the runner prints so a human can follow a run.
+ *
+ * The link, when present, always carries a scoped `ot_live_` observer token —
+ * never the workspace key. See `observer-token.ts` for why.
+ *
+ * When minting fails the guidance depends on who owns the workspace: a
+ * user-supplied one can be re-minted against by hand, but an auto-created one
+ * holds a key the user never sees, so pointing them at `agent-relay observer`
+ * would send them after a credential they cannot obtain.
+ */
+export function formatObserverGuidance(
+  channel: string,
+  options: ObserverGuidanceOptions = {}
+): string[] {
+  const lines: string[] = [];
+  if (options.workspaceCreated) {
+    lines.push('Workspace created for this workflow.');
+  }
+  if (options.observerUrl) {
+    lines.push(`  Observer: ${options.observerUrl}`);
+  } else if (options.workspaceCreated) {
+    lines.push(
+      '  Observation: unavailable — could not mint a read-only observer token ' +
+        '(set RELAY_API_KEY to run against a workspace you own)'
+    );
+  } else {
+    lines.push('  Observation: run `agent-relay observer` to mint a read-only link');
+  }
+  lines.push(`  Channel: ${channel}`);
+  return lines;
+}
+
+/**
+ * Whether a line is part of the observer guidance block.
+ *
+ * The terminal output filters drop `[workflow HH:MM]` chatter while listr owns
+ * the screen. The observer link is the one thing a user needs off that stream —
+ * swallowing it would defeat the point of printing it — so both filters ask
+ * here rather than each keeping its own copy of the substrings to spare.
+ */
+export function isObserverGuidanceLine(line: string): boolean {
+  return (
+    line.includes('Observer:') ||
+    line.includes('Observation:') ||
+    line.includes('Workspace created') ||
+    line.includes('agentrelay.com') ||
+    line.includes('Channel: wf-')
+  );
 }
 
 function stripMalformedPtyFrameGarbage(line: string): string {

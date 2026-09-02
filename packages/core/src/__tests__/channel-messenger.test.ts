@@ -5,6 +5,7 @@ import {
   ChannelMessenger,
   formatError,
   formatObserverGuidance,
+  isObserverGuidanceLine,
   formatStepOutput,
   scrubSecrets,
   sendToChannel,
@@ -69,15 +70,57 @@ describe('channel messenger helpers', () => {
     expect(scrubSecrets(text)).toBe(text);
   });
 
-  it('omits credential-bearing observer links from auto-created workspace guidance', () => {
-    const guidance = formatObserverGuidance('workflow-room');
+  it('prints the minted observer link for an auto-created workspace', () => {
+    const guidance = formatObserverGuidance('workflow-room', {
+      workspaceCreated: true,
+      observerUrl: 'https://agentrelay.com/observer?key=ot_live_abc123',
+    });
 
     expect(guidance).toEqual([
       'Workspace created for this workflow.',
-      '  Observation: requires a separately provisioned, read-only observer token',
+      '  Observer: https://agentrelay.com/observer?key=ot_live_abc123',
       '  Channel: workflow-room',
     ]);
-    expect(guidance.join('\n')).not.toMatch(/observer\?key=|\[REDACTED\]/);
+  });
+
+  it('never puts a workspace key in the guidance when minting failed', () => {
+    const guidance = formatObserverGuidance('workflow-room', { workspaceCreated: true });
+
+    expect(guidance).toEqual([
+      'Workspace created for this workflow.',
+      '  Observation: unavailable — could not mint a read-only observer token ' +
+        '(set RELAY_API_KEY to run against a workspace you own)',
+      '  Channel: workflow-room',
+    ]);
+    expect(guidance.join('\n')).not.toMatch(/rk_live_|observer\?key=/);
+  });
+
+  it.each([
+    [{ workspaceCreated: true, observerUrl: 'https://agentrelay.com/observer?key=ot_live_a' }],
+    [{ workspaceCreated: true, observerUrl: 'http://localhost:4000/observer?key=ot_live_a' }],
+    [{ workspaceCreated: true }],
+    [{}],
+  ])('survives terminal output filtering for %j', (options) => {
+    // Every guidance line must clear the filter — a link the user cannot see is
+    // the bug this whole path exists to fix.
+    for (const line of formatObserverGuidance('wf-demo-ab12', options)) {
+      expect(isObserverGuidanceLine(`[workflow 00:03] ${line}`)).toBe(true);
+    }
+  });
+
+  it('does not whitelist ordinary workflow chatter', () => {
+    expect(isObserverGuidanceLine('[workflow 00:03] Resolving Relaycast API key...')).toBe(false);
+    expect(isObserverGuidanceLine('[broker] worker started')).toBe(false);
+  });
+
+  it('points a bring-your-own-key run at the observer command when minting failed', () => {
+    const guidance = formatObserverGuidance('workflow-room');
+
+    expect(guidance).toEqual([
+      '  Observation: run `agent-relay observer` to mint a read-only link',
+      '  Channel: workflow-room',
+    ]);
+    expect(guidance.join('\n')).not.toContain('Workspace created');
   });
 
   it('formatError normalizes unknown errors', () => {
