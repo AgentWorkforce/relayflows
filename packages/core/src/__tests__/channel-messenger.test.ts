@@ -115,10 +115,31 @@ describe('channel messenger helpers', () => {
     }
   });
 
+  it.each([
+    ['a workspace key', 'https://agentrelay.com/observer?key=rk_live_secret'],
+    ['an agent token', 'https://agentrelay.com/observer?key=at_live_secret'],
+    ['no key at all', 'https://agentrelay.com/observer'],
+    ['a malformed URL', 'not a url'],
+  ])('refuses to print an observer link carrying %s', (_label, url) => {
+    const guidance = formatObserverGuidance('wf-demo', {
+      workspaceCreated: true,
+      observerUrl: url,
+    });
+
+    expect(guidance.join('\n')).not.toContain('Observer:');
+    expect(guidance.join('\n')).not.toContain('secret');
+    expect(guidance).toContain(
+      '  Observation: unavailable — could not mint a read-only observer token ' +
+        '(set RELAY_API_KEY to run against a workspace you own)'
+    );
+  });
+
   it('does not whitelist ordinary workflow chatter', () => {
     expect(isObserverGuidanceLine('[workflow 00:03] Resolving Relaycast API key...')).toBe(false);
     expect(isObserverGuidanceLine('[broker] worker started')).toBe(false);
     expect(isObserverGuidanceLine('[workflow 00:03] Creating channel: wf-demo...')).toBe(false);
+    // A bare `Channel: ` elsewhere in a log line must not buy an exemption.
+    expect(isObserverGuidanceLine('[broker] joined Channel: wf-demo')).toBe(false);
   });
 
   it('points a bring-your-own-key run at the observer command when minting failed', () => {

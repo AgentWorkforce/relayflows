@@ -4507,6 +4507,20 @@ export class WorkflowRunner {
         }
       }
     } finally {
+      // First, ahead of any fallible teardown. An auto-created workspace
+      // belongs to the run that created it — `ensureRelaycastApiKey` promises
+      // "each run gets full isolation" — and leaving the key set breaks that
+      // promise on a reused runner instance: the next run silently joins the
+      // same workspace, where the previous run's observer link can still watch
+      // it. Everything below this can throw (`shutdownRelay`, subscription
+      // teardown), which would skip the rest of the block; this invariant is
+      // not one to lose to a failed broker shutdown. A key supplied through
+      // RELAY_API_KEY is the caller's and is re-read from the environment.
+      if (this.relayApiKeyAutoCreated) {
+        this.relayApiKey = undefined;
+        this.relayApiKeyAutoCreated = false;
+      }
+
       this.lastFailedStepOutput.clear();
       this.lastCustomVerificationFailure.clear();
       for (const stream of this.ptyLogStreams.values()) stream.end();
@@ -4538,16 +4552,6 @@ export class WorkflowRunner {
       this.relaycast = undefined;
       this.relaycastAgent = undefined;
       this.channel = undefined;
-      // An auto-created workspace belongs to the run that created it —
-      // `ensureRelaycastApiKey` promises "each run gets full isolation".
-      // Leaving the key set breaks that promise on a reused runner instance:
-      // the next run would silently join the same workspace, where the
-      // previous run's observer link can still see it. A key supplied through
-      // RELAY_API_KEY is the caller's and is re-read from the environment.
-      if (this.relayApiKeyAutoCreated) {
-        this.relayApiKey = undefined;
-        this.relayApiKeyAutoCreated = false;
-      }
       this.trajectory = undefined;
       this.abortController = undefined;
       this.currentConfig = undefined;

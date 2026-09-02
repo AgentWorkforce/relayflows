@@ -109,6 +109,23 @@ export function scrubSecrets(text: string): string {
   return result;
 }
 
+/**
+ * Whether a URL carries a scoped observer token and nothing else.
+ *
+ * `buildObserverUrl` already refuses to construct anything else, so this is a
+ * second, independent gate on the same invariant — the one #27 existed to
+ * protect. This function is exported and prints to a terminal; it should not
+ * depend on every caller having built its input correctly to avoid emitting a
+ * workspace key.
+ */
+function isScopedObserverUrl(url: string): boolean {
+  try {
+    return new URL(url).searchParams.get('key')?.startsWith('ot_live_') === true;
+  } catch {
+    return false;
+  }
+}
+
 export interface ObserverGuidanceOptions {
   /** Set when the runner auto-created a throwaway workspace for this run. */
   workspaceCreated?: boolean;
@@ -135,7 +152,7 @@ export function formatObserverGuidance(
   if (options.workspaceCreated) {
     lines.push('Workspace created for this workflow.');
   }
-  if (options.observerUrl) {
+  if (options.observerUrl && isScopedObserverUrl(options.observerUrl)) {
     lines.push(`  Observer: ${options.observerUrl}`);
   } else if (options.workspaceCreated) {
     lines.push(
@@ -157,9 +174,10 @@ export function formatObserverGuidance(
  * swallowing it would defeat the point of printing it — so both filters ask
  * here rather than each keeping its own copy of the substrings to spare.
  *
- * Matches `Channel: ` on any name: a workflow may set `swarm.channel` to
- * something that does not carry the generated `wf-` prefix, and its guidance
- * line has to survive too.
+ * Matches the guidance line's own two-space indent rather than a `wf-` prefix:
+ * a workflow may set `swarm.channel` to any name, and its line has to survive
+ * too — but a bare `Channel: ` would wave through unrelated chatter that the
+ * filters exist to drop.
  */
 export function isObserverGuidanceLine(line: string): boolean {
   return (
@@ -167,7 +185,7 @@ export function isObserverGuidanceLine(line: string): boolean {
     line.includes('Observation:') ||
     line.includes('Workspace created') ||
     line.includes('agentrelay.com') ||
-    line.includes('Channel: ')
+    line.includes('  Channel: ')
   );
 }
 
