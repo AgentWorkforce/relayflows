@@ -108,9 +108,17 @@ describe('channel messenger helpers', () => {
     }
   });
 
+  it('survives filtering for a channel name without the generated wf- prefix', () => {
+    // `swarm.channel` may be set to anything; its guidance must not be dropped.
+    for (const line of formatObserverGuidance('team-room', { workspaceCreated: true })) {
+      expect(isObserverGuidanceLine(`[workflow 00:03] ${line}`)).toBe(true);
+    }
+  });
+
   it('does not whitelist ordinary workflow chatter', () => {
     expect(isObserverGuidanceLine('[workflow 00:03] Resolving Relaycast API key...')).toBe(false);
     expect(isObserverGuidanceLine('[broker] worker started')).toBe(false);
+    expect(isObserverGuidanceLine('[workflow 00:03] Creating channel: wf-demo...')).toBe(false);
   });
 
   it('points a bring-your-own-key run at the observer command when minting failed', () => {

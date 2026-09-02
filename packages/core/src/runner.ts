@@ -4538,6 +4538,16 @@ export class WorkflowRunner {
       this.relaycast = undefined;
       this.relaycastAgent = undefined;
       this.channel = undefined;
+      // An auto-created workspace belongs to the run that created it —
+      // `ensureRelaycastApiKey` promises "each run gets full isolation".
+      // Leaving the key set breaks that promise on a reused runner instance:
+      // the next run would silently join the same workspace, where the
+      // previous run's observer link can still see it. A key supplied through
+      // RELAY_API_KEY is the caller's and is re-read from the environment.
+      if (this.relayApiKeyAutoCreated) {
+        this.relayApiKey = undefined;
+        this.relayApiKeyAutoCreated = false;
+      }
       this.trajectory = undefined;
       this.abortController = undefined;
       this.currentConfig = undefined;

@@ -156,6 +156,10 @@ export function formatObserverGuidance(
  * the screen. The observer link is the one thing a user needs off that stream —
  * swallowing it would defeat the point of printing it — so both filters ask
  * here rather than each keeping its own copy of the substrings to spare.
+ *
+ * Matches `Channel: ` on any name: a workflow may set `swarm.channel` to
+ * something that does not carry the generated `wf-` prefix, and its guidance
+ * line has to survive too.
  */
 export function isObserverGuidanceLine(line: string): boolean {
   return (
@@ -163,7 +167,7 @@ export function isObserverGuidanceLine(line: string): boolean {
     line.includes('Observation:') ||
     line.includes('Workspace created') ||
     line.includes('agentrelay.com') ||
-    line.includes('Channel: wf-')
+    line.includes('Channel: ')
   );
 }
 
