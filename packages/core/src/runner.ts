@@ -946,8 +946,28 @@ export class WorkflowRunner {
   /** Per-agent relayfile mounts keyed by logical agent definition name. */
   private readonly agentMounts = new Map<string, MountHandle>();
 
-  // PTY-based output capture: accumulate terminal output per-agent
+  // PTY-based output capture: accumulate terminal output per-agent.
+  //
+  // Bounded on purpose. This buffer used to grow without limit for the whole
+  // life of an agent step, which put a chatty agent's entire transcript in the
+  // orchestrator's heap. A 34-step DAG with 9 agents OOM-killed its
+  // orchestrator in a 8 GB sandbox partway through (AgentWorkforce/cloud#1967,
+  // dev run 71cc4995: `bun exited with signal SIGKILL`, parent survived — the
+  // cgroup OOM-killer signature).
+  //
+  // Keeping a tail rather than everything is safe because every consumer either
+  // clips to the last few thousand characters for diagnostics, or is reading
+  // failure context where the end is what matters. The complete, unclipped
+  // transcript is still written to the per-agent PTY log file, so nothing is
+  // actually lost.
   private readonly ptyOutputBuffers = new Map<string, string[]>();
+  /** Retained tail per agent, in characters. Generous enough that ordinary
+   * steps are unaffected; small enough that a runaway agent cannot exhaust
+   * the orchestrator. */
+  private static readonly MAX_PTY_BUFFER_CHARS = 1_000_000;
+  /** Live character count per agent buffer, so trimming does not have to
+   * re-measure the whole buffer on every chunk. */
+  private readonly ptyOutputBufferSizes = new Map<string, number>();
   /** Snapshot of PTY output from the most recent failed attempt, keyed by step name. */
   private readonly lastFailedStepOutput = new Map<string, string>();
   /** Most recent custom verification failure details, keyed by step name. */
@@ -4451,6 +4471,7 @@ export class WorkflowRunner {
       for (const stream of this.ptyLogStreams.values()) stream.end();
       this.ptyLogStreams.clear();
       this.ptyOutputBuffers.clear();
+      this.ptyOutputBufferSizes.clear();
       this.ptyListeners.clear();
 
       this.unsubBrokerStderr?.();
@@ -7989,6 +8010,7 @@ export class WorkflowRunner {
     // Register PTY output listener before spawning so we capture everything
     this.readyRuntimeAgents.delete(agentName);
     this.ptyOutputBuffers.set(agentName, []);
+    this.ptyOutputBufferSizes.set(agentName, 0);
 
     // Open a log file so `agents:logs <name>` works for workflow-spawned agents
     const logsDir = this.getWorkerLogsDir();
@@ -7998,7 +8020,7 @@ export class WorkflowRunner {
     this.ptyListeners.set(agentName, (chunk: string) => {
       const stripped = WorkflowRunner.stripAnsi(chunk);
       const buffer = this.ptyOutputBuffers.get(agentName);
-      buffer?.push(stripped);
+      this.appendBoundedPtyChunk(agentName, buffer, stripped);
       // Write raw output (with ANSI codes) to log file so dashboard's
       // XTermLogViewer can render colors/formatting natively via xterm.js
       logStream.write(chunk);
@@ -8259,6 +8281,7 @@ export class WorkflowRunner {
       stopHeartbeat?.();
       this.activeAgentHandles.delete(agentName);
       this.ptyOutputBuffers.delete(agentName);
+      this.ptyOutputBufferSizes.delete(agentName);
       this.ptyListeners.delete(agentName);
       const stream = this.ptyLogStreams.get(agentName);
       if (stream) {
@@ -8881,6 +8904,8 @@ export class WorkflowRunner {
     const buffer = this.ptyOutputBuffers.get(oldName) ?? [];
     this.ptyOutputBuffers.set(newName, buffer);
     this.ptyOutputBuffers.delete(oldName);
+    this.ptyOutputBufferSizes.set(newName, this.ptyOutputBufferSizes.get(oldName) ?? 0);
+    this.ptyOutputBufferSizes.delete(oldName);
 
     const oldLogPath = path.join(logsDir, `${oldName}.log`);
     const newLogPath = path.join(logsDir, `${newName}.log`);
@@ -11544,6 +11569,32 @@ export class WorkflowRunner {
   /** Strip ANSI escape codes from terminal output — delegates to pty.ts canonical regex. */
   private static stripAnsi(text: string): string {
     return stripAnsiFn(text);
+  }
+
+  /**
+   * Append a PTY chunk, dropping oldest chunks once the retained tail exceeds
+   * {@link WorkflowRunner.MAX_PTY_BUFFER_CHARS}.
+   *
+   * Previously this was a bare `buffer.push(...)`, so a long-running or chatty
+   * agent kept its entire transcript resident in the orchestrator for the whole
+   * step. Consumers only ever read a tail, and the full transcript is on disk
+   * in the PTY log, so the head is the safe thing to discard.
+   */
+  private appendBoundedPtyChunk(
+    agentName: string,
+    buffer: string[] | undefined,
+    chunk: string,
+  ): void {
+    if (!buffer) return;
+    buffer.push(chunk);
+    let size = (this.ptyOutputBufferSizes.get(agentName) ?? 0) + chunk.length;
+    // Drop whole chunks from the front until back under the cap. Keep at least
+    // the most recent chunk even if it alone exceeds the cap, so a single huge
+    // write is still visible rather than silently vanishing.
+    while (size > WorkflowRunner.MAX_PTY_BUFFER_CHARS && buffer.length > 1) {
+      size -= buffer.shift()?.length ?? 0;
+    }
+    this.ptyOutputBufferSizes.set(agentName, size);
   }
 
   /**
