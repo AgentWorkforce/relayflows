@@ -1,0 +1,51 @@
+[workflow 00:00] Starting workflow "default" (2 steps)
+[workflow] run 6821541f46f60bb11f29b3bd
+[workflow 00:00] Executing 2 steps (pattern: pipeline)
+  ● probe-bindings — started
+[workflow 00:00] [probe-bindings] Running: echo "sid=${RELAYFLOWS_SANDBOX_ID:-ABSENT}" && echo "commit=${RELAYFLOWS_SOURCE_COMMIT:-ABSENT}" && echo "digest=${RELAYFLOWS_TREE_DIGEST:-ABSENT}" && test -f reproducer-marker.txt && printf '%s\n' "$...
+[workflow 00:07] [probe-bindings] Output:
+```
+sid=9eca9416-48e1-4cb9-a501-8c18b3aa7612
+commit=3861e2448c39c2be11e01564dc23436f0ed5a85d
+digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+```
+  ✓ probe-bindings — completed
+  ● probe-continuity — started
+[workflow 00:07] [probe-continuity] Running: test "$(cat .reproducer-sid)" = "$RELAYFLOWS_SANDBOX_ID" && test "$RELAYFLOWS_SOURCE_COMMIT" != "ABSENT" && test "$RELAYFLOWS_TREE_DIGEST" != "ABSENT" && echo "CONTINUITY_OK sid=$RELAYFLOWS_SANDBOX_ID...
+[workflow 00:07] [probe-continuity] Output:
+```
+CONTINUITY_OK sid=9eca9416-48e1-4cb9-a501-8c18b3aa7612 commit=3861e2448c39c2be11e01564dc23436f0ed5a85d digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+```
+  ✓ probe-continuity — completed
+[workflow 00:07] Workflow completed successfully
+[workflow] completed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Workflow "default" — COMPLETED
+  2 passed, 0 failed, 0 skipped
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Step                  Status  Model                 Tokens    Duration      Errors
+  probe-bindings        pass    --                        --          7s          --
+  probe-continuity      pass    --                        --       141ms          --
+  ──────────────────────────────────────────────────────────────────────────────────
+  Total                                                   --          7s            
+
+  Run ID:      6821541f46f60bb11f29b3bd
+  Step output: /var/folders/6d/0x5fkt8d01gfmmjdzkxqzwnh0000gn/T/opencode/daytona-evidence/fixture/.agent-relay/step-outputs/6821541f46f60bb11f29b3bd
+  Agent logs:  /var/folders/6d/0x5fkt8d01gfmmjdzkxqzwnh0000gn/T/opencode/daytona-evidence/fixture/.agent-relay/team/worker-logs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[workflow 00:07] Shutting down broker...
+RUN_STATUS=completed
+STEP probe-bindings status=completed
+STEP probe-bindings OUTPUT BEGIN
+sid=9eca9416-48e1-4cb9-a501-8c18b3aa7612
+commit=3861e2448c39c2be11e01564dc23436f0ed5a85d
+digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+
+STEP probe-bindings OUTPUT END
+STEP probe-continuity status=completed
+STEP probe-continuity OUTPUT BEGIN
+CONTINUITY_OK sid=9eca9416-48e1-4cb9-a501-8c18b3aa7612 commit=3861e2448c39c2be11e01564dc23436f0ed5a85d digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+
+STEP probe-continuity OUTPUT END

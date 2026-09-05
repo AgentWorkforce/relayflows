@@ -1,0 +1,40 @@
+EXEC exit=0
+EXEC_OUT_BEGIN
+[workflow 00:00] Starting workflow "default" (2 steps)
+[workflow] run 67a4f01c11eadeec58317fa0
+[workflow 00:00] Executing 2 steps (pattern: pipeline)
+  ● probe-bindings — started
+[workflow 00:00] [probe-bindings] Running: echo "sid=${RELAYFLOWS_SANDBOX_ID:-ABSENT}" && echo "commit=${RELAYFLOWS_SOURCE_COMMIT:-ABSENT}" && echo "digest=${RELAYFLOWS_TREE_DIGEST:-ABSENT}" && test -f reproducer-marker.txt && printf '%s\n' "$...
+[workflow 00:01] [probe-bindings] Command failed (exit code -1)
+[workflow 00:01] [probe-bindings] Output:
+fork/exec /usr/bin/bash: no such file or directory
+  ↻ probe-bindings — retrying (attempt 1)
+  ● probe-bindings — started
+[workflow 00:02] [probe-bindings] Running: echo "sid=${RELAYFLOWS_SANDBOX_ID:-ABSENT}" && echo "commit=${RELAYFLOWS_SOURCE_COMMIT:-ABSENT}" && echo "digest=${RELAYFLOWS_TREE_DIGEST:-ABSENT}" && test -f reproducer-marker.txt && printf '%s\n' "$...
+[workflow 00:04] [probe-bindings] Command failed (exit code -1)
+[workflow 00:04] [probe-bindings] Output:
+fork/exec /usr/bin/bash: no such file or directory
+  ↻ probe-bindings — retrying (attempt 2)
+  ● probe-bindings — started
+[workflow 00:05] [probe-bindings] Running: echo "sid=${RELAYFLOWS_SANDBOX_ID:-ABSENT}" && echo "commit=${RELAYFLOWS_SOURCE_COMMIT:-ABSENT}" && echo "digest=${RELAYFLOWS_TREE_DIGEST:-ABSENT}" && test -f reproducer-marker.txt && printf '%s\n' "$...
+[workflow 00:06] [probe-bindings] Command failed (exit code -1)
+[workflow 00:06] [probe-bindings] Output:
+fork/exec /usr/bin/bash: no such file or directory
+[workflow 00:06] [probe-bindings] Output (FAILED):
+```
+fork/exec /usr/bin/bash: no such file or directory
+```
+  ✗ probe-bindings — FAILED: Command failed with exit code -1: fork/exec /usr/bin/bash: no such file or directory
+  ○ probe-continuity — skipped
+[workflow] FAILED: Step "probe-bindings" failed: Step "probe-bindings" failed: Command failed with exit code -1: fork/exec /usr/bin/bash: no such file or directory
+[workflow 00:07] Shutting down broker...
+RUN_STATUS=failed
+RUN_ERROR=Step "probe-bindings" failed: Step "probe-bindings" failed: Command failed with exit code -1: fork/exec /usr/bin/bash: no such file or directory
+STEP probe-bindings status=failed
+STEP probe-bindings OUTPUT BEGIN
+fork/exec /usr/bin/bash: no such file or directory
+STEP probe-bindings OUTPUT END
+STEP probe-bindings ERROR: Command failed with exit code -1: fork/exec /usr/bin/bash: no such file or directory
+STEP probe-continuity status=skipped
+
+EXEC_OUT_END

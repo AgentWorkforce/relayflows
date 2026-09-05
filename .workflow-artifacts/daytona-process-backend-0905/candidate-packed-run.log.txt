@@ -1,0 +1,55 @@
+EXEC exit=0
+EXEC_OUT_BEGIN
+[workflow 00:00] Starting workflow "default" (2 steps)
+[workflow] run e07ca8efd128eb67caea09ad
+[workflow 00:00] Executing 2 steps (pattern: pipeline)
+  ● probe-bindings — started
+[workflow 00:00] [probe-bindings] Running: echo "sid=${RELAYFLOWS_SANDBOX_ID:-ABSENT}" && echo "commit=${RELAYFLOWS_SOURCE_COMMIT:-ABSENT}" && echo "digest=${RELAYFLOWS_TREE_DIGEST:-ABSENT}" && test -f reproducer-marker.txt && printf '%s\n' "$...
+[workflow 00:01] [probe-bindings] Output:
+```
+sid=ee58c343-fddf-44bd-8d32-de66b74ba399
+commit=3861e2448c39c2be11e01564dc23436f0ed5a85d
+digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+```
+  ✓ probe-bindings — completed
+  ● probe-continuity — started
+[workflow 00:01] [probe-continuity] Running: test "$(cat .reproducer-sid)" = "$RELAYFLOWS_SANDBOX_ID" && test "$RELAYFLOWS_SOURCE_COMMIT" != "ABSENT" && test "$RELAYFLOWS_TREE_DIGEST" != "ABSENT" && echo "CONTINUITY_OK sid=$RELAYFLOWS_SANDBOX_ID...
+[workflow 00:01] [probe-continuity] Output:
+```
+CONTINUITY_OK sid=ee58c343-fddf-44bd-8d32-de66b74ba399 commit=3861e2448c39c2be11e01564dc23436f0ed5a85d digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+```
+  ✓ probe-continuity — completed
+[workflow 00:01] Workflow completed successfully
+[workflow] completed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Workflow "default" — COMPLETED
+  2 passed, 0 failed, 0 skipped
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Step                  Status  Model                 Tokens    Duration      Errors
+  probe-bindings        pass    --                        --          1s          --
+  probe-continuity      pass    --                        --        50ms          --
+  ──────────────────────────────────────────────────────────────────────────────────
+  Total                                                   --          1s            
+
+  Run ID:      e07ca8efd128eb67caea09ad
+  Step output: /home/daytona/reproducer/.agent-relay/step-outputs/e07ca8efd128eb67caea09ad
+  Agent logs:  /home/daytona/reproducer/.agent-relay/team/worker-logs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[workflow 00:02] Shutting down broker...
+RUN_STATUS=completed
+STEP probe-bindings status=completed
+STEP probe-bindings OUTPUT BEGIN
+sid=ee58c343-fddf-44bd-8d32-de66b74ba399
+commit=3861e2448c39c2be11e01564dc23436f0ed5a85d
+digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+
+STEP probe-bindings OUTPUT END
+STEP probe-continuity status=completed
+STEP probe-continuity OUTPUT BEGIN
+CONTINUITY_OK sid=ee58c343-fddf-44bd-8d32-de66b74ba399 commit=3861e2448c39c2be11e01564dc23436f0ed5a85d digest=a44f513c9283de2d772dbd7131e925a38e8a46d4
+
+STEP probe-continuity OUTPUT END
+
+EXEC_OUT_END

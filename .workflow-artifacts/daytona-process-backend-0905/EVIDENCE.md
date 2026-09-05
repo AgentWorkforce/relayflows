@@ -31,7 +31,7 @@ Run under `RELAYFLOWS_SANDBOX_PROVIDER=daytona`,
 - Outer sandbox (fresh, from the same snapshot): `596a2c4a-0d99-4ac4-aa47-8dab4ef1167c`
 - Engine: `npm install @relayflows/core@1.1.4` (registry)
 - Run id: `67a4f01c11eadeec58317fa0` — **FAILED**, driver exit 1
-- Log: `baseline-released-1.1.4-run.log`
+- Log: `baseline-released-1.1.4-run.log.txt`
 
 The failure is the blocker itself, three ways:
 
@@ -57,7 +57,7 @@ The failure is the blocker itself, three ways:
 ## 3. Same exact reproducer PASSES
 
 - Run id: `e07ca8efd128eb67caea09ad` — **COMPLETED**, driver exit 0
-- Log: `candidate-packed-run.log`
+- Log: `candidate-packed-run.log.txt`
 
 Step outputs (both steps):
 
@@ -80,7 +80,7 @@ CONTINUITY_OK sid=ee58c343-fddf-44bd-8d32-de66b74ba399 commit=3861e2448c39c2be11
   set (and identical) in both steps.
 
 A pre-flight of the same candidate from the orchestrator's machine (before the
-sandbox-in-sandbox run) is in `candidate-local-preflight-run.log`
+sandbox-in-sandbox run) is in `candidate-local-preflight-run.log.txt`
 (inner sandbox `9eca9416-48e1-4cb9-a501-8c18b3aa7612`, same PASS shape).
 
 ## 4. Cleanup — same IDs Not Found and absent from full inventory after bounded polling
