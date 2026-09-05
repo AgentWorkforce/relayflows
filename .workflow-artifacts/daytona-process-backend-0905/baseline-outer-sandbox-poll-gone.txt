@@ -1,0 +1,1 @@
+POLL_GONE id=596a2c4a-0d99-4ac4-aa47-8dab4ef1167c getById=NOT_FOUND inInventory=false inventoryCount=125 elapsedMs=4339 sawPresentBefore=true
