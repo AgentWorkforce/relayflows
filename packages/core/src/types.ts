@@ -676,6 +676,19 @@ export interface ProcessEnvironment {
   id: string;
   /** Home directory inside the environment. */
   homeDir: string;
+  /**
+   * Commit of the exact source synced into this environment, when the backend
+   * binds source (the Daytona provider does; a remote sandbox without the
+   * source is one every deterministic step fails in).
+   */
+  sourceCommit?: string;
+  /** Tree digest of the synced source, when the backend binds source. */
+  treeDigest?: string;
+  /**
+   * Directory inside the environment the synced source was materialized in.
+   * Set only on source-bound environments, whose local cwd is remapped into it.
+   */
+  sourceWorkdir?: string;
   /** Execute a shell command in the environment. */
   exec(
     command: string,

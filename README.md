@@ -1014,6 +1014,35 @@ produces no backend at all, so nothing about the default path changes. An
 explicit `executor` or `processBackend` still wins over sandbox config, so a
 host that injects its own backend today keeps it.
 
+**Deterministic steps under `daytona`.** A deterministic workflow only makes
+sense when its steps share one world, so the Daytona provider provisions ONE
+sandbox per run for deterministic steps — not one per step — matching local
+semantics where every step runs on the same machine in the same tree. On first
+use it syncs the exact source into that sandbox: it binds the runner's cwd to
+its git `HEAD` commit and tree digest, uploads `git archive HEAD`, and
+verifies the upload by digest and the extracted file set against the committed
+tree. Every deterministic command then runs against that synced workdir and
+receives:
+
+| Env var | Meaning |
+| --- | --- |
+| `RELAYFLOWS_SANDBOX_ID` | The exact id of the sandbox the command runs in. |
+| `RELAYFLOWS_SOURCE_COMMIT` | The source commit the sandbox is bound to. |
+| `RELAYFLOWS_TREE_DIGEST` | The tree digest of the synced source. |
+| `RELAYFLOWS_SOURCE_WORKDIR` | The directory inside the sandbox the source was synced to. |
+
+The commit and digest are also stamped as sandbox labels
+(`relayflows/source-commit`, `relayflows/tree-digest`), so every provisioned
+sandbox is attributable to the tree it runs.
+
+This is fail-closed by construction: a source root that is not a git repo, an
+upload that cannot be verified, or an extraction whose file set does not match
+the committed tree refuses to provision a sandbox rather than handing steps a
+desynced one; a step whose `cwd` escapes the source root refuses to run. The
+shared sandbox is destroyed when the run ends (completed, failed, or
+cancelled). A step's local `cwd` inside the source root is mapped to the same
+relative path inside the synced workdir.
+
 **Custom providers.** Register a runtime under any name, or hand one in
 directly. This is the seam a host uses to plug in a runtime that does not live
 in this repo:

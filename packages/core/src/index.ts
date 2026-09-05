@@ -7,10 +7,15 @@ export * from './observer-token.js';
 export * from './process-spawner.js';
 export {
   createProcessBackendExecutor,
+  SANDBOX_ID_VAR,
+  SOURCE_COMMIT_VAR,
+  SOURCE_WORKDIR_VAR,
+  TREE_DIGEST_VAR,
   type ProcessBackendExecutorOptions,
 } from './process-backend-executor.js';
 export * from './sandbox-backend.js';
 export * from './sandbox-local-runtime.js';
+export * from './sandbox-source-sync.js';
 export * from './run-summary-table.js';
 export * from './template-resolver.js';
 export * from './verification.js';

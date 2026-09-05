@@ -532,4 +532,11 @@ export interface RunnerStepExecutor {
       }) => Promise<void>;
     }
   ): Promise<{ output: string; success: boolean }>;
+
+  /**
+   * Release run-scoped resources when the run ends (completed, failed, or
+   * cancelled). The runner calls it once per run; executors that hold nothing
+   * (one environment per step, destroyed inline) may omit it.
+   */
+  dispose?(): Promise<void>;
 }

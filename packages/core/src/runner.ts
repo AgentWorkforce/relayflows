@@ -1035,12 +1035,16 @@ export class WorkflowRunner {
       // Only reached when the caller injected neither an executor nor a
       // backend. The config's provider defaults to `none`, which yields
       // `undefined` here and leaves the local child-process path intact.
-      const sandboxConfig = options.sandbox ?? resolveSandboxConfigFromEnv();
+      const sandboxConfig = { ...(options.sandbox ?? resolveSandboxConfigFromEnv()) };
+      // The runner's cwd is the source root a source-bound provider (Daytona)
+      // syncs into every sandbox — unless the caller or environment named one.
+      if (!sandboxConfig.sourceRoot) sandboxConfig.sourceRoot = this.cwd;
       this.processBackend = createLazySandboxProcessBackend(sandboxConfig);
     }
     if (!this.executor && this.processBackend) {
       this.executor = createProcessBackendExecutor(this.processBackend, {
         env: this.envSecrets,
+        sourceRoot: this.cwd,
       });
     }
     this.templateResolver = new TemplateResolver();
@@ -4565,6 +4569,10 @@ export class WorkflowRunner {
 
       await this.stopRelayfileEventSubscriptions();
 
+      // Run-scoped executor resources — the run-shared deterministic sandbox
+      // on sandboxed runs — belong to this run and must not outlive it.
+      await this.disposeStepExecutor();
+
       this.log('Shutting down broker...');
       await this.shutdownRelay();
       this.currentBrokerContext = undefined;
@@ -4595,6 +4603,21 @@ export class WorkflowRunner {
   /** Pause execution. Currently-running steps will finish but no new steps start. */
   pause(): void {
     this.paused = true;
+  }
+
+  /**
+   * Tear down run-scoped executor resources — the run-shared deterministic
+   * sandbox, on sandboxed runs. Best-effort by design: teardown must never
+   * retroactively fail a run that already has its final status.
+   */
+  private async disposeStepExecutor(): Promise<void> {
+    try {
+      await this.executor?.dispose?.();
+    } catch (error) {
+      this.log(
+        `Executor teardown failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /** Resume after a pause(). */

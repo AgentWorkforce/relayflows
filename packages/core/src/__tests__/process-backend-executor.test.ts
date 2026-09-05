@@ -119,7 +119,9 @@ describe('createProcessBackendExecutor', () => {
     expect(result).toEqual({ output: 'ok', exitCode: 0 });
     const [, opts] = exec.mock.calls[0]!;
     expect(opts?.cwd).toBe('/work');
-    expect(opts?.env).toEqual({ RELAY_WORKSPACE: 'ws_123' });
+    // The exact sandbox id rides along on every deterministic command so the
+    // process (and the run's evidence) can name the sandbox it ran in.
+    expect(opts?.env).toEqual({ RELAY_WORKSPACE: 'ws_123', RELAYFLOWS_SANDBOX_ID: 'env-1' });
     expect(opts?.timeoutSeconds).toBe(5);
   });
 });

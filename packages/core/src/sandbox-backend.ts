@@ -35,6 +35,10 @@ export interface SandboxRuntimeHandle {
   id: string;
   homeDir?: string;
   workdir?: string;
+  /** Commit of the exact source synced into this sandbox, when the runtime binds source. */
+  sourceCommit?: string;
+  /** Tree digest of the synced source, when the runtime binds source. */
+  treeDigest?: string;
 }
 
 /** Options a provider accepts when creating a sandbox. */
@@ -112,6 +116,13 @@ export interface SandboxBackendConfig {
   homeDir?: string;
   /** Working directory inside the sandbox. */
   workdir?: string;
+  /**
+   * Local git root whose exact committed source is synced into every sandbox
+   * (Daytona). The runner sets this to its own cwd; the Daytona provider
+   * fails closed without a boundable git root, because a remote sandbox
+   * without the source is a sandbox every deterministic step fails in.
+   */
+  sourceRoot?: string;
   /** Env injected at sandbox creation (per-step env is layered on top). */
   env?: Record<string, string>;
   /** Provider labels stamped on each created sandbox. */
@@ -172,6 +183,9 @@ export function resolveSandboxConfigFromEnv(
 
   const workdir = env.RELAYFLOWS_SANDBOX_WORKDIR?.trim();
   if (workdir) config.workdir = workdir;
+
+  const sourceRoot = env.RELAYFLOWS_SANDBOX_SOURCE_ROOT?.trim();
+  if (sourceRoot) config.sourceRoot = sourceRoot;
 
   const createTimeout = Number(env.RELAYFLOWS_SANDBOX_CREATE_TIMEOUT_SECONDS);
   if (Number.isFinite(createTimeout) && createTimeout > 0) {
@@ -260,6 +274,9 @@ export function createSandboxProcessBackend(
       return {
         id: handle.id,
         homeDir,
+        ...(handle.sourceCommit ? { sourceCommit: handle.sourceCommit } : {}),
+        ...(handle.treeDigest ? { treeDigest: handle.treeDigest } : {}),
+        ...(handle.sourceCommit && handle.workdir ? { sourceWorkdir: handle.workdir } : {}),
         async exec(command, execOpts) {
           const sandboxOpts: SandboxExecOptions = {};
           if (execOpts?.cwd) sandboxOpts.cwd = execOpts.cwd;
@@ -405,5 +422,13 @@ registerSandboxProvider('daytona', async (config) => {
   };
   if (config.snapshot) runtimeOptions.snapshot = config.snapshot;
 
-  return new DaytonaRuntime(runtimeOptions) as unknown as SandboxWorkflowRuntime;
+  const daytonaRuntime = new DaytonaRuntime(runtimeOptions) as unknown as SandboxWorkflowRuntime;
+  // Source-bound: every sandbox this runtime provisions carries the exact
+  // committed source (git archive of HEAD), its commit and tree digest on the
+  // handle and as labels, and refuses to launch when the source cannot be
+  // bound or verified. See sandbox-source-sync.ts.
+  const { createSourceBoundSandboxRuntime } = await import('./sandbox-source-sync.js');
+  return createSourceBoundSandboxRuntime(daytonaRuntime, {
+    sourceRoot: config.sourceRoot ?? process.cwd(),
+  });
 });
