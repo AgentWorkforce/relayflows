@@ -208,6 +208,28 @@ function validateCustomStepDefinition(
     }
   }
 
+  if (stepDef.repairProtection !== undefined) {
+    const repairProtection = stepDef.repairProtection;
+    const protectedPaths =
+      typeof repairProtection === 'object' && repairProtection !== null
+        ? (repairProtection as Record<string, unknown>).protectedPaths
+        : undefined;
+    if (
+      stepType !== 'deterministic' ||
+      typeof repairProtection !== 'object' ||
+      repairProtection === null ||
+      !Array.isArray(protectedPaths) ||
+      protectedPaths.length === 0 ||
+      protectedPaths.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)
+    ) {
+      throw new CustomStepsParseError(
+        `Invalid repairProtection for step "${name}"`,
+        'repairProtection.protectedPaths must be a non-empty array of non-empty strings on a deterministic step',
+        filePath
+      );
+    }
+  }
+
   if (stepType === 'worktree' && !hasBranch) {
     throw new CustomStepsParseError(
       `Worktree step "${name}" is missing "branch"`,
@@ -339,7 +361,7 @@ export function validateCustomStepsUsage(
     // Check for extra parameters that aren't defined
     const definedParams = new Set((customDef.params ?? []).map((p) => p.name));
     const stepKeys = Object.keys(stepAny).filter(
-      (k) => !['name', 'use', 'dependsOn', 'timeoutMs'].includes(k)
+      (k) => !['name', 'use', 'dependsOn', 'timeoutMs', 'cwd', 'workdir'].includes(k)
     );
     for (const key of stepKeys) {
       if (!definedParams.has(key)) {
@@ -433,6 +455,10 @@ export function resolveCustomStep(
     type: stepType as 'deterministic' | 'worktree',
     dependsOn: step.dependsOn,
     timeoutMs: step.timeoutMs ?? customDef.timeoutMs,
+    // The invoking step's effective directory must survive resolution:
+    // repairProtection paths and the command itself resolve against it.
+    cwd: step.cwd,
+    workdir: step.workdir,
   };
 
   if (stepType === 'deterministic') {
@@ -441,6 +467,9 @@ export function resolveCustomStep(
     resolvedStep.captureOutput = customDef.captureOutput;
     resolvedStep.terminalSuccessExitCodes = customDef.terminalSuccessExitCodes
       ? [...customDef.terminalSuccessExitCodes]
+      : undefined;
+    resolvedStep.repairProtection = customDef.repairProtection
+      ? { protectedPaths: [...customDef.repairProtection.protectedPaths] }
       : undefined;
   } else if (stepType === 'worktree') {
     resolvedStep.branch = interpolate(customDef.branch);

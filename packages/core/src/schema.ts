@@ -368,6 +368,12 @@ export interface HumanAssistanceConfig {
   file?: FileHumanAssistanceConfig;
 }
 
+/** Files a deterministic repair agent must never change. */
+export interface RepairProtectionConfig {
+  /** Paths resolved relative to the deterministic step's effective cwd. */
+  protectedPaths: string[];
+}
+
 /**
  * A single step within a workflow.
  *
@@ -424,6 +430,8 @@ export interface WorkflowStep {
    * remaining work. The run is reported as completed_early, not completed.
    */
   terminalSuccessExitCodes?: number[];
+  /** Enforce an immutable scope around every repair attempt for this gate. */
+  repairProtection?: RepairProtectionConfig;
 
   // ── Integration step fields ────────────────────────────────────────────────
   /** Integration name: 'github', 'linear', 'slack' (required for integration steps). */

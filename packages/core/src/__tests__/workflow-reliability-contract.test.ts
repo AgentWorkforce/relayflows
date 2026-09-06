@@ -352,6 +352,7 @@ describe('workflow reliability contract', () => {
                 command: 'npm run typecheck && npm test',
                 captureOutput: true,
                 failOnError: true,
+                repairProtection: { protectedPaths: ['package.json'] },
               },
             ],
           },

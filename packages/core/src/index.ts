@@ -14,6 +14,7 @@ export * from './sandbox-local-runtime.js';
 export * from './run-summary-table.js';
 export * from './template-resolver.js';
 export * from './verification.js';
+export * from './repair-protection.js';
 export {
   StepExecutor,
   /** @deprecated Use {@link StepExecutor} instead. */

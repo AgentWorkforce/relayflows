@@ -47,6 +47,7 @@ describe('deterministic/worktree steps in builder', () => {
         captureOutput: true,
         failOnError: false,
         terminalSuccessExitCodes: [78],
+        repairProtection: { protectedPaths: ['scripts/gate.sh'] },
         dependsOn: ['build'],
         timeoutMs: 30000,
       })
@@ -57,6 +58,7 @@ describe('deterministic/worktree steps in builder', () => {
     expect(step.captureOutput).toBe(true);
     expect(step.failOnError).toBe(false);
     expect(step.terminalSuccessExitCodes).toEqual([78]);
+    expect(step.repairProtection).toEqual({ protectedPaths: ['scripts/gate.sh'] });
     expect(step.dependsOn).toEqual(['build']);
     expect(step.timeoutMs).toBe(30000);
   });

@@ -601,6 +601,20 @@ describe('Custom Step Resolution', () => {
     expect(resolved.terminalSuccessExitCodes).toEqual([78]);
   });
 
+  it('preserves the invoking step cwd and workdir through custom-step resolution', () => {
+    const step = {
+      name: 'build',
+      use: 'docker-build',
+      image: 'myapp:latest',
+      cwd: 'services/api',
+      workdir: 'api-checkout',
+    } as WorkflowStep;
+    const resolved = resolveCustomStep(step, customSteps);
+
+    expect(resolved.cwd).toBe('services/api');
+    expect(resolved.workdir).toBe('api-checkout');
+  });
+
   it('should resolve custom step with all params', () => {
     const step = {
       name: 'build',
@@ -715,6 +729,22 @@ describe('Custom Step Validation', () => {
       expect(result.errors).toHaveLength(1);
       expect(result.errors[0]).toContain('unknown-step');
       expect(result.missingSteps).toContain('unknown-step');
+    });
+
+    it('does not warn that supported step fields like cwd/workdir will be ignored', () => {
+      const steps: WorkflowStep[] = [
+        {
+          name: 'build',
+          use: 'docker-build',
+          image: 'myapp:latest',
+          cwd: 'services/api',
+          workdir: 'api-checkout',
+        } as WorkflowStep,
+      ];
+
+      const result = validateCustomStepsUsage(steps, customSteps);
+
+      expect(result.warnings.filter((w) => w.includes('cwd') || w.includes('workdir'))).toEqual([]);
     });
 
     it('should report missing required parameters', () => {
