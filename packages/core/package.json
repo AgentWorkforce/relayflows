@@ -61,7 +61,7 @@
     "@agentworkforce/persona-kit": "^4.1.39",
     "@agentworkforce/persona-registry": "^4.1.39",
     "@relaycast/sdk": "^1.1.0",
-    "@relayfile/sdk": "^0.8.0",
+    "@relayfile/sdk": "^0.10.47",
     "@relayflows/browser-primitive": "1.1.4",
     "@relayflows/github-primitive": "1.1.4",
     "@relayflows/slack-primitive": "1.1.4",
