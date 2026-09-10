@@ -154,6 +154,7 @@ const mockRelayInstance = {
   onBrokerExit: vi.fn(() => () => {}),
   connectEvents: vi.fn(),
   getStatus: vi.fn().mockResolvedValue({ status: 'running' }),
+  getSession: vi.fn().mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' }),
   listAgents: vi.fn().mockResolvedValue([]),
   release: vi.fn().mockResolvedValue({ name: '' }),
   sendMessage: vi.fn().mockResolvedValue({ event_id: 'evt', targets: [] }),
@@ -496,6 +497,155 @@ agents:
   });
 
   // ── Execution ──────────────────────────────────────────────────────────
+
+  describe('Relaycast base URL consistency', () => {
+    it('uses the default origin for workspace creation, observer minting, broker, and child env', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-'));
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (url.includes('/v1/observer-tokens')) {
+          return {
+            ok: true,
+            json: async () => ({ data: { token: 'ot_live_test', id: 'ot_test' } }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({ data: { api_key: 'rk_live_test' } }),
+          text: async () => '',
+        } as Response;
+      }) as unknown as typeof fetch);
+      let localRunner: InstanceType<typeof WorkflowRunner> | undefined;
+
+      try {
+        vi.stubEnv('RELAYCAST_BASE_URL', '');
+        vi.stubEnv('RELAY_BASE_URL', '');
+        localRunner = new WorkflowRunner({ db, cwd: tmpDir });
+
+        await (localRunner as any).ensureRelaycastApiKey('wf-default');
+        await expect((localRunner as any).mintRunObserverUrl('wf-default')).resolves.toContain(
+          'ot_live_test'
+        );
+        await (localRunner as any).startOrReuseSharedBroker('run-default', 'wf-default', false);
+
+        const engineCalls = fetchSpy.mock.calls
+          .map(([url]) => String(url))
+          .filter((url) => url.includes('/v1/'));
+        expect(engineCalls[0]).toBe('https://api.relaycast.dev/v1/workspaces');
+        expect(engineCalls[1]).toBe('https://api.relaycast.dev/v1/observer-tokens');
+
+        const relayEnv = (localRunner as any).getRelayEnv();
+        expect(relayEnv).toEqual(
+          expect.objectContaining({
+            RELAYCAST_BASE_URL: 'https://api.relaycast.dev',
+            RELAY_BASE_URL: 'https://api.relaycast.dev',
+          })
+        );
+        const brokerOptions = mockHarnessDriverSpawn.mock.calls.at(-1)?.[0] as any;
+        expect(brokerOptions.env).toEqual(
+          expect.objectContaining({
+            RELAYCAST_BASE_URL: 'https://api.relaycast.dev',
+            RELAY_BASE_URL: 'https://api.relaycast.dev',
+          })
+        );
+      } finally {
+        await localRunner?.shutdownRelay().catch(() => undefined);
+        fetchSpy.mockRestore();
+        vi.unstubAllEnvs();
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('normalizes an explicit override across workspace creation, observer minting, broker, and children', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-explicit-'));
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => ({
+        ok: true,
+        json: async () => ({ data: { api_key: 'rk_live_test', token: 'ot_live_test', id: 'ot_test' } }),
+        text: async () => '',
+      })) as unknown as typeof fetch);
+      const localRunner = new WorkflowRunner({
+        db,
+        cwd: tmpDir,
+        relay: { env: { RELAYCAST_BASE_URL: 'https://engine.example.test///' } },
+      });
+
+      try {
+        await (localRunner as any).ensureRelaycastApiKey('wf-explicit');
+        await (localRunner as any).mintRunObserverUrl('wf-explicit');
+        await (localRunner as any).startOrReuseSharedBroker('run-explicit', 'wf-explicit', false);
+        expect((localRunner as any).getRelaycastBaseUrl()).toBe('https://engine.example.test');
+        expect(
+          fetchSpy.mock.calls
+            .map(([url]) => String(url))
+            .filter((url) => url.includes('/v1/'))
+        ).toEqual([
+          'https://engine.example.test/v1/workspaces',
+          'https://engine.example.test/v1/observer-tokens',
+        ]);
+        expect((localRunner as any).getRelayEnv()).toEqual(
+          expect.objectContaining({
+            RELAYCAST_BASE_URL: 'https://engine.example.test',
+            RELAY_BASE_URL: 'https://engine.example.test',
+          })
+        );
+        const brokerOptions = mockHarnessDriverSpawn.mock.calls.at(-1)?.[0] as any;
+        expect(brokerOptions.env).toEqual(
+          expect.objectContaining({
+            RELAYCAST_BASE_URL: 'https://engine.example.test',
+            RELAY_BASE_URL: 'https://engine.example.test',
+          })
+        );
+      } finally {
+        await localRunner.shutdownRelay().catch(() => undefined);
+        fetchSpy.mockRestore();
+        vi.unstubAllEnvs();
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails closed on an invalid explicit origin before creating a workspace', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const localRunner = new WorkflowRunner({
+        db,
+        relay: { env: { RELAYCAST_BASE_URL: 'javascript:alert(1)' } },
+      });
+
+      try {
+        await expect((localRunner as any).ensureRelaycastApiKey('wf-invalid')).rejects.toThrow(
+          'Relaycast base URL must use http or https'
+        );
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('does not reuse a shared broker whose reported origin differs from the runner origin', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-reuse-'));
+      const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(
+        path.join(stateDir, 'connection.json'),
+        JSON.stringify({ url: 'http://127.0.0.1:3889', api_key: 'br_test', pid: process.pid }),
+        'utf-8'
+      );
+      mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://cast.agentrelay.com' });
+      const localRunner = new WorkflowRunner({
+        db,
+        cwd: tmpDir,
+        relay: { env: { RELAY_API_KEY: 'rk_live_test', RELAYCAST_BASE_URL: 'https://api.relaycast.dev' } },
+      });
+
+      try {
+        await (localRunner as any).startOrReuseSharedBroker('run-mismatch', 'wf-mismatch', false);
+        expect(mockRelayInstance.disconnect).toHaveBeenCalled();
+        expect(mockHarnessDriverSpawn).toHaveBeenCalled();
+      } finally {
+        await localRunner.shutdownRelay().catch(() => undefined);
+        mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
 
   describe('execute', () => {
     // `ensureRelaycastApiKey` promises "each run gets full isolation" by creating
