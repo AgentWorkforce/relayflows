@@ -273,8 +273,15 @@ function resolveRelaycastBaseUrl(env: Record<string, string | undefined>): strin
   if (!parsed.hostname) {
     throw new Error(`Relaycast base URL must include a hostname: ${value}`);
   }
+  if (parsed.search || parsed.hash) {
+    throw new Error(`Relaycast base URL must not include a query or fragment: ${value}`);
+  }
 
-  return value.replace(/\/+$/, '');
+  // URL#origin normalizes hostname casing and removes default ports. Keep a
+  // configured path (some self-hosted deployments mount the API below one),
+  // while removing insignificant trailing slashes.
+  const pathname = parsed.pathname.replace(/\/+$/, '');
+  return `${parsed.origin}${pathname}`;
 }
 
 // ── Shared broker coordination ──────────────────────────────────────────────
@@ -2817,12 +2824,28 @@ export class WorkflowRunner {
       const client = HarnessDriverClient.connect({ cwd: brokerCwd, connectionPath });
       await client.getStatus();
       if (expectedBaseUrl !== undefined) {
-        // Older harness-driver type declarations omit this field even though
-        // current brokers return it from /api/session.
-        const session = (await client.getSession()) as { relay_base_url?: string };
-        if (session.relay_base_url !== expectedBaseUrl) {
-          this.disconnectRelayClient(client);
-          return null;
+        // `relay_base_url` was added to the broker session after the pinned
+        // harness-driver release. Treat its absence as an older broker's
+        // missing capability; brokers that report an origin are checked
+        // strictly so a known mismatch is never reused.
+        const getSession = (client as { getSession?: () => Promise<unknown> }).getSession;
+        if (typeof getSession === 'function') {
+          const session = (await getSession.call(client)) as { relay_base_url?: unknown };
+          if (typeof session.relay_base_url === 'string' && session.relay_base_url.trim()) {
+            let reportedBaseUrl: string;
+            try {
+              reportedBaseUrl = resolveRelaycastBaseUrl({
+                RELAYCAST_BASE_URL: session.relay_base_url,
+              });
+            } catch {
+              this.disconnectRelayClient(client);
+              return null;
+            }
+            if (reportedBaseUrl !== expectedBaseUrl) {
+              this.disconnectRelayClient(client);
+              return null;
+            }
+          }
         }
       }
       return client;

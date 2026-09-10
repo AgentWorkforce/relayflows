@@ -619,6 +619,23 @@ agents:
       }
     });
 
+    it.each([
+      'https://engine.example.test?tenant=one',
+      'https://engine.example.test#fragment',
+    ])('fails closed when an explicit origin contains a query or fragment: %s', async (baseUrl) => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const localRunner = new WorkflowRunner({ db, relay: { env: { RELAYCAST_BASE_URL: baseUrl } } });
+
+      try {
+        await expect((localRunner as any).ensureRelaycastApiKey('wf-invalid')).rejects.toThrow(
+          'Relaycast base URL must not include a query or fragment'
+        );
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('does not reuse a shared broker whose reported origin differs from the runner origin', async () => {
       const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-reuse-'));
       const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
@@ -639,6 +656,64 @@ agents:
         await (localRunner as any).startOrReuseSharedBroker('run-mismatch', 'wf-mismatch', false);
         expect(mockRelayInstance.disconnect).toHaveBeenCalled();
         expect(mockHarnessDriverSpawn).toHaveBeenCalled();
+      } finally {
+        await localRunner.shutdownRelay().catch(() => undefined);
+        mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reuses a legacy shared broker when origin reporting is unavailable', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-legacy-'));
+      const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(
+        path.join(stateDir, 'connection.json'),
+        JSON.stringify({ url: 'http://127.0.0.1:3889', api_key: 'br_test', pid: process.pid }),
+        'utf-8'
+      );
+      mockRelayInstance.getSession.mockResolvedValue({});
+      const localRunner = new WorkflowRunner({
+        db,
+        cwd: tmpDir,
+        relay: { env: { RELAY_API_KEY: 'rk_live_test', RELAYCAST_BASE_URL: 'https://api.relaycast.dev' } },
+      });
+
+      try {
+        await (localRunner as any).startOrReuseSharedBroker('run-legacy', 'wf-legacy', false);
+        expect(mockRelayInstance.disconnect).not.toHaveBeenCalled();
+        expect(mockHarnessDriverSpawn).not.toHaveBeenCalled();
+        expect((localRunner as any).relay).toBe(mockRelayInstance);
+      } finally {
+        await localRunner.shutdownRelay().catch(() => undefined);
+        mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reuses a shared broker when reported origin differs only by casing, default port, and slash', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-canonical-'));
+      const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(
+        path.join(stateDir, 'connection.json'),
+        JSON.stringify({ url: 'http://127.0.0.1:3889', api_key: 'br_test', pid: process.pid }),
+        'utf-8'
+      );
+      mockRelayInstance.getSession.mockResolvedValue({
+        relay_base_url: 'https://API.RELAYCAST.DEV:443///',
+      });
+      const localRunner = new WorkflowRunner({
+        db,
+        cwd: tmpDir,
+        relay: { env: { RELAY_API_KEY: 'rk_live_test', RELAYCAST_BASE_URL: 'https://api.relaycast.dev' } },
+      });
+
+      try {
+        await (localRunner as any).startOrReuseSharedBroker('run-canonical', 'wf-canonical', false);
+        expect(mockRelayInstance.disconnect).not.toHaveBeenCalled();
+        expect(mockHarnessDriverSpawn).not.toHaveBeenCalled();
+        expect((localRunner as any).relay).toBe(mockRelayInstance);
       } finally {
         await localRunner.shutdownRelay().catch(() => undefined);
         mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });
