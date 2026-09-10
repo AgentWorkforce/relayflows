@@ -2849,18 +2849,22 @@ export class WorkflowRunner {
       // strictly so a known mismatch is never reused.
       const getSession = (client as { getSession?: () => Promise<unknown> }).getSession;
       if (typeof getSession === 'function') {
-        let session: { relay_base_url?: unknown };
+        let session: unknown;
         try {
-          session = (await getSession.call(client)) as { relay_base_url?: unknown };
+          session = await getSession.call(client);
         } catch {
           this.disconnectRelayClient(client);
           return null;
         }
-        if (session && typeof session.relay_base_url === 'string' && session.relay_base_url.trim()) {
+        const reportedRelayBaseUrl =
+          session && typeof session === 'object' && 'relay_base_url' in session
+            ? (session as { relay_base_url?: unknown }).relay_base_url
+            : undefined;
+        if (typeof reportedRelayBaseUrl === 'string' && reportedRelayBaseUrl.trim()) {
           let reportedBaseUrl: string;
           try {
             reportedBaseUrl = resolveRelaycastBaseUrl({
-              RELAYCAST_BASE_URL: session.relay_base_url,
+              RELAYCAST_BASE_URL: reportedRelayBaseUrl,
             });
           } catch {
             if (allowRetireMismatch) {

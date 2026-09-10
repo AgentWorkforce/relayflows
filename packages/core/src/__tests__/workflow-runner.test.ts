@@ -745,6 +745,35 @@ agents:
       }
     });
 
+    it('disconnects a shared broker when its session capability check fails', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-session-error-'));
+      const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(
+        path.join(stateDir, 'connection.json'),
+        JSON.stringify({ url: 'http://127.0.0.1:3889', api_key: 'br_test', pid: process.pid }),
+        'utf-8'
+      );
+      writeFileSync(path.join(stateDir, 'relayflows-owner.json'), JSON.stringify({ pid: process.pid }), 'utf-8');
+      mockRelayInstance.getSession.mockRejectedValue(new Error('session unavailable'));
+      const localRunner = new WorkflowRunner({
+        db,
+        cwd: tmpDir,
+        relay: { env: { RELAY_API_KEY: 'rk_live_test', RELAYCAST_BASE_URL: 'https://api.relaycast.dev' } },
+      });
+
+      try {
+        await (localRunner as any).startOrReuseSharedBroker('run-session-error', 'wf-session-error', false);
+        expect(mockRelayInstance.disconnect).toHaveBeenCalledTimes(2);
+        expect(mockRelayInstance.shutdown).not.toHaveBeenCalled();
+        expect(mockHarnessDriverSpawn).toHaveBeenCalled();
+      } finally {
+        await localRunner.shutdownRelay().catch(() => undefined);
+        mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it('reuses a legacy shared broker when origin reporting is unavailable', async () => {
       const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-legacy-'));
       const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
