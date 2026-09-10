@@ -5,7 +5,7 @@
  * with a mocked DB adapter and mocked AgentRelay.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   existsSync,
   mkdirSync,
@@ -497,6 +497,349 @@ agents:
   });
 
   // ── Execution ──────────────────────────────────────────────────────────
+
+  describe('Relaycast workspace provisioning resilience', () => {
+    // Regression for a real production failure: on 2026-09-10 a run died with
+    // `"status":"failed","error":"Service Unavailable","steps":0`. Workspace
+    // provisioning runs before step one, so a single 503 from Relaycast — which
+    // sheds load that way under database pressure — killed the whole run with an
+    // error that says nothing about the user's flow.
+    const okWorkspace = () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ data: { api_key: 'rk_live_test' } }),
+        text: async () => '',
+      }) as unknown as Response;
+    const unavailable = (retryAfter?: string) =>
+      ({
+        ok: false,
+        status: 503,
+        headers: { get: (h: string) => (h.toLowerCase() === 'retry-after' ? (retryAfter ?? null) : null) },
+        text: async () => 'database_overloaded',
+        json: async () => ({}),
+      }) as unknown as Response;
+
+    function runnerIn(prefix: string) {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), prefix));
+      return new WorkflowRunner({ db, cwd: tmpDir });
+    }
+
+    // This file has no global mock cleanup — the other fetch-spying tests each
+    // restore inside their own try/finally. Restore ONLY this block's fetch spy:
+    // `vi.restoreAllMocks()` is too broad here and tears down the module-level
+    // mocks (HarnessDriverClient.spawn and friends) that later describes rely on.
+    let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
+    const spyFetch = (impl: unknown) => {
+      fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(impl as never);
+      return fetchSpy;
+    };
+    afterEach(() => {
+      fetchSpy?.mockRestore();
+      fetchSpy = undefined;
+    });
+
+    it('retries a 503 and succeeds without failing the run', async () => {
+      let calls = 0;
+      spyFetch((async (url: string) => {
+        // Only /v1/workspaces is a provisioning attempt; the method also fires a
+        // best-effort dashboard key push that must not count.
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace();
+        calls += 1;
+        return calls < 3 ? unavailable() : okWorkspace();
+      }));
+      const r = runnerIn('relayflows-provision-retry-');
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-retry');
+
+      expect(calls).toBe(3);
+      expect((r as any).relayApiKey).toBe('rk_live_test');
+    });
+
+    it('retries a dropped connection, not just an HTTP status', async () => {
+      let calls = 0;
+      spyFetch((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace();
+        calls += 1;
+        if (calls === 1) throw new Error('fetch failed');
+        return okWorkspace();
+      }));
+      const r = runnerIn('relayflows-provision-network-');
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-network');
+
+      expect(calls).toBe(2);
+      expect((r as any).relayApiKey).toBe('rk_live_test');
+    });
+
+    it('does NOT retry a 4xx — that is the caller at fault', async () => {
+      let calls = 0;
+      spyFetch((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace();
+        calls += 1;
+        return {
+          ok: false,
+          status: 401,
+          headers: { get: () => null },
+          text: async () => 'unauthorized',
+        } as unknown as Response;
+      }));
+      const r = runnerIn('relayflows-provision-4xx-');
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await expect((r as any).ensureRelaycastApiKey('wf-4xx')).rejects.toThrow(/401/);
+      expect(calls).toBe(1);
+    });
+
+    it('honours Retry-After, capped so a large value cannot stall the run', async () => {
+      let calls = 0;
+      spyFetch((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace();
+        calls += 1;
+        return calls === 1 ? unavailable('3600') : okWorkspace();
+      }));
+      const r = runnerIn('relayflows-provision-retry-after-');
+      const delaySpy = vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-retry-after');
+
+      // 3600s would stall the run; the ceiling clamps it.
+      const waited = delaySpy.mock.calls.map(([ms]) => ms as number);
+      expect(Math.max(...waited)).toBeLessThanOrEqual(15_000);
+      expect(Math.max(...waited)).toBeGreaterThan(1_000);
+    });
+
+    it('gives up after a bounded number of attempts with an actionable message', async () => {
+      let calls = 0;
+      spyFetch((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace();
+        calls += 1;
+        return unavailable();
+      }));
+      const r = runnerIn('relayflows-provision-exhaust-');
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      // The message must tell the user this is upstream, not their flow.
+      await expect((r as any).ensureRelaycastApiKey('wf-exhaust')).rejects.toThrow(
+        /shedding load, not a problem with this flow/
+      );
+      expect(calls).toBe(4);
+    });
+  });
+
+  describe('workspace provisioning transport edge cases', () => {
+    // Both from Codex review on #60. Each is a transient failure that would
+    // still have killed a run before step one despite the retry loop.
+    let fetchSpy3: ReturnType<typeof vi.spyOn> | undefined;
+    afterEach(() => {
+      fetchSpy3?.mockRestore();
+      fetchSpy3 = undefined;
+    });
+
+    const okWorkspace3 = () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ data: { api_key: 'rk_live_test' } }),
+        text: async () => '',
+      }) as unknown as Response;
+
+    it('retries when the connection drops while reading the response body', async () => {
+      let calls = 0;
+      fetchSpy3 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace3();
+        calls += 1;
+        if (calls === 1) {
+          // `fetch` resolves on headers; the body transfer fails afterwards.
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => {
+              throw new Error('terminated: aborted');
+            },
+            text: async () => '',
+          } as unknown as Response;
+        }
+        return okWorkspace3();
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-body-drop-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-body-drop');
+
+      expect(calls).toBe(2);
+      expect((r as any).relayApiKey).toBe('rk_live_test');
+    });
+
+    it('does not reuse a previous response Retry-After after a later connection failure', async () => {
+      let calls = 0;
+      fetchSpy3 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace3();
+        calls += 1;
+        if (calls === 1) {
+          // 503 carrying a large Retry-After, clamped to the 15s ceiling.
+          return {
+            ok: false,
+            status: 503,
+            headers: { get: (h: string) => (h.toLowerCase() === 'retry-after' ? '3600' : null) },
+            text: async () => 'database_overloaded',
+          } as unknown as Response;
+        }
+        if (calls === 2) throw new Error('fetch failed');
+        return okWorkspace3();
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-stale-retry-after-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      const delaySpy = vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-stale-retry-after');
+
+      const waited = delaySpy.mock.calls.map(([ms]) => ms as number);
+      expect(waited).toHaveLength(2);
+      // First wait honours the (clamped) header from that attempt's own response.
+      expect(waited[0]).toBe(15_000);
+      // The second attempt is a network rejection with NO response, so it must
+      // fall back to linear backoff rather than reusing the stale 503 header.
+      expect(waited[1]).toBe(2_000);
+      expect((r as any).relayApiKey).toBe('rk_live_test');
+    });
+  });
+
+  describe('provisioning retries are cancellation-aware', () => {
+    let fetchSpy4: ReturnType<typeof vi.spyOn> | undefined;
+    afterEach(() => {
+      fetchSpy4?.mockRestore();
+      fetchSpy4 = undefined;
+    });
+
+    it('does not start another provisioning request after an abort during the delay', async () => {
+      let calls = 0;
+      fetchSpy4 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) {
+          return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '' } as unknown as Response;
+        }
+        calls += 1;
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: (h: string) => (h.toLowerCase() === 'retry-after' ? '3600' : null) },
+          text: async () => 'database_overloaded',
+        } as unknown as Response;
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-abort-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      (r as any).abortController = new AbortController();
+      // Abort while the first backoff is in flight.
+      vi.spyOn(r as any, 'abortableDelay').mockImplementation(async () => {
+        (r as any).abortController.abort();
+      });
+
+      await expect((r as any).ensureRelaycastApiKey('wf-abort')).rejects.toThrow(/aborted/i);
+      // One attempt made, none after the abort — without the check this would
+      // keep retrying for tens of seconds against a cancelled run.
+      expect(calls).toBe(1);
+    });
+  });
+
+  describe('setup-stage attribution and broker startup retry', () => {
+    // The 2026-09-10 failure recorded a bare `Service Unavailable` with zero
+    // steps. Three calls run before step one — workspace provisioning, observer
+    // minting, broker startup — and any can produce that message, so the failing
+    // call had to be guessed. These pin that it no longer has to be.
+    let fetchSpy2: ReturnType<typeof vi.spyOn> | undefined;
+    afterEach(() => {
+      fetchSpy2?.mockRestore();
+      fetchSpy2 = undefined;
+    });
+
+    const okWorkspace2 = () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ data: { api_key: 'rk_live_test' } }),
+        text: async () => '',
+      }) as unknown as Response;
+
+    it('tags a workspace provisioning failure with its stage', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace2();
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: () => null },
+          text: async () => 'database_overloaded',
+        } as unknown as Response;
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-stage-ws-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await expect((r as any).ensureRelaycastApiKey('wf-stage')).rejects.toThrow(
+        /\[setup:workspace-provisioning\]/
+      );
+    });
+
+    it('retries a transient broker startup failure instead of failing the run', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => okWorkspace2()) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-broker-retry-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      let attempts = 0;
+      mockHarnessDriverSpawn.mockImplementation(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('Service Unavailable');
+        return mockRelayInstance;
+      });
+
+      await (r as any).startOrReuseSharedBroker('run-broker-retry', 'wf-broker-retry', false);
+
+      expect(attempts).toBe(2);
+    });
+
+    it('tags an exhausted broker startup failure with its stage', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => okWorkspace2()) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-broker-exhaust-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      mockHarnessDriverSpawn.mockImplementation(async () => {
+        throw new Error('Service Unavailable');
+      });
+
+      // The stage tag is the whole point: this is what tells the next person
+      // WHICH pre-step call failed instead of leaving them to infer it.
+      await expect(
+        (r as any).startOrReuseSharedBroker('run-broker-exhaust', 'wf-broker-exhaust', false)
+      ).rejects.toThrow(/\[setup:broker-startup\]/);
+    });
+
+    it('does not retry a broker misconfiguration', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => okWorkspace2()) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-broker-config-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      let attempts = 0;
+      mockHarnessDriverSpawn.mockImplementation(async () => {
+        attempts += 1;
+        throw new Error('binary not found: agent-relay-broker');
+      });
+
+      await expect(
+        (r as any).startOrReuseSharedBroker('run-broker-config', 'wf-broker-config', false)
+      ).rejects.toThrow(/binary not found/);
+      // A misconfiguration fails identically every time; retrying only delays it.
+      expect(attempts).toBe(1);
+    });
+  });
 
   describe('Relaycast base URL consistency', () => {
     it('uses the default origin for workspace creation, observer minting, broker, and child env', async () => {

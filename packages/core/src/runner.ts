@@ -673,6 +673,41 @@ const BROKER_OPERATION_MAX_ATTEMPTS = 3;
 const BROKER_OPERATION_RETRY_DELAY_MS = 1_000;
 const AGENT_TRANSIENT_NETWORK_MAX_ATTEMPTS = 3;
 const AGENT_TRANSIENT_NETWORK_RETRY_DELAY_MS = 1_000;
+/**
+ * Workspace provisioning runs BEFORE step one, so a single transient failure
+ * there kills the whole run with zero steps executed and an error that says
+ * nothing about the user's flow ("Service Unavailable"). Relaycast sheds load
+ * with 503 under database pressure, which is exactly the shape worth retrying.
+ */
+const WORKSPACE_PROVISION_MAX_ATTEMPTS = 4;
+const WORKSPACE_PROVISION_RETRY_DELAY_MS = 1_000;
+const WORKSPACE_PROVISION_MAX_RETRY_AFTER_MS = 15_000;
+/**
+ * Broker startup also registers with Relaycast, so it fails the same way and
+ * for the same reason as workspace provisioning — before step one, taking the
+ * whole run with it.
+ */
+const BROKER_SPAWN_MAX_ATTEMPTS = 3;
+const BROKER_SPAWN_RETRY_DELAY_MS = 2_000;
+
+/**
+ * Names the setup call that failed, so a pre-step-one failure is diagnosable
+ * from the run record alone.
+ *
+ * A bare `Service Unavailable` in a failed run is unattributable: three
+ * separate calls happen before the first step (workspace provisioning, observer
+ * minting, broker startup) and any of them can produce it. On 2026-09-10 that
+ * ambiguity meant the failing call had to be GUESSED from a run record, which
+ * is a poor basis for choosing what to fix.
+ */
+export function describeSetupFailure(stage: string, error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const tagged = new Error(`[setup:${stage}] ${message}`);
+  if (error instanceof Error && error.stack) tagged.stack = error.stack;
+  (tagged as { cause?: unknown }).cause = error;
+  (tagged as { setupStage?: string }).setupStage = stage;
+  return tagged;
+}
 
 /**
  * The one Relayfile base URL default.
@@ -2392,6 +2427,23 @@ export class WorkflowRunner {
     this.wireRelayClient(context.runId);
   }
 
+  /**
+   * Parse a Retry-After header. Supports both forms in RFC 9110: delay-seconds
+   * and an HTTP-date. Returns undefined when absent or unparseable, and clamps
+   * to a ceiling so a hostile or mistaken value cannot stall a run.
+   */
+  private parseRetryAfterMs(header: string | null | undefined): number | undefined {
+    if (!header) return undefined;
+    const trimmed = header.trim();
+    if (!trimmed) return undefined;
+    const seconds = Number(trimmed);
+    const ms = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Date.parse(trimmed) - Date.now();
+    if (!Number.isFinite(ms) || ms <= 0) return undefined;
+    return Math.min(ms, WORKSPACE_PROVISION_MAX_RETRY_AFTER_MS);
+  }
+
   private isRetryableProtocolError(error: unknown): boolean {
     const candidate = error as { retryable?: unknown; status?: unknown; message?: unknown } | undefined;
     if (candidate?.retryable === true) return true;
@@ -2491,17 +2543,87 @@ export class WorkflowRunner {
     // Always create a fresh workspace — each run gets full isolation.
     const workspaceName = `relay-${channel}-${randomBytes(4).toString('hex')}`;
     const baseUrl = this.getRelaycastBaseUrl();
-    const res = await fetch(`${baseUrl}/v1/workspaces`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: workspaceName }),
-    });
 
-    if (!res.ok) {
-      throw new Error(`Failed to auto-create Relaycast workspace: ${res.status} ${await res.text()}`);
+    // Retry transient upstream failures. This call happens before any step
+    // runs, so giving up here fails the run with zero steps and an opaque
+    // message. A 5xx or a dropped connection is the service shedding load, not
+    // a problem with the flow; a 4xx is the caller's fault and must not retry.
+    //
+    // The BODY READ is inside the attempt on purpose. `fetch` resolves as soon
+    // as headers arrive, so a connection that drops mid-body rejects at
+    // `res.json()` — after the loop, if parsing sits outside it — and that
+    // transient failure would kill the run exactly like an unretried 503.
+    let parsed: Record<string, any> | undefined;
+    let failure: { kind: 'network'; error: unknown } | { kind: 'http'; status: number; detail: string } | undefined;
+    for (let attempt = 1; attempt <= WORKSPACE_PROVISION_MAX_ATTEMPTS; attempt++) {
+      // Both must be cleared per attempt. Leaving a previous response in scope
+      // makes a later network rejection read the OLD response's `Retry-After`,
+      // so a stale 3600s header would stall every subsequent retry instead of
+      // applying the intended linear backoff.
+      let res: Response | undefined;
+      failure = undefined;
+      try {
+        res = await fetch(`${baseUrl}/v1/workspaces`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: workspaceName }),
+          ...(this.abortController ? { signal: this.abortController.signal } : {}),
+        });
+        if (res.ok) {
+          parsed = (await res.json()) as Record<string, any>;
+        } else {
+          failure = { kind: 'http', status: res.status, detail: await res.text() };
+        }
+      } catch (error) {
+        failure = { kind: 'network', error };
+      }
+
+      if (!failure) break;
+      const retryable = failure.kind === 'network' || failure.status >= 500;
+      if (!retryable || attempt >= WORKSPACE_PROVISION_MAX_ATTEMPTS) break;
+
+      // Honour Retry-After only from THIS attempt's response, capped so a large
+      // or malformed value cannot stall the run indefinitely.
+      const retryAfterMs =
+        failure.kind === 'http' ? this.parseRetryAfterMs(res?.headers?.get('retry-after')) : undefined;
+      const backoffMs = WORKSPACE_PROVISION_RETRY_DELAY_MS * attempt;
+      const reason = failure.kind === 'network' ? 'network error' : `HTTP ${failure.status}`;
+      this.log(
+        `Relaycast workspace provisioning failed (${reason}); retrying ${attempt}/${WORKSPACE_PROVISION_MAX_ATTEMPTS - 1}...`
+      );
+      await this.abortableDelay(Math.max(retryAfterMs ?? 0, backoffMs));
+      // An abort during the delay must not start another provisioning request.
+      this.checkAborted();
     }
 
-    const body = (await res.json()) as Record<string, any>;
+    if (failure?.kind === 'network') {
+      const message =
+        failure.error instanceof Error ? failure.error.message : String(failure.error);
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error(
+          `Failed to reach Relaycast to create a workspace after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts: ${message}`
+        )
+      );
+    }
+    if (failure?.kind === 'http') {
+      const suffix =
+        failure.status >= 500
+          ? ` (still failing after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts; Relaycast is shedding load, not a problem with this flow)`
+          : '';
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error(`Failed to auto-create Relaycast workspace: ${failure.status} ${failure.detail}${suffix}`)
+      );
+    }
+    if (!parsed) {
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error('Failed to auto-create Relaycast workspace: no response')
+      );
+    }
+
+    const body = parsed;
     const data = (body.data ?? body) as Record<string, any>;
     const apiKey = data.api_key as string;
 
@@ -3099,7 +3221,10 @@ export class WorkflowRunner {
           ? { RELAYCAST_BASE_URL: expectedBaseUrl, RELAY_BASE_URL: expectedBaseUrl }
           : {}),
       };
-      this.relay = await HarnessDriverClient.spawn({
+      // Broker startup registers with Relaycast, so it sheds load the same way
+      // workspace provisioning does — and it runs before step one, so an
+      // unretried blip fails the whole run with zero steps executed.
+      const spawnBroker = () => HarnessDriverClient.spawn({
         ...this.relayOptions,
         cwd: brokerCwd,
         brokerName,
@@ -3123,6 +3248,30 @@ export class WorkflowRunner {
           console.log(`${chalk.dim.yellow('[broker]')} ${line}`);
         },
       });
+
+      let spawnError: unknown;
+      for (let attempt = 1; attempt <= BROKER_SPAWN_MAX_ATTEMPTS; attempt++) {
+        try {
+          this.relay = await spawnBroker();
+          spawnError = undefined;
+          break;
+        } catch (error) {
+          spawnError = error;
+          // Only transient protocol/network failures are worth another go; a
+          // misconfiguration fails identically every time and retrying it just
+          // delays a real error behind a longer wait.
+          if (!this.isRetryableProtocolError(error) || attempt >= BROKER_SPAWN_MAX_ATTEMPTS) break;
+          this.log(
+            `Broker startup failed (${error instanceof Error ? error.message : String(error)}); retrying ${attempt}/${BROKER_SPAWN_MAX_ATTEMPTS - 1}...`
+          );
+          await this.abortableDelay(BROKER_SPAWN_RETRY_DELAY_MS * attempt);
+          this.checkAborted();
+        }
+      }
+      if (spawnError !== undefined) {
+        throw describeSetupFailure('broker-startup', spawnError);
+      }
+
       lease.startedBroker = true;
       this.writeSharedBrokerOwner(lease);
     } finally {
@@ -11998,6 +12147,28 @@ export class WorkflowRunner {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * A delay that gives up as soon as the run is aborted.
+   *
+   * Retry backoff must not outlive a cancellation: with a clamped 15s
+   * `Retry-After` plus linear backoff, a plain `delay` would keep an aborted run
+   * sleeping for tens of seconds and then issue another request.
+   */
+  private abortableDelay(ms: number): Promise<void> {
+    const signal = this.abortController?.signal;
+    if (!signal) return this.delay(ms);
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener('abort', done, { once: true });
+    });
   }
 
   // ── Channel messaging ──────────────────────────────────────────────────
