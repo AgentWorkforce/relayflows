@@ -682,6 +682,32 @@ const AGENT_TRANSIENT_NETWORK_RETRY_DELAY_MS = 1_000;
 const WORKSPACE_PROVISION_MAX_ATTEMPTS = 4;
 const WORKSPACE_PROVISION_RETRY_DELAY_MS = 1_000;
 const WORKSPACE_PROVISION_MAX_RETRY_AFTER_MS = 15_000;
+/**
+ * Broker startup also registers with Relaycast, so it fails the same way and
+ * for the same reason as workspace provisioning — before step one, taking the
+ * whole run with it.
+ */
+const BROKER_SPAWN_MAX_ATTEMPTS = 3;
+const BROKER_SPAWN_RETRY_DELAY_MS = 2_000;
+
+/**
+ * Names the setup call that failed, so a pre-step-one failure is diagnosable
+ * from the run record alone.
+ *
+ * A bare `Service Unavailable` in a failed run is unattributable: three
+ * separate calls happen before the first step (workspace provisioning, observer
+ * minting, broker startup) and any of them can produce it. On 2026-09-10 that
+ * ambiguity meant the failing call had to be GUESSED from a run record, which
+ * is a poor basis for choosing what to fix.
+ */
+export function describeSetupFailure(stage: string, error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const tagged = new Error(`[setup:${stage}] ${message}`);
+  if (error instanceof Error && error.stack) tagged.stack = error.stack;
+  (tagged as { cause?: unknown }).cause = error;
+  (tagged as { setupStage?: string }).setupStage = stage;
+  return tagged;
+}
 
 /**
  * The one Relayfile base URL default.
@@ -2555,12 +2581,18 @@ export class WorkflowRunner {
     if (lastNetworkError !== undefined) {
       const message =
         lastNetworkError instanceof Error ? lastNetworkError.message : String(lastNetworkError);
-      throw new Error(
-        `Failed to reach Relaycast to create a workspace after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts: ${message}`
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error(
+          `Failed to reach Relaycast to create a workspace after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts: ${message}`
+        )
       );
     }
     if (!res) {
-      throw new Error('Failed to auto-create Relaycast workspace: no response');
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error('Failed to auto-create Relaycast workspace: no response')
+      );
     }
     if (!res.ok) {
       const detail = await res.text();
@@ -2568,8 +2600,9 @@ export class WorkflowRunner {
         res.status >= 500
           ? ` (still failing after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts; Relaycast is shedding load, not a problem with this flow)`
           : '';
-      throw new Error(
-        `Failed to auto-create Relaycast workspace: ${res.status} ${detail}${suffix}`
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error(`Failed to auto-create Relaycast workspace: ${res.status} ${detail}${suffix}`)
       );
     }
 
@@ -3171,7 +3204,10 @@ export class WorkflowRunner {
           ? { RELAYCAST_BASE_URL: expectedBaseUrl, RELAY_BASE_URL: expectedBaseUrl }
           : {}),
       };
-      this.relay = await HarnessDriverClient.spawn({
+      // Broker startup registers with Relaycast, so it sheds load the same way
+      // workspace provisioning does — and it runs before step one, so an
+      // unretried blip fails the whole run with zero steps executed.
+      const spawnBroker = () => HarnessDriverClient.spawn({
         ...this.relayOptions,
         cwd: brokerCwd,
         brokerName,
@@ -3195,6 +3231,29 @@ export class WorkflowRunner {
           console.log(`${chalk.dim.yellow('[broker]')} ${line}`);
         },
       });
+
+      let spawnError: unknown;
+      for (let attempt = 1; attempt <= BROKER_SPAWN_MAX_ATTEMPTS; attempt++) {
+        try {
+          this.relay = await spawnBroker();
+          spawnError = undefined;
+          break;
+        } catch (error) {
+          spawnError = error;
+          // Only transient protocol/network failures are worth another go; a
+          // misconfiguration fails identically every time and retrying it just
+          // delays a real error behind a longer wait.
+          if (!this.isRetryableProtocolError(error) || attempt >= BROKER_SPAWN_MAX_ATTEMPTS) break;
+          this.log(
+            `Broker startup failed (${error instanceof Error ? error.message : String(error)}); retrying ${attempt}/${BROKER_SPAWN_MAX_ATTEMPTS - 1}...`
+          );
+          await this.delay(BROKER_SPAWN_RETRY_DELAY_MS * attempt);
+        }
+      }
+      if (spawnError !== undefined) {
+        throw describeSetupFailure('broker-startup', spawnError);
+      }
+
       lease.startedBroker = true;
       this.writeSharedBrokerOwner(lease);
     } finally {

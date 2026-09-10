@@ -630,6 +630,100 @@ agents:
     });
   });
 
+  describe('setup-stage attribution and broker startup retry', () => {
+    // The 2026-09-10 failure recorded a bare `Service Unavailable` with zero
+    // steps. Three calls run before step one — workspace provisioning, observer
+    // minting, broker startup — and any can produce that message, so the failing
+    // call had to be guessed. These pin that it no longer has to be.
+    let fetchSpy2: ReturnType<typeof vi.spyOn> | undefined;
+    afterEach(() => {
+      fetchSpy2?.mockRestore();
+      fetchSpy2 = undefined;
+    });
+
+    const okWorkspace2 = () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ data: { api_key: 'rk_live_test' } }),
+        text: async () => '',
+      }) as unknown as Response;
+
+    it('tags a workspace provisioning failure with its stage', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace2();
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: () => null },
+          text: async () => 'database_overloaded',
+        } as unknown as Response;
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-stage-ws-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await expect((r as any).ensureRelaycastApiKey('wf-stage')).rejects.toThrow(
+        /\[setup:workspace-provisioning\]/
+      );
+    });
+
+    it('retries a transient broker startup failure instead of failing the run', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => okWorkspace2()) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-broker-retry-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      let attempts = 0;
+      mockHarnessDriverSpawn.mockImplementation(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('Service Unavailable');
+        return mockRelayInstance;
+      });
+
+      await (r as any).startOrReuseSharedBroker('run-broker-retry', 'wf-broker-retry', false);
+
+      expect(attempts).toBe(2);
+    });
+
+    it('tags an exhausted broker startup failure with its stage', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => okWorkspace2()) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-broker-exhaust-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      mockHarnessDriverSpawn.mockImplementation(async () => {
+        throw new Error('Service Unavailable');
+      });
+
+      // The stage tag is the whole point: this is what tells the next person
+      // WHICH pre-step call failed instead of leaving them to infer it.
+      await expect(
+        (r as any).startOrReuseSharedBroker('run-broker-exhaust', 'wf-broker-exhaust', false)
+      ).rejects.toThrow(/\[setup:broker-startup\]/);
+    });
+
+    it('does not retry a broker misconfiguration', async () => {
+      fetchSpy2 = vi.spyOn(globalThis, 'fetch').mockImplementation((async () => okWorkspace2()) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-broker-config-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      let attempts = 0;
+      mockHarnessDriverSpawn.mockImplementation(async () => {
+        attempts += 1;
+        throw new Error('binary not found: agent-relay-broker');
+      });
+
+      await expect(
+        (r as any).startOrReuseSharedBroker('run-broker-config', 'wf-broker-config', false)
+      ).rejects.toThrow(/binary not found/);
+      // A misconfiguration fails identically every time; retrying only delays it.
+      expect(attempts).toBe(1);
+    });
+  });
+
   describe('Relaycast base URL consistency', () => {
     it('uses the default origin for workspace creation, observer minting, broker, and child env', async () => {
       const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-'));
