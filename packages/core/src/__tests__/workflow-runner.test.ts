@@ -630,6 +630,87 @@ agents:
     });
   });
 
+  describe('workspace provisioning transport edge cases', () => {
+    // Both from Codex review on #60. Each is a transient failure that would
+    // still have killed a run before step one despite the retry loop.
+    let fetchSpy3: ReturnType<typeof vi.spyOn> | undefined;
+    afterEach(() => {
+      fetchSpy3?.mockRestore();
+      fetchSpy3 = undefined;
+    });
+
+    const okWorkspace3 = () =>
+      ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ data: { api_key: 'rk_live_test' } }),
+        text: async () => '',
+      }) as unknown as Response;
+
+    it('retries when the connection drops while reading the response body', async () => {
+      let calls = 0;
+      fetchSpy3 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace3();
+        calls += 1;
+        if (calls === 1) {
+          // `fetch` resolves on headers; the body transfer fails afterwards.
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            json: async () => {
+              throw new Error('terminated: aborted');
+            },
+            text: async () => '',
+          } as unknown as Response;
+        }
+        return okWorkspace3();
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-body-drop-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-body-drop');
+
+      expect(calls).toBe(2);
+      expect((r as any).relayApiKey).toBe('rk_live_test');
+    });
+
+    it('does not reuse a previous response Retry-After after a later connection failure', async () => {
+      let calls = 0;
+      fetchSpy3 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) return okWorkspace3();
+        calls += 1;
+        if (calls === 1) {
+          // 503 carrying a large Retry-After, clamped to the 15s ceiling.
+          return {
+            ok: false,
+            status: 503,
+            headers: { get: (h: string) => (h.toLowerCase() === 'retry-after' ? '3600' : null) },
+            text: async () => 'database_overloaded',
+          } as unknown as Response;
+        }
+        if (calls === 2) throw new Error('fetch failed');
+        return okWorkspace3();
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-stale-retry-after-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      const delaySpy = vi.spyOn(r as any, 'delay').mockResolvedValue(undefined);
+
+      await (r as any).ensureRelaycastApiKey('wf-stale-retry-after');
+
+      const waited = delaySpy.mock.calls.map(([ms]) => ms as number);
+      expect(waited).toHaveLength(2);
+      // First wait honours the (clamped) header from that attempt's own response.
+      expect(waited[0]).toBe(15_000);
+      // The second attempt is a network rejection with NO response, so it must
+      // fall back to linear backoff rather than reusing the stale 503 header.
+      expect(waited[1]).toBe(2_000);
+      expect((r as any).relayApiKey).toBe('rk_live_test');
+    });
+  });
+
   describe('setup-stage attribution and broker startup retry', () => {
     // The 2026-09-10 failure recorded a bare `Service Unavailable` with zero
     // steps. Three calls run before step one — workspace provisioning, observer

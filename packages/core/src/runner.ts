@@ -2548,39 +2548,54 @@ export class WorkflowRunner {
     // runs, so giving up here fails the run with zero steps and an opaque
     // message. A 5xx or a dropped connection is the service shedding load, not
     // a problem with the flow; a 4xx is the caller's fault and must not retry.
-    let res: Response | undefined;
-    let lastNetworkError: unknown;
+    //
+    // The BODY READ is inside the attempt on purpose. `fetch` resolves as soon
+    // as headers arrive, so a connection that drops mid-body rejects at
+    // `res.json()` — after the loop, if parsing sits outside it — and that
+    // transient failure would kill the run exactly like an unretried 503.
+    let parsed: Record<string, any> | undefined;
+    let failure: { kind: 'network'; error: unknown } | { kind: 'http'; status: number; detail: string } | undefined;
     for (let attempt = 1; attempt <= WORKSPACE_PROVISION_MAX_ATTEMPTS; attempt++) {
-      lastNetworkError = undefined;
+      // Both must be cleared per attempt. Leaving a previous response in scope
+      // makes a later network rejection read the OLD response's `Retry-After`,
+      // so a stale 3600s header would stall every subsequent retry instead of
+      // applying the intended linear backoff.
+      let res: Response | undefined;
+      failure = undefined;
       try {
         res = await fetch(`${baseUrl}/v1/workspaces`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ name: workspaceName }),
         });
+        if (res.ok) {
+          parsed = (await res.json()) as Record<string, any>;
+        } else {
+          failure = { kind: 'http', status: res.status, detail: await res.text() };
+        }
       } catch (error) {
-        lastNetworkError = error;
+        failure = { kind: 'network', error };
       }
 
-      const retryable =
-        lastNetworkError !== undefined || (res !== undefined && res.status >= 500);
-      if (!retryable) break;
-      if (attempt >= WORKSPACE_PROVISION_MAX_ATTEMPTS) break;
+      if (!failure) break;
+      const retryable = failure.kind === 'network' || failure.status >= 500;
+      if (!retryable || attempt >= WORKSPACE_PROVISION_MAX_ATTEMPTS) break;
 
-      // Honour Retry-After when the service tells us how long to wait, capped so
-      // a large or malformed value cannot stall the run indefinitely.
-      const retryAfterMs = this.parseRetryAfterMs(res?.headers?.get('retry-after'));
+      // Honour Retry-After only from THIS attempt's response, capped so a large
+      // or malformed value cannot stall the run indefinitely.
+      const retryAfterMs =
+        failure.kind === 'http' ? this.parseRetryAfterMs(res?.headers?.get('retry-after')) : undefined;
       const backoffMs = WORKSPACE_PROVISION_RETRY_DELAY_MS * attempt;
-      const reason = lastNetworkError !== undefined ? 'network error' : `HTTP ${res?.status}`;
+      const reason = failure.kind === 'network' ? 'network error' : `HTTP ${failure.status}`;
       this.log(
         `Relaycast workspace provisioning failed (${reason}); retrying ${attempt}/${WORKSPACE_PROVISION_MAX_ATTEMPTS - 1}...`
       );
       await this.delay(Math.max(retryAfterMs ?? 0, backoffMs));
     }
 
-    if (lastNetworkError !== undefined) {
+    if (failure?.kind === 'network') {
       const message =
-        lastNetworkError instanceof Error ? lastNetworkError.message : String(lastNetworkError);
+        failure.error instanceof Error ? failure.error.message : String(failure.error);
       throw describeSetupFailure(
         'workspace-provisioning',
         new Error(
@@ -2588,25 +2603,24 @@ export class WorkflowRunner {
         )
       );
     }
-    if (!res) {
+    if (failure?.kind === 'http') {
+      const suffix =
+        failure.status >= 500
+          ? ` (still failing after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts; Relaycast is shedding load, not a problem with this flow)`
+          : '';
+      throw describeSetupFailure(
+        'workspace-provisioning',
+        new Error(`Failed to auto-create Relaycast workspace: ${failure.status} ${failure.detail}${suffix}`)
+      );
+    }
+    if (!parsed) {
       throw describeSetupFailure(
         'workspace-provisioning',
         new Error('Failed to auto-create Relaycast workspace: no response')
       );
     }
-    if (!res.ok) {
-      const detail = await res.text();
-      const suffix =
-        res.status >= 500
-          ? ` (still failing after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts; Relaycast is shedding load, not a problem with this flow)`
-          : '';
-      throw describeSetupFailure(
-        'workspace-provisioning',
-        new Error(`Failed to auto-create Relaycast workspace: ${res.status} ${detail}${suffix}`)
-      );
-    }
 
-    const body = (await res.json()) as Record<string, any>;
+    const body = parsed;
     const data = (body.data ?? body) as Record<string, any>;
     const apiKey = data.api_key as string;
 
