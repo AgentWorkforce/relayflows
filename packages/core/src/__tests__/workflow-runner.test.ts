@@ -602,6 +602,21 @@ agents:
       }
     });
 
+    it('prioritizes runner-level aliases over process-level aliases', () => {
+      vi.stubEnv('RELAYCAST_BASE_URL', 'https://process-canonical.example.test');
+      vi.stubEnv('RELAY_BASE_URL', 'https://process-legacy.example.test');
+      const localRunner = new WorkflowRunner({
+        db,
+        relay: { env: { RELAY_BASE_URL: 'https://runner-legacy.example.test' } },
+      });
+
+      try {
+        expect((localRunner as any).getRelaycastBaseUrl()).toBe('https://runner-legacy.example.test');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('fails closed on an invalid explicit origin before creating a workspace', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
       const localRunner = new WorkflowRunner({
@@ -612,6 +627,28 @@ agents:
       try {
         await expect((localRunner as any).ensureRelaycastApiKey('wf-invalid')).rejects.toThrow(
           'Relaycast base URL must use http or https'
+        );
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('allows loopback HTTP for local Relaycast engines but rejects remote HTTP', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const localRunner = new WorkflowRunner({
+        db,
+        relay: { env: { RELAYCAST_BASE_URL: 'http://localhost:4000///' } },
+      });
+      const remoteRunner = new WorkflowRunner({
+        db,
+        relay: { env: { RELAYCAST_BASE_URL: 'http://engine.example.test' } },
+      });
+
+      try {
+        expect((localRunner as any).getRelaycastBaseUrl()).toBe('http://localhost:4000');
+        await expect((remoteRunner as any).ensureRelaycastApiKey('wf-http')).rejects.toThrow(
+          'Relaycast base URL must use https except for loopback hosts'
         );
         expect(fetchSpy).not.toHaveBeenCalled();
       } finally {
@@ -645,6 +682,11 @@ agents:
         JSON.stringify({ url: 'http://127.0.0.1:3889', api_key: 'br_test', pid: process.pid }),
         'utf-8'
       );
+      writeFileSync(
+        path.join(stateDir, 'relayflows-owner.json'),
+        JSON.stringify({ pid: process.pid }),
+        'utf-8'
+      );
       mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://cast.agentrelay.com' });
       const localRunner = new WorkflowRunner({
         db,
@@ -654,8 +696,48 @@ agents:
 
       try {
         await (localRunner as any).startOrReuseSharedBroker('run-mismatch', 'wf-mismatch', false);
-        expect(mockRelayInstance.disconnect).toHaveBeenCalled();
+        expect(mockRelayInstance.shutdown).toHaveBeenCalled();
+        // The unlocked probe disconnects its transport; the locked probe then
+        // owns and shuts down the incompatible broker before replacement.
+        expect(mockRelayInstance.disconnect).toHaveBeenCalledTimes(1);
         expect(mockHarnessDriverSpawn).toHaveBeenCalled();
+      } finally {
+        await localRunner.shutdownRelay().catch(() => undefined);
+        mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails closed without replacing a mismatched broker used by another workflow', async () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-base-url-conflict-'));
+      const stateDir = path.join(tmpDir, '.agentworkforce', 'relay');
+      const leaseDir = path.join(stateDir, 'relayflows-runs');
+      mkdirSync(leaseDir, { recursive: true });
+      writeFileSync(
+        path.join(stateDir, 'connection.json'),
+        JSON.stringify({ url: 'http://127.0.0.1:3889', api_key: 'br_test', pid: process.pid }),
+        'utf-8'
+      );
+      writeFileSync(path.join(stateDir, 'relayflows-owner.json'), JSON.stringify({ pid: process.pid }), 'utf-8');
+      writeFileSync(
+        path.join(leaseDir, 'other-workflow.json'),
+        JSON.stringify({ pid: process.pid }),
+        'utf-8'
+      );
+      mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://cast.agentrelay.com' });
+      const localRunner = new WorkflowRunner({
+        db,
+        cwd: tmpDir,
+        relay: { env: { RELAY_API_KEY: 'rk_live_test', RELAYCAST_BASE_URL: 'https://api.relaycast.dev' } },
+      });
+
+      try {
+        await expect(
+          (localRunner as any).startOrReuseSharedBroker('run-conflict', 'wf-conflict', false)
+        ).rejects.toThrow('Cannot replace shared broker');
+        expect(mockRelayInstance.disconnect).toHaveBeenCalled();
+        expect(mockRelayInstance.shutdown).not.toHaveBeenCalled();
+        expect(mockHarnessDriverSpawn).not.toHaveBeenCalled();
       } finally {
         await localRunner.shutdownRelay().catch(() => undefined);
         mockRelayInstance.getSession.mockResolvedValue({ relay_base_url: 'https://api.relaycast.dev' });

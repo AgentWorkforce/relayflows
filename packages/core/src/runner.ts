@@ -252,10 +252,15 @@ function filteredEnv(extra?: Record<string, string | undefined>): Record<string,
  * wrong engine. Empty values retain the broker's "unset" semantics; malformed
  * non-empty values fail before credentials are sent anywhere.
  */
-function resolveRelaycastBaseUrl(env: Record<string, string | undefined>): string {
+function resolveRelaycastBaseUrl(
+  optionEnv: Record<string, string | undefined>,
+  processEnv: Record<string, string | undefined> = {}
+): string {
   const configured = [
-    env.RELAYCAST_BASE_URL,
-    env.RELAY_BASE_URL,
+    optionEnv.RELAYCAST_BASE_URL,
+    optionEnv.RELAY_BASE_URL,
+    processEnv.RELAYCAST_BASE_URL,
+    processEnv.RELAY_BASE_URL,
   ]
     .map((value) => value?.trim())
     .find((value): value is string => Boolean(value));
@@ -272,6 +277,14 @@ function resolveRelaycastBaseUrl(env: Record<string, string | undefined>): strin
   }
   if (!parsed.hostname) {
     throw new Error(`Relaycast base URL must include a hostname: ${value}`);
+  }
+  const isLoopbackHost =
+    parsed.hostname === 'localhost' ||
+    parsed.hostname === '127.0.0.1' ||
+    parsed.hostname === '[::1]' ||
+    parsed.hostname.endsWith('.localhost');
+  if (parsed.protocol === 'http:' && !isLoopbackHost) {
+    throw new Error(`Relaycast base URL must use https except for loopback hosts: ${value}`);
   }
   if (parsed.search || parsed.hash) {
     throw new Error(`Relaycast base URL must not include a query or fragment: ${value}`);
@@ -2808,7 +2821,8 @@ export class WorkflowRunner {
   private async tryConnectSharedBroker(
     connectionPath: string,
     brokerCwd: string,
-    expectedBaseUrl?: string
+    expectedBaseUrl?: string,
+    allowRetireMismatch = false
   ): Promise<HarnessDriverClient | null> {
     const conn = readBrokerConnectionFile(connectionPath);
     if (!conn) {
@@ -2820,38 +2834,80 @@ export class WorkflowRunner {
       return null;
     }
 
+    let client: HarnessDriverClient;
     try {
-      const client = HarnessDriverClient.connect({ cwd: brokerCwd, connectionPath });
+      client = HarnessDriverClient.connect({ cwd: brokerCwd, connectionPath });
       await client.getStatus();
-      if (expectedBaseUrl !== undefined) {
-        // `relay_base_url` was added to the broker session after the pinned
-        // harness-driver release. Treat its absence as an older broker's
-        // missing capability; brokers that report an origin are checked
-        // strictly so a known mismatch is never reused.
-        const getSession = (client as { getSession?: () => Promise<unknown> }).getSession;
-        if (typeof getSession === 'function') {
-          const session = (await getSession.call(client)) as { relay_base_url?: unknown };
-          if (typeof session.relay_base_url === 'string' && session.relay_base_url.trim()) {
-            let reportedBaseUrl: string;
-            try {
-              reportedBaseUrl = resolveRelaycastBaseUrl({
-                RELAYCAST_BASE_URL: session.relay_base_url,
-              });
-            } catch {
-              this.disconnectRelayClient(client);
-              return null;
-            }
-            if (reportedBaseUrl !== expectedBaseUrl) {
-              this.disconnectRelayClient(client);
-              return null;
-            }
-          }
-        }
-      }
-      return client;
     } catch {
       return null;
     }
+
+    if (expectedBaseUrl !== undefined) {
+      // `relay_base_url` was added to the broker session after the pinned
+      // harness-driver release. Treat its absence as an older broker's
+      // missing capability; brokers that report an origin are checked
+      // strictly so a known mismatch is never reused.
+      const getSession = (client as { getSession?: () => Promise<unknown> }).getSession;
+      if (typeof getSession === 'function') {
+        let session: { relay_base_url?: unknown };
+        try {
+          session = (await getSession.call(client)) as { relay_base_url?: unknown };
+        } catch {
+          this.disconnectRelayClient(client);
+          return null;
+        }
+        if (session && typeof session.relay_base_url === 'string' && session.relay_base_url.trim()) {
+          let reportedBaseUrl: string;
+          try {
+            reportedBaseUrl = resolveRelaycastBaseUrl({
+              RELAYCAST_BASE_URL: session.relay_base_url,
+            });
+          } catch {
+            if (allowRetireMismatch) {
+              await this.retireMismatchedSharedBroker(client, connectionPath, expectedBaseUrl);
+              return null;
+            }
+            this.disconnectRelayClient(client);
+            return null;
+          }
+          if (reportedBaseUrl !== expectedBaseUrl) {
+            if (allowRetireMismatch) {
+              await this.retireMismatchedSharedBroker(client, connectionPath, expectedBaseUrl);
+              return null;
+            }
+            this.disconnectRelayClient(client);
+            return null;
+          }
+        }
+      }
+    }
+    return client;
+  }
+
+  private async retireMismatchedSharedBroker(
+    relay: HarnessDriverClient,
+    connectionPath: string,
+    expectedBaseUrl: string
+  ): Promise<void> {
+    const lease = this.sharedBrokerLease;
+    const otherLiveLeases = lease
+      ? this.countLiveSharedBrokerLeases(lease.stateDir, lease.leasePath)
+      : 0;
+    const workflowOwned = lease ? this.isWorkflowOwnedSharedBroker(lease) : false;
+    if (!lease || otherLiveLeases > 0 || !workflowOwned) {
+      throw new Error(
+        `Cannot replace shared broker for ${expectedBaseUrl}: it is still in use or not workflow-owned`
+      );
+    }
+
+    try {
+      await relay.shutdown();
+    } catch (error) {
+      this.disconnectRelayClient(relay);
+      throw error;
+    }
+    safeUnlinkSync(connectionPath);
+    safeUnlinkSync(lease.ownerPath);
   }
 
   private async acquireSharedBrokerStartLock(
@@ -2956,7 +3012,7 @@ export class WorkflowRunner {
     }
   }
 
-  private countLiveSharedBrokerLeases(stateDir: string): number {
+  private countLiveSharedBrokerLeases(stateDir: string, excludeLeasePath?: string): number {
     const leaseDir = path.join(stateDir, SHARED_BROKER_LEASE_DIRNAME);
     let entries: Dirent[];
     try {
@@ -2969,6 +3025,9 @@ export class WorkflowRunner {
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       const leasePath = path.join(leaseDir, entry.name);
+      if (excludeLeasePath && path.resolve(leasePath) === path.resolve(excludeLeasePath)) {
+        continue;
+      }
       try {
         const lease = JSON.parse(readFileSync(leasePath, 'utf-8')) as { pid?: unknown };
         if (typeof lease.pid === 'number' && lease.pid > 0 && isPidRunning(lease.pid)) {
@@ -3006,7 +3065,12 @@ export class WorkflowRunner {
 
     const releaseLock = await this.acquireSharedBrokerStartLock(stateDir, startupTimeoutMs);
     try {
-      const lockedExisting = await this.tryConnectSharedBroker(connectionPath, brokerCwd, expectedBaseUrl);
+      const lockedExisting = await this.tryConnectSharedBroker(
+        connectionPath,
+        brokerCwd,
+        expectedBaseUrl,
+        true
+      );
       if (lockedExisting) {
         this.log('Reusing shared broker...');
         this.relay = lockedExisting;
@@ -3143,10 +3207,7 @@ export class WorkflowRunner {
   }
 
   private getRelaycastBaseUrl(): string {
-    return resolveRelaycastBaseUrl({
-      ...process.env,
-      ...(this.relayOptions.env ?? {}),
-    });
+    return resolveRelaycastBaseUrl(this.relayOptions.env ?? {}, process.env);
   }
 
   private getRelaycastClient(): RelayCast {
