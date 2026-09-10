@@ -735,7 +735,9 @@ agents:
         await expect(
           (localRunner as any).startOrReuseSharedBroker('run-conflict', 'wf-conflict', false)
         ).rejects.toThrow('Cannot replace shared broker');
-        expect(mockRelayInstance.disconnect).toHaveBeenCalled();
+        // Both the unlocked probe and the lock-protected probe connected to
+        // the incompatible broker and must release their transports.
+        expect(mockRelayInstance.disconnect).toHaveBeenCalledTimes(2);
         expect(mockRelayInstance.shutdown).not.toHaveBeenCalled();
         expect(mockHarnessDriverSpawn).not.toHaveBeenCalled();
       } finally {

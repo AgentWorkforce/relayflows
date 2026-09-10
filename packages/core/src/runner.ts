@@ -2899,6 +2899,9 @@ export class WorkflowRunner {
       : 0;
     const workflowOwned = lease ? this.isWorkflowOwnedSharedBroker(lease) : false;
     if (!lease || otherLiveLeases > 0 || !workflowOwned) {
+      // The locked probe owns a live transport even when replacement is
+      // refused; release it before propagating the fail-closed error.
+      this.disconnectRelayClient(relay);
       throw new Error(
         `Cannot replace shared broker for ${expectedBaseUrl}: it is still in use or not workflow-owned`
       );
