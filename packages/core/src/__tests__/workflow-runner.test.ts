@@ -711,6 +711,42 @@ agents:
     });
   });
 
+  describe('provisioning retries are cancellation-aware', () => {
+    let fetchSpy4: ReturnType<typeof vi.spyOn> | undefined;
+    afterEach(() => {
+      fetchSpy4?.mockRestore();
+      fetchSpy4 = undefined;
+    });
+
+    it('does not start another provisioning request after an abort during the delay', async () => {
+      let calls = 0;
+      fetchSpy4 = vi.spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+        if (!String(url).includes('/v1/workspaces')) {
+          return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '' } as unknown as Response;
+        }
+        calls += 1;
+        return {
+          ok: false,
+          status: 503,
+          headers: { get: (h: string) => (h.toLowerCase() === 'retry-after' ? '3600' : null) },
+          text: async () => 'database_overloaded',
+        } as unknown as Response;
+      }) as never);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'relayflows-abort-'));
+      const r = new WorkflowRunner({ db, cwd: tmpDir });
+      (r as any).abortController = new AbortController();
+      // Abort while the first backoff is in flight.
+      vi.spyOn(r as any, 'abortableDelay').mockImplementation(async () => {
+        (r as any).abortController.abort();
+      });
+
+      await expect((r as any).ensureRelaycastApiKey('wf-abort')).rejects.toThrow(/aborted/i);
+      // One attempt made, none after the abort — without the check this would
+      // keep retrying for tens of seconds against a cancelled run.
+      expect(calls).toBe(1);
+    });
+  });
+
   describe('setup-stage attribution and broker startup retry', () => {
     // The 2026-09-10 failure recorded a bare `Service Unavailable` with zero
     // steps. Three calls run before step one — workspace provisioning, observer

@@ -2567,6 +2567,7 @@ export class WorkflowRunner {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ name: workspaceName }),
+          ...(this.abortController ? { signal: this.abortController.signal } : {}),
         });
         if (res.ok) {
           parsed = (await res.json()) as Record<string, any>;
@@ -2590,7 +2591,9 @@ export class WorkflowRunner {
       this.log(
         `Relaycast workspace provisioning failed (${reason}); retrying ${attempt}/${WORKSPACE_PROVISION_MAX_ATTEMPTS - 1}...`
       );
-      await this.delay(Math.max(retryAfterMs ?? 0, backoffMs));
+      await this.abortableDelay(Math.max(retryAfterMs ?? 0, backoffMs));
+      // An abort during the delay must not start another provisioning request.
+      this.checkAborted();
     }
 
     if (failure?.kind === 'network') {
@@ -3261,7 +3264,8 @@ export class WorkflowRunner {
           this.log(
             `Broker startup failed (${error instanceof Error ? error.message : String(error)}); retrying ${attempt}/${BROKER_SPAWN_MAX_ATTEMPTS - 1}...`
           );
-          await this.delay(BROKER_SPAWN_RETRY_DELAY_MS * attempt);
+          await this.abortableDelay(BROKER_SPAWN_RETRY_DELAY_MS * attempt);
+          this.checkAborted();
         }
       }
       if (spawnError !== undefined) {
@@ -12143,6 +12147,28 @@ export class WorkflowRunner {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * A delay that gives up as soon as the run is aborted.
+   *
+   * Retry backoff must not outlive a cancellation: with a clamped 15s
+   * `Retry-After` plus linear backoff, a plain `delay` would keep an aborted run
+   * sleeping for tens of seconds and then issue another request.
+   */
+  private abortableDelay(ms: number): Promise<void> {
+    const signal = this.abortController?.signal;
+    if (!signal) return this.delay(ms);
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      signal.addEventListener('abort', done, { once: true });
+    });
   }
 
   // ── Channel messaging ──────────────────────────────────────────────────
