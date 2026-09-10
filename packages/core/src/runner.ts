@@ -673,6 +673,15 @@ const BROKER_OPERATION_MAX_ATTEMPTS = 3;
 const BROKER_OPERATION_RETRY_DELAY_MS = 1_000;
 const AGENT_TRANSIENT_NETWORK_MAX_ATTEMPTS = 3;
 const AGENT_TRANSIENT_NETWORK_RETRY_DELAY_MS = 1_000;
+/**
+ * Workspace provisioning runs BEFORE step one, so a single transient failure
+ * there kills the whole run with zero steps executed and an error that says
+ * nothing about the user's flow ("Service Unavailable"). Relaycast sheds load
+ * with 503 under database pressure, which is exactly the shape worth retrying.
+ */
+const WORKSPACE_PROVISION_MAX_ATTEMPTS = 4;
+const WORKSPACE_PROVISION_RETRY_DELAY_MS = 1_000;
+const WORKSPACE_PROVISION_MAX_RETRY_AFTER_MS = 15_000;
 
 /**
  * The one Relayfile base URL default.
@@ -2392,6 +2401,23 @@ export class WorkflowRunner {
     this.wireRelayClient(context.runId);
   }
 
+  /**
+   * Parse a Retry-After header. Supports both forms in RFC 9110: delay-seconds
+   * and an HTTP-date. Returns undefined when absent or unparseable, and clamps
+   * to a ceiling so a hostile or mistaken value cannot stall a run.
+   */
+  private parseRetryAfterMs(header: string | null | undefined): number | undefined {
+    if (!header) return undefined;
+    const trimmed = header.trim();
+    if (!trimmed) return undefined;
+    const seconds = Number(trimmed);
+    const ms = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Date.parse(trimmed) - Date.now();
+    if (!Number.isFinite(ms) || ms <= 0) return undefined;
+    return Math.min(ms, WORKSPACE_PROVISION_MAX_RETRY_AFTER_MS);
+  }
+
   private isRetryableProtocolError(error: unknown): boolean {
     const candidate = error as { retryable?: unknown; status?: unknown; message?: unknown } | undefined;
     if (candidate?.retryable === true) return true;
@@ -2491,14 +2517,60 @@ export class WorkflowRunner {
     // Always create a fresh workspace — each run gets full isolation.
     const workspaceName = `relay-${channel}-${randomBytes(4).toString('hex')}`;
     const baseUrl = this.getRelaycastBaseUrl();
-    const res = await fetch(`${baseUrl}/v1/workspaces`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: workspaceName }),
-    });
 
+    // Retry transient upstream failures. This call happens before any step
+    // runs, so giving up here fails the run with zero steps and an opaque
+    // message. A 5xx or a dropped connection is the service shedding load, not
+    // a problem with the flow; a 4xx is the caller's fault and must not retry.
+    let res: Response | undefined;
+    let lastNetworkError: unknown;
+    for (let attempt = 1; attempt <= WORKSPACE_PROVISION_MAX_ATTEMPTS; attempt++) {
+      lastNetworkError = undefined;
+      try {
+        res = await fetch(`${baseUrl}/v1/workspaces`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: workspaceName }),
+        });
+      } catch (error) {
+        lastNetworkError = error;
+      }
+
+      const retryable =
+        lastNetworkError !== undefined || (res !== undefined && res.status >= 500);
+      if (!retryable) break;
+      if (attempt >= WORKSPACE_PROVISION_MAX_ATTEMPTS) break;
+
+      // Honour Retry-After when the service tells us how long to wait, capped so
+      // a large or malformed value cannot stall the run indefinitely.
+      const retryAfterMs = this.parseRetryAfterMs(res?.headers?.get('retry-after'));
+      const backoffMs = WORKSPACE_PROVISION_RETRY_DELAY_MS * attempt;
+      const reason = lastNetworkError !== undefined ? 'network error' : `HTTP ${res?.status}`;
+      this.log(
+        `Relaycast workspace provisioning failed (${reason}); retrying ${attempt}/${WORKSPACE_PROVISION_MAX_ATTEMPTS - 1}...`
+      );
+      await this.delay(Math.max(retryAfterMs ?? 0, backoffMs));
+    }
+
+    if (lastNetworkError !== undefined) {
+      const message =
+        lastNetworkError instanceof Error ? lastNetworkError.message : String(lastNetworkError);
+      throw new Error(
+        `Failed to reach Relaycast to create a workspace after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts: ${message}`
+      );
+    }
+    if (!res) {
+      throw new Error('Failed to auto-create Relaycast workspace: no response');
+    }
     if (!res.ok) {
-      throw new Error(`Failed to auto-create Relaycast workspace: ${res.status} ${await res.text()}`);
+      const detail = await res.text();
+      const suffix =
+        res.status >= 500
+          ? ` (still failing after ${WORKSPACE_PROVISION_MAX_ATTEMPTS} attempts; Relaycast is shedding load, not a problem with this flow)`
+          : '';
+      throw new Error(
+        `Failed to auto-create Relaycast workspace: ${res.status} ${detail}${suffix}`
+      );
     }
 
     const body = (await res.json()) as Record<string, any>;
