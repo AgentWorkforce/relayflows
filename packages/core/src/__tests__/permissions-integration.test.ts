@@ -662,6 +662,39 @@ describe('WorkflowRunner permission lifecycle integration', () => {
     expect((runner as any).agentTokens.size).toBe(0);
   });
 
+  it('warns when a write pattern resolves to no existing paths during dry-run', () => {
+    const projectDir = createProject({
+      'src/input.ts': 'export const input = true;\n',
+      'gate.sh': '#!/usr/bin/env bash\nexit 0\n',
+    });
+    const runner = makeRunner(projectDir);
+    const config = makeConfig([
+      {
+        name: 'writer',
+        cli: 'claude',
+        permissions: {
+          access: 'restricted',
+          files: {
+            read: ['**'],
+            write: ['impl.txt'],
+            deny: ['gate.sh'],
+          },
+        },
+      },
+    ]);
+
+    const report = runner.dryRun(config, 'default');
+    const permissionEntry = report.permissions?.find((entry) => entry.agent === 'writer');
+
+    expect(report.valid).toBe(true);
+    expect(permissionEntry?.writePaths).toBe(0);
+    expect(report.warnings).toContain(
+      'Agent "writer" write pattern(s) "impl.txt" resolved to no existing writable paths. '
+        + 'The installed @agent-relay/cloud resolver only grants writes to existing paths; '
+        + 'files created under these patterns may be denied.'
+    );
+  });
+
   it('rejects invalid permission config during validation before provisioning', async () => {
     const projectDir = createBaseProject();
     const runner = makeRunner(projectDir);
