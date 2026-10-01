@@ -2375,6 +2375,7 @@ agents:
       const run = await runner.execute(makeSupervisedConfig(), 'default');
 
       expect(run.status).toBe('failed');
+      expect(run.error).toContain('owner timed out');
       expect(workerRelease).toHaveBeenCalledTimes(1);
       expect(ownerRelease).toHaveBeenCalledTimes(1);
     });
