@@ -531,6 +531,13 @@ interface SpawnAndWaitOptions {
   logicalName?: string;
   preserveOnIdle?: boolean;
   onSpawned?: (info: SpawnedAgentInfo) => void | Promise<void>;
+  /**
+   * Called synchronously as soon as the agent's wait settles (exit, release,
+   * force-release, or timeout). From this point spawnAndWait owns releasing the
+   * handle, so callers must not release it again — even though the returned
+   * promise only settles after output capture and log-stream cleanup.
+   */
+  onExited?: (info: { agentName: string; exitResult: string }) => void;
   onChunk?: (info: { agentName: string; chunk: string }) => void;
 }
 
@@ -7448,6 +7455,13 @@ export class WorkflowRunner {
           resolveWorkerSpawn();
         }
       },
+      onExited: () => {
+        // The worker's wait has settled, so spawnAndWait now owns its release.
+        // Flag it here rather than when workerPromise settles: spawnAndWait keeps
+        // running async cleanup after exit, and an owner failure in that window
+        // would otherwise release the worker a second time.
+        workerReleased = true;
+      },
       onChunk: ({ agentName, chunk }) => {
         this.forwardAgentChunkToChannel(step.name, 'Worker', agentName, chunk, supervised.specialist.name);
       },
@@ -9026,6 +9040,7 @@ export class WorkflowRunner {
         preparedTask.promptTaskText,
         options.preserveOnIdle ?? this.shouldPreserveIdleSupervisor(agentDef, step, options.evidenceRole)
       );
+      options.onExited?.({ agentName, exitResult });
 
       // Stop heartbeat now that agent has exited
       stopHeartbeat?.();
