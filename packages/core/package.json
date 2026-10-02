@@ -52,12 +52,12 @@
     "directory": "packages/core"
   },
   "dependencies": {
-    "@agent-relay/cloud": "^8.2.0",
-    "@agent-relay/config": "^8.2.0",
-    "@agent-relay/harness-driver": "^8.2.0",
-    "@agent-relay/harnesses": "^8.2.0",
+    "@agent-relay/cloud": "^12.2.2",
+    "@agent-relay/config": "^12.2.2",
+    "@agent-relay/harness-driver": "^12.2.2",
+    "@agent-relay/harnesses": "^12.2.2",
     "@agent-relay/sandbox": "^0.1.2",
-    "@agent-relay/sdk": "^8.2.0",
+    "@agent-relay/sdk": "^12.2.2",
     "@agentworkforce/persona-kit": "^4.1.39",
     "@agentworkforce/persona-registry": "^4.1.39",
     "@relaycast/sdk": "^1.1.0",
@@ -66,13 +66,13 @@
     "@relayflows/github-primitive": "1.1.6",
     "@relayflows/slack-primitive": "1.1.6",
     "@sinclair/typebox": "^0.34.48",
-    "agent-trajectories": "^0.6.0",
+    "agent-trajectories": "^0.6.0 || ^0.7.0",
     "chalk": "^4.1.2",
     "ignore": "^7.0.5",
     "listr2": "^10.2.1",
     "strip-ansi": "^7.2.0",
     "yaml": "^2.7.0",
-    "zod": "^3.23.8"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

@@ -2322,6 +2322,64 @@ agents:
       expect(ownerRelease).toHaveBeenCalledTimes(1);
     });
 
+    it('should not double release the worker when its wait throws and the owner then fails', async () => {
+      const workerRelease = vi.fn().mockResolvedValue(undefined);
+      const ownerRelease = vi.fn().mockResolvedValue(undefined);
+      let markWorkerWaitFailed!: () => void;
+      const workerWaitFailedSignal = new Promise<void>((resolve) => {
+        markWorkerWaitFailed = resolve;
+      });
+
+      mockRelayInstance.spawnPty.mockImplementation(
+        async ({ name }: { name: string; task?: string }) => {
+          const isOwner = name.includes('-owner-');
+          const output = isOwner ? 'owner checking\n' : 'worker started\n';
+
+          queueMicrotask(() => {
+            emitMockEvent('workerOutput', { name, chunk: output });
+          });
+
+          if (isOwner) {
+            return {
+              name,
+              runtime: 'pty' as const,
+              exitCode: undefined,
+              exitSignal: undefined,
+              // The owner times out only after the worker's wait has already
+              // thrown, so the owner-failure path runs while (or after)
+              // spawnAndWait cleans up and releases the worker.
+              waitForExit: vi.fn().mockImplementation(async () => {
+                await workerWaitFailedSignal;
+                return { reason: 'timeout' };
+              }),
+              waitForIdle: vi.fn().mockResolvedValue({ reason: 'timeout' }),
+              release: ownerRelease,
+            };
+          }
+
+          return {
+            name,
+            runtime: 'pty' as const,
+            exitCode: undefined,
+            exitSignal: undefined,
+            waitForExit: vi.fn().mockImplementation(async () => {
+              markWorkerWaitFailed();
+              throw new Error('broker connection lost');
+            }),
+            waitForIdle: vi.fn().mockImplementation(() => never()),
+            release: workerRelease,
+          };
+        }
+      );
+
+      const run = await runner.execute(makeSupervisedConfig(), 'default');
+
+      expect(run.status).toBe('failed');
+      expect(run.error).toContain('owner timed out');
+      expect(workerRelease).toHaveBeenCalledTimes(1);
+      expect(ownerRelease).toHaveBeenCalledTimes(1);
+    });
+
     it('should emit owner-timeout when owner times out', async () => {
       const events: Array<{ type: string; stepName?: string }> = [];
       runner.on((event) => {

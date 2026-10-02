@@ -531,6 +531,15 @@ interface SpawnAndWaitOptions {
   logicalName?: string;
   preserveOnIdle?: boolean;
   onSpawned?: (info: SpawnedAgentInfo) => void | Promise<void>;
+  /**
+   * Called synchronously, at most once, as soon as the agent's wait settles —
+   * exit, release, force-release, timeout, or a thrown error (`exitResult:
+   * 'error'`) — or when any other post-spawn failure enters cleanup. From this
+   * point spawnAndWait owns releasing the handle, so callers must not release
+   * it again, even though the returned promise only settles (or rejects) after
+   * output capture and log-stream cleanup.
+   */
+  onExited?: (info: { agentName: string; exitResult: string }) => void;
   onChunk?: (info: { agentName: string; chunk: string }) => void;
 }
 
@@ -7448,6 +7457,13 @@ export class WorkflowRunner {
           resolveWorkerSpawn();
         }
       },
+      onExited: () => {
+        // The worker's wait has settled, so spawnAndWait now owns its release.
+        // Flag it here rather than when workerPromise settles: spawnAndWait keeps
+        // running async cleanup after exit, and an owner failure in that window
+        // would otherwise release the worker a second time.
+        workerReleased = true;
+      },
       onChunk: ({ agentName, chunk }) => {
         this.forwardAgentChunkToChannel(step.name, 'Worker', agentName, chunk, supervised.specialist.name);
       },
@@ -8866,6 +8882,12 @@ export class WorkflowRunner {
     let completedWithoutSpawnError = false;
     let activePersona: ActiveWorkflowPersona | undefined;
     const stepDeadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+    let exitNotified = false;
+    const notifyExited = (result: string): void => {
+      if (exitNotified) return;
+      exitNotified = true;
+      options.onExited?.({ agentName, exitResult: result });
+    };
 
     try {
       const agentCwd = this.resolveExecutionCwd(step, agentDef);
@@ -9018,14 +9040,21 @@ export class WorkflowRunner {
       this.activeAgentHandles.set(agentName, agent);
 
       // Wait for agent to exit, with idle nudging if configured
-      exitResult = await this.waitForExitWithIdleNudging(
-        agent,
-        agentDef,
-        step,
-        stepDeadline === undefined ? timeoutMs : Math.max(0, stepDeadline - Date.now()),
-        preparedTask.promptTaskText,
-        options.preserveOnIdle ?? this.shouldPreserveIdleSupervisor(agentDef, step, options.evidenceRole)
-      );
+      try {
+        exitResult = await this.waitForExitWithIdleNudging(
+          agent,
+          agentDef,
+          step,
+          stepDeadline === undefined ? timeoutMs : Math.max(0, stepDeadline - Date.now()),
+          preparedTask.promptTaskText,
+          options.preserveOnIdle ?? this.shouldPreserveIdleSupervisor(agentDef, step, options.evidenceRole)
+        );
+      } catch (error) {
+        // The finally block below releases the handle on this path.
+        notifyExited('error');
+        throw error;
+      }
+      notifyExited(exitResult);
 
       // Stop heartbeat now that agent has exited
       stopHeartbeat?.();
@@ -9072,6 +9101,9 @@ export class WorkflowRunner {
       }
       completedWithoutSpawnError = true;
     } finally {
+      // Any failure after spawn (before or during the wait) is released below;
+      // tell the caller before that release starts so it never releases again.
+      if (agent) notifyExited(exitResult);
       // Snapshot PTY chunks before cleanup — we need them for output reading below
       ptyChunks = this.ptyOutputBuffers.get(agentName) ?? [];
       this.lastFailedStepOutput.set(step.name, ptyChunks.join(''));
