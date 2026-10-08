@@ -8,6 +8,7 @@ permissions:
 
 jobs:
   test:
+    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     name: Test and typecheck
     runs-on: ubuntu-latest
 
