@@ -53,12 +53,12 @@
     "directory": "packages/core"
   },
   "dependencies": {
-    "@agent-relay/cloud": "^12.2.2",
-    "@agent-relay/config": "^12.2.2",
-    "@agent-relay/harness-driver": "^12.2.2",
-    "@agent-relay/harnesses": "^12.2.2",
+    "@agent-relay/cloud": "^12.2.2 || ^16.0.0",
+    "@agent-relay/config": "^12.2.2 || ^16.0.0",
+    "@agent-relay/harness-driver": "^12.2.2 || ^16.0.0",
+    "@agent-relay/harnesses": "^12.2.2 || ^16.0.0",
     "@agent-relay/sandbox": "^0.1.2",
-    "@agent-relay/sdk": "^12.2.2",
+    "@agent-relay/sdk": "^12.2.2 || ^16.0.0",
     "@agentworkforce/persona-kit": "^4.1.39",
     "@agentworkforce/persona-registry": "^4.1.39",
     "@relaycast/sdk": "^1.1.0",
