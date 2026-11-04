@@ -40,8 +40,16 @@ describe('credential precedence', () => {
   });
 
   it('materialised Codex and Grok logins shadow OpenAI and xAI keys for their CLIs', () => {
-    const env = { ...BOTH, CLAUDE_CODE_OAUTH_TOKEN: undefined, [SUBSCRIPTION_LOGINS_ENV]: 'codex, grok' };
-    expect(shadowedCredentialKeys(env, 'codex')).toEqual(['OPENAI_API_KEY']);
+    const env = {
+      ...BOTH,
+      CODEX_API_KEY: 'codex-key',
+      CLAUDE_CODE_OAUTH_TOKEN: undefined,
+      [SUBSCRIPTION_LOGINS_ENV]: 'codex, grok',
+    };
+    expect(shadowedCredentialKeys(env, 'codex')).toEqual(['CODEX_API_KEY', 'OPENAI_API_KEY']);
+    expect(applySubscriptionPrecedence(env, 'codex').CODEX_API_KEY).toBeUndefined();
+    expect(agentCredentialEnv(env, 'opencode').CODEX_API_KEY).toBe('codex-key');
+    expect(agentCredentialEnv(env, 'codex').CODEX_API_KEY).toBeUndefined();
     expect(shadowedCredentialKeys(env, 'grok')).toEqual(['XAI_API_KEY']);
     expect(shadowedCredentialKeys(env, 'claude')).toEqual([]);
     expect(applySubscriptionPrecedence(env, 'codex').OPENAI_API_KEY).toBeUndefined();

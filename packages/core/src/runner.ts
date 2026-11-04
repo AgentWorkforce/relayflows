@@ -8929,7 +8929,9 @@ export class WorkflowRunner {
         agentToken: this.agentTokens.get(agentDef.name),
         env: {
           ...applySubscriptionPrecedence(baseEnv ?? {}, agentCli),
-          ...agentCredentialEnv(this.getMergedRelayEnvSource(), agentCli),
+          // Restore from the same source the agent env came from: when proxy
+          // mode stripped the real keys from baseEnv, nothing is restored.
+          ...agentCredentialEnv(baseEnv ?? this.getMergedRelayEnvSource(), agentCli),
           ...(personaResolution?.env ?? {}),
           ...(proxyEnvOverrides ?? {}),
           // Interactive agents must reach the SAME Relayfile the run provisioned

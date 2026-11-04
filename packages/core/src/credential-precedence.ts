@@ -81,10 +81,10 @@ export function shadowedCredentialKeys(env: Env, cli?: string): string[] {
  * key is set to `undefined`, which removes an inherited value when Node spawns
  * the child (omitting the key would let `process.env` leak it back in).
  */
-export function brokerCredentialEnv<T extends Env>(env: T): T {
+export function brokerCredentialEnv<T extends Env>(env: T): Partial<T> {
   const result: Env = { ...env };
   for (const key of shadowedCredentialKeys(env)) result[key] = undefined;
-  return result as T;
+  return result as Partial<T>;
 }
 
 /**
@@ -103,8 +103,8 @@ export function agentCredentialEnv(env: Env, cli: string): Record<string, string
 }
 
 /** Strips the keys shadowed for `cli` from an env (for direct process spawns). */
-export function applySubscriptionPrecedence<T extends Env>(env: T, cli: string): T {
+export function applySubscriptionPrecedence<T extends Env>(env: T, cli: string): Partial<T> {
   const result: Env = { ...env };
   for (const key of shadowedCredentialKeys(env, cli)) delete result[key];
-  return result as T;
+  return result as Partial<T>;
 }

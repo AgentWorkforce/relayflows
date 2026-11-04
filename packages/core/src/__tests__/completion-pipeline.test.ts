@@ -1946,6 +1946,8 @@ describe('Completion Pipeline', () => {
 describe('subscription logins win over API keys for their CLI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    waitForExitFn = vi.fn().mockResolvedValue('exited');
+    waitForIdleFn = vi.fn().mockImplementation(() => never());
     mockSpawnOutputs = [];
     mockSpawnExitCodes = [];
     mockRelayInstance.spawnPty.mockImplementation(defaultSpawnPtyImplementation);
@@ -1998,6 +2000,31 @@ describe('subscription logins win over API keys for their CLI', () => {
       // Another CLI keeps the keys the broker no longer carries.
       expect(opencode.env.ANTHROPIC_API_KEY).toBe('sk-ant-api-billing');
       expect(opencode.env.OPENAI_API_KEY).toBe('sk-openai-key');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 15000);
+
+  it('does not restore real keys that credential-proxy mode stripped', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api-billing');
+    vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-oat-subscription');
+    vi.stubEnv('RELAY_LLM_PROXY', 'https://proxy.test');
+    vi.stubEnv('CREDENTIAL_PROXY_TOKEN', 'proxy-token');
+    try {
+      mockSpawnOutputs = ['opencode done\nSTEP_COMPLETE:step-1\n'];
+      const runner = new WorkflowRunner({
+        db: makeDb(),
+        workspaceId: 'ws-test',
+        relay: { env: { AGENT_RELAY_WORKFLOW_DISABLE_RELAYCAST: '1' } },
+      });
+      const config = makeConfig({
+        agents: [{ name: 'agent-b', cli: 'opencode' }],
+        workflows: [{ name: 'default', steps: [{ name: 'step-1', agent: 'agent-b', task: 'OpenCode work' }] }],
+      });
+      const run = await runner.execute(config, 'default');
+      expect(run.status).toBe('completed');
+      const spawn = mockRelayInstance.spawnPty.mock.calls[0]![0] as { env: Record<string, string> };
+      expect(spawn.env.ANTHROPIC_API_KEY).not.toBe('sk-ant-api-billing');
     } finally {
       vi.unstubAllEnvs();
     }
