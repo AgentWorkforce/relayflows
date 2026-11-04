@@ -1,6 +1,7 @@
 {
   "name": "@relayflows/cli",
   "version": "1.1.7",
+  "license": "Apache-2.0",
   "description": "Command-line interface for running Agent Relay workflows",
   "type": "module",
   "bin": {
