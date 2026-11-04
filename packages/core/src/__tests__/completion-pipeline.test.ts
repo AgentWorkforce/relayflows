@@ -1940,3 +1940,66 @@ describe('Completion Pipeline', () => {
     }, 15000);
   });
 });
+
+// ── Subscription precedence ─────────────────────────────────────────────────
+
+describe('subscription logins win over API keys for their CLI', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSpawnOutputs = [];
+    mockSpawnExitCodes = [];
+    mockRelayInstance.spawnPty.mockImplementation(defaultSpawnPtyImplementation);
+    eventListeners.clear();
+  });
+
+  it('drops ANTHROPIC_API_KEY for Claude agents when a setup token is present, and keeps it for other CLIs', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api-billing');
+    vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-oat-subscription');
+    vi.stubEnv('OPENAI_API_KEY', 'sk-openai-key');
+    vi.stubEnv('AGENT_RELAY_SUBSCRIPTION_LOGINS', 'codex');
+    try {
+      mockSpawnOutputs = ['claude done\nSTEP_COMPLETE:step-1\n', 'opencode done\nSTEP_COMPLETE:step-2\n'];
+      const runner = new WorkflowRunner({
+        db: makeDb(),
+        workspaceId: 'ws-test',
+        relay: { env: { AGENT_RELAY_WORKFLOW_DISABLE_RELAYCAST: '1' } },
+      });
+      const config = makeConfig({
+        agents: [
+          { name: 'agent-a', cli: 'claude' },
+          { name: 'agent-b', cli: 'opencode' },
+        ],
+        workflows: [
+          {
+            name: 'default',
+            steps: [
+              { name: 'step-1', agent: 'agent-a', task: 'Claude work' },
+              { name: 'step-2', agent: 'agent-b', task: 'OpenCode work', dependsOn: ['step-1'] },
+            ],
+          },
+        ],
+      });
+      const run = await runner.execute(config, 'default');
+      expect(run.status).toBe('completed');
+
+      const { HarnessDriverClient } = await import('@agent-relay/harness-driver');
+      const brokerEnv = vi.mocked(HarnessDriverClient.spawn).mock.calls[0]![0]!.env as Record<string, unknown>;
+      // Explicitly undefined so the broker does not inherit them from process.env.
+      expect(Object.hasOwn(brokerEnv, 'ANTHROPIC_API_KEY')).toBe(true);
+      expect(brokerEnv.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(Object.hasOwn(brokerEnv, 'OPENAI_API_KEY')).toBe(true);
+      expect(brokerEnv.OPENAI_API_KEY).toBeUndefined();
+
+      const spawns = mockRelayInstance.spawnPty.mock.calls.map((call) => call[0] as { cli: string; env: Record<string, string> });
+      const claude = spawns.find((spawn) => spawn.cli === 'claude')!;
+      const opencode = spawns.find((spawn) => spawn.cli === 'opencode')!;
+      expect(claude.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(claude.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat-subscription');
+      // Another CLI keeps the keys the broker no longer carries.
+      expect(opencode.env.ANTHROPIC_API_KEY).toBe('sk-ant-api-billing');
+      expect(opencode.env.OPENAI_API_KEY).toBe('sk-openai-key');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 15000);
+});

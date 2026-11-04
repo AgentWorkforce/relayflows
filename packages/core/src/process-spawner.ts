@@ -1,6 +1,7 @@
 import { spawn as cpSpawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
+import { applySubscriptionPrecedence } from './credential-precedence.js';
 import { getCliDefinition } from './cli-registry.js';
 import { resolveCliSync } from './cli-registry.js';
 import { runVerification } from './verification.js';
@@ -131,7 +132,7 @@ export function detectCompletion(output: string, verification?: VerificationChec
 async function runCommand(command: SpawnCommand, opts: ShellOpts): Promise<SpawnOutcome> {
   const child = spawnProcess([command.bin, ...command.args], {
     cwd: opts.cwd,
-    env: { ...process.env, ...command.env },
+    env: applySubscriptionPrecedence({ ...process.env, ...command.env }, command.bin),
     stdio: 'pipe',
   });
 

@@ -50,6 +50,7 @@ export { createDefaultEventLogger } from './default-logger.js';
 export { executeApiStep, type ApiExecutorOptions } from './api-executor.js';
 export type { CloudRunOptions } from './cloud-runner.js';
 export * from './proxy-env.js';
+export * from './credential-precedence.js';
 export * from './budget-tracker.js';
 export * from './provisioner.js';
 export { applySiblingLinks, buildSiblingLinkScript } from './sibling-links.js';
