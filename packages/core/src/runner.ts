@@ -81,6 +81,11 @@ import {
 } from './observer-token.js';
 import { InMemoryWorkflowDb } from './memory-db.js';
 import { buildCommand as buildProcessCommand, spawnProcess } from './process-spawner.js';
+import {
+  agentCredentialEnv,
+  applySubscriptionPrecedence,
+  shadowedCredentialKeys,
+} from './credential-precedence.js';
 import { createProcessBackendExecutor } from './process-backend-executor.js';
 import {
   createLazySandboxProcessBackend,
@@ -3220,8 +3225,15 @@ export class WorkflowRunner {
       // broker keeps the same Relaycast identity behavior as previous runs.
       const brokerBaseName = path.basename(this.cwd) || 'workflow';
       const brokerName = `${brokerBaseName}-${runId.slice(0, 8)}`;
-      const relayEnv = {
+      const relayEnv: NodeJS.ProcessEnv = {
         ...(this.getRelayEnv() ?? filteredEnv()),
+        // Subscription logins win over API keys: the broker would otherwise
+        // hand e.g. ANTHROPIC_API_KEY to a Claude agent that has a setup token.
+        // `undefined` removes the value the broker inherits from process.env;
+        // agentCredentialEnv() gives it back to agents of other CLIs.
+        ...Object.fromEntries(
+          shadowedCredentialKeys(this.getMergedRelayEnvSource()).map((key) => [key, undefined])
+        ),
         AGENT_RELAY_STATE_DIR: stateDir,
         // Harness-driver/broker has its own hosted default. Always pass the
         // runner's resolved origin so auto-created keys and broker auth land
@@ -8606,7 +8618,7 @@ export class WorkflowRunner {
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
     const proxyMode = await this.resolveAgentProxyMode(agentDef, this.currentConfig);
-    const env = { ...(this.getRelayEnv(proxyMode) ?? filteredEnv()) };
+    const env = applySubscriptionPrecedence({ ...(this.getRelayEnv(proxyMode) ?? filteredEnv()) }, agentCli);
     if (proxyMode?.url && proxyMode.token) {
       Object.assign(env, resolveProxyEnv(agentCli, proxyMode.url, proxyMode.token));
     }
@@ -8916,7 +8928,10 @@ export class WorkflowRunner {
         cwd: activePersona?.cwd ?? agentCwd,
         agentToken: this.agentTokens.get(agentDef.name),
         env: {
-          ...baseEnv,
+          ...applySubscriptionPrecedence(baseEnv ?? {}, agentCli),
+          // Restore from the same source the agent env came from: when proxy
+          // mode stripped the real keys from baseEnv, nothing is restored.
+          ...agentCredentialEnv(baseEnv ?? this.getMergedRelayEnvSource(), agentCli),
           ...(personaResolution?.env ?? {}),
           ...(proxyEnvOverrides ?? {}),
           // Interactive agents must reach the SAME Relayfile the run provisioned
