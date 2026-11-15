@@ -1,0 +1,99 @@
+# Fast path: run the CI checks and pack the npm packages on Blacksmith
+# runners, outside the shared GitHub-hosted queue. Anyone with write access
+# (people or agents) may start it; nothing runs until Khaliq approves the
+# fast-path environment.
+# npm publishing here uses trusted publishing (OIDC bound to publish.yml), so
+# the fast path does not publish: it packs the @relayflows/* packages with
+# `npm pack` and uploads the tarballs as a workflow artifact. It never
+# publishes to npm, never creates a release and never moves a dist-tag.
+name: fast-path
+run-name: fast-path ${{ inputs.ref }} (${{ inputs.reason }})
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to check (a PR branch is fine)
+        required: true
+        default: main
+      reason:
+        description: Why this needs the fast path
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: fast-path-${{ inputs.ref }}
+  cancel-in-progress: false
+env:
+  NPM_CONFIG_FUND: false
+jobs:
+  test:
+    name: Test and typecheck
+    environment: fast-path
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: npm test
+
+  pack:
+    needs: test
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.test.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Build packages
+        run: |
+          # Primitives first: core imports their built types/dist (same order as publish.yml).
+          npm run build --workspace=packages/github-primitive
+          npm run build --workspace=packages/slack-primitive
+          npm run build --workspace=packages/browser-primitive
+          npm run build --workspace=packages/core
+          npm run build --workspace=packages/cli
+      - name: Pack packages
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/fast-path-packs"
+          for pkg in core cli github-primitive slack-primitive browser-primitive; do
+            (cd "packages/$pkg" && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/fast-path-packs")
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages-${{ needs.test.outputs.sha }}
+          path: fast-path-packs/*.tgz
+          if-no-files-found: error
+      - name: Summary
+        env:
+          REF: ${{ inputs.ref }}
+          SHA: ${{ needs.test.outputs.sha }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "### relayflows fast path"
+            echo "- ref: \`$REF\` at \`$SHA\`"
+            echo "- reason: $REASON"
+            echo "- artifact: \`npm-packages-$SHA\` (not published to npm; trusted publishing is bound to publish.yml)"
+            echo "- tarballs:"
+            for f in fast-path-packs/*.tgz; do echo "  - \`$(basename "$f")\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
